@@ -31,6 +31,9 @@ export default function RunsList({
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const runItemsRef = useRef<Map<number, HTMLDivElement>>(new Map());
+  const userScrollLockRef = useRef(false);
+  const programmaticScrollRef = useRef(false);
+  const programmaticScrollTimeoutRef = useRef<number | null>(null);
 
   // Filter runs based on start and end filters
   const filteredRuns = runs.filter((run) => {
@@ -43,6 +46,32 @@ export default function RunsList({
   const _onSelectRun = (runId: number) => {
     onSelectRun(runId);
     setIsPlaying(false);
+  };
+
+  const isRunVisible = (runId: number) => {
+    const container = listContainerRef.current;
+    const element = runItemsRef.current.get(runId);
+    if (!container || !element) return true;
+
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+
+    return (
+      elementRect.bottom > containerRect.top && elementRect.top < containerRect.bottom
+    );
+  };
+
+  const markUserScrolling = () => {
+    if (!isPlaying) return;
+
+    userScrollLockRef.current = true;
+
+    // If the currently selected run is no longer visible, continuing playback
+    // would require auto-scrolling (which is exactly what the user is trying
+    // to avoid). Pause instead.
+    if (selectedRunId !== null && !isRunVisible(selectedRunId)) {
+      setIsPlaying(false);
+    }
   };
 
   // Auto-play functionality
@@ -59,6 +88,15 @@ export default function RunsList({
           run => run === filteredRuns[nextIndex]
         );
         
+        if (userScrollLockRef.current) {
+          // Avoid changing scroll position while the user is scrolling.
+          // If the next item isn't already visible, pause instead.
+          if (!isRunVisible(originalIndex)) {
+            setIsPlaying(false);
+            return;
+          }
+        }
+
         onSelectRun(originalIndex);
       }, 1500);
     } else if (timerRef.current) {
@@ -73,21 +111,44 @@ export default function RunsList({
     };
   }, [isPlaying, selectedRunId, filteredRuns, runs, onSelectRun]);
 
+  useEffect(() => {
+    return () => {
+      if (programmaticScrollTimeoutRef.current) {
+        window.clearTimeout(programmaticScrollTimeoutRef.current);
+      }
+    };
+  }, []);
+
   // Scroll selected run into view when it changes
   useEffect(() => {
-    if (selectedRunId !== null && isPlaying) {
+    if (selectedRunId !== null && isPlaying && !userScrollLockRef.current) {
       const selectedElement = runItemsRef.current.get(selectedRunId);
       if (selectedElement && listContainerRef.current) {
+        programmaticScrollRef.current = true;
         selectedElement.scrollIntoView({
           behavior: 'smooth',
           block: 'nearest'
         });
+
+        if (programmaticScrollTimeoutRef.current) {
+          window.clearTimeout(programmaticScrollTimeoutRef.current);
+        }
+        programmaticScrollTimeoutRef.current = window.setTimeout(() => {
+          programmaticScrollRef.current = false;
+          programmaticScrollTimeoutRef.current = null;
+        }, 1000);
       }
     }
   }, [selectedRunId, isPlaying]);
 
   const togglePlayPause = () => {
-    setIsPlaying(prev => !prev);
+    setIsPlaying(prev => {
+      const next = !prev;
+      if (next) {
+        userScrollLockRef.current = false;
+      }
+      return next;
+    });
   };
 
   return (
@@ -126,7 +187,18 @@ export default function RunsList({
         </div>
       </div>
 
-      <div ref={listContainerRef} className="flex-1 overflow-y-auto overflow-x-hidden space-y-3 pr-1">
+      <div
+        ref={listContainerRef}
+        className="flex-1 overflow-y-auto overflow-x-hidden space-y-3 pr-1"
+        onWheel={markUserScrolling}
+        onTouchStart={markUserScrolling}
+        onTouchMove={markUserScrolling}
+        onScroll={() => {
+          if (!isPlaying) return;
+          if (programmaticScrollRef.current) return;
+          markUserScrolling();
+        }}
+      >
         {filteredRuns.map((run) => {
           const originalIndex = runs.indexOf(run);
           return (
