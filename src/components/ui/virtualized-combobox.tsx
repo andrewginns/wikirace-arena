@@ -187,6 +187,7 @@ interface VirtualizedComboboxProps {
   searchPlaceholder?: string;
   width?: string;
   height?: string;
+  portalContainer?: HTMLElement | null;
   value: string;
   onValueChange: (value: string) => void;
 }
@@ -198,9 +199,9 @@ export function VirtualizedCombobox({
   onValueChange,
   width = "400px",
   height = "400px",
+  portalContainer,
 }: VirtualizedComboboxProps) {
   const [open, setOpen] = React.useState(false);
-  const [selectedOption, setSelectedOption] = React.useState("");
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -218,7 +219,7 @@ export function VirtualizedCombobox({
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="p-0" style={{ width: width }}>
+      <PopoverContent className="p-0" style={{ width: width }} container={portalContainer}>
         <VirtualizedCommand
           height={height}
           options={options.map((option) => ({ value: option, label: option }))}

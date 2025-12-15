@@ -1,16 +1,18 @@
-from base64 import b64encode
 import sqlite3
 import json
 import os
+import re
+from urllib.parse import quote
 from typing import Tuple, List, Optional
 from functools import lru_cache
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import uvicorn
-from fastapi.responses import FileResponse, RedirectResponse
-import requests
+import litellm
+import aiohttp
 
 app = FastAPI(title="WikiSpeedia API")
 
@@ -23,10 +25,26 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-CLIENT_SECRET = os.getenv("HUGGINGFACE_CLIENT_SECRET")
-IS_PROD = os.getenv("VITE_ENV") == "production"
-print("CLIENT_SECRET:", CLIENT_SECRET)
-print("IS_PROD:", IS_PROD)
+
+SIMPLEWIKI_ORIGIN = "https://simple.wikipedia.org"
+
+
+class LLMChatRequest(BaseModel):
+    model: str
+    prompt: str
+    max_tokens: int = 512
+    temperature: Optional[float] = None
+    api_base: Optional[str] = None
+    # Advanced (provider-specific) parameters.
+    # LiteLLM supports `reasoning_effort` for OpenAI reasoning models, and also maps it
+    # to the appropriate underlying fields for providers like Anthropic.
+    reasoning_effort: Optional[str] = None
+    # Alias for providers that expose this as "effort" (we map to reasoning_effort).
+    effort: Optional[str] = None
+
+
+class LLMChatResponse(BaseModel):
+    content: str
 class ArticleResponse(BaseModel):
     title: str
     links: List[str]
@@ -70,9 +88,140 @@ class SQLiteDB:
 
 
 # Initialize database connection
-db = SQLiteDB(
-    os.getenv("WIKISPEEDIA_DB_PATH", "/Users/jts/daily/wikihop/db/data/wikihop.db")
+default_db_path = os.path.join(
+    os.path.dirname(__file__), "parallel_eval", "wikihop.db"
 )
+db_path = os.getenv("WIKISPEEDIA_DB_PATH", default_db_path)
+
+if not os.path.exists(db_path):
+    raise RuntimeError(
+        "WIKISPEEDIA_DB_PATH not found at "
+        + db_path
+        + ". Generate it with `uv run python get_wikihop.py --output parallel_eval/wikihop.db` "
+        + "or set WIKISPEEDIA_DB_PATH to a valid SQLite database."
+    )
+
+db = SQLiteDB(db_path)
+
+
+def _inject_base_href(html: str) -> str:
+    base_tag = f'<base href="{SIMPLEWIKI_ORIGIN}/" />'
+    head_match = re.search(r"<head[^>]*>", html, flags=re.IGNORECASE)
+    if not head_match:
+        return base_tag + html
+
+    insert_at = head_match.end()
+    return html[:insert_at] + base_tag + html[insert_at:]
+
+
+def _strip_script_tags(html: str) -> str:
+    # Prevent third-party scripts from interfering; we only need the content.
+    return re.sub(r"(?is)<script\b.*?</script>", "", html)
+
+
+def _inject_wiki_bridge(html: str) -> str:
+    script = """
+<script>
+(function () {
+  function decodePart(raw) {
+    try {
+      return decodeURIComponent(raw)
+    } catch {
+      return raw
+    }
+  }
+
+  function titleFromHref(href) {
+    if (!href) return null
+    try {
+      var url = new URL(href, "https://simple.wikipedia.org/")
+      if (!url.pathname || !url.pathname.startsWith("/wiki/")) return null
+      var title = url.pathname.slice("/wiki/".length)
+      title = decodePart(title)
+      title = title.replaceAll("_", " ")
+      return title
+    } catch {
+      return null
+    }
+  }
+
+  function toProxyPath(title) {
+    return "/wiki/" + encodeURIComponent(title.replaceAll(" ", "_"))
+  }
+
+  function notifyParentCurrentTitle() {
+    try {
+      var raw = location.pathname.startsWith("/wiki/")
+        ? location.pathname.slice("/wiki/".length)
+        : ""
+      if (!raw) return
+      var title = decodePart(raw).replaceAll("_", " ")
+      if (!title) return
+      window.parent.postMessage({ type: "wikirace:navigate", title: title }, "*")
+    } catch {
+      // ignore
+    }
+  }
+
+  document.addEventListener(
+    "click",
+    function (event) {
+      var target = event.target
+      if (!(target instanceof Element)) return
+      var anchor = target.closest("a")
+      if (!anchor) return
+
+      // allow opening in new tab / non-left clicks
+      if (event.defaultPrevented) return
+      if (event.button !== 0) return
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+
+      var title = titleFromHref(anchor.getAttribute("href") || anchor.href)
+      if (!title) return
+
+      // ignore same-page section links
+      try {
+        if (title.replaceAll("_", " ") === decodePart(location.pathname.slice("/wiki/".length)).replaceAll("_", " ") && anchor.hash) {
+          return
+        }
+      } catch {
+        // ignore
+      }
+
+      event.preventDefault()
+
+      try {
+        window.parent.postMessage({ type: "wikirace:navigate", title: title }, "*")
+      } catch {
+        // ignore
+      }
+
+      window.location.href = toProxyPath(title)
+    },
+    true
+  )
+
+  // Keep parent state in sync even if navigation happens via browser controls
+  // (back/forward) or non-standard links.
+  notifyParentCurrentTitle()
+  window.addEventListener("popstate", notifyParentCurrentTitle)
+})()
+</script>
+"""
+
+    body_close_match = re.search(r"</body\s*>", html, flags=re.IGNORECASE)
+    if not body_close_match:
+        return html + script
+
+    insert_at = body_close_match.start()
+    return html[:insert_at] + script + html[insert_at:]
+
+
+def _rewrite_wiki_html(html: str) -> str:
+    html = _strip_script_tags(html)
+    html = _inject_base_href(html)
+    html = _inject_wiki_bridge(html)
+    return html
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -87,7 +236,7 @@ async def get_all_articles():
     return db.get_all_articles()
 
 
-@app.get("/get_article_with_links/{article_title}", response_model=ArticleResponse)
+@app.get("/get_article_with_links/{article_title:path}", response_model=ArticleResponse)
 async def get_article(article_title: str):
     """Get article and its links by title"""
     title, links = db.get_article_with_links(article_title)
@@ -96,55 +245,92 @@ async def get_article(article_title: str):
     return ArticleResponse(title=title, links=links)
 
 
-@app.get("/auth/callback")
-async def auth_callback(request: Request):
+@app.get("/wiki/{article_title:path}", response_class=HTMLResponse)
+async def wiki_proxy(article_title: str):
+    """Proxy a Simple Wikipedia page and inject a click bridge.
 
-    OAUTH_API_BASE = "https://huggingface.co/oauth/token"
-    CLIENT_ID = "a67ef241-fb7e-4300-a6bd-8430a7565c9a"
+    The UI uses this in an <iframe> so that clicks inside the page can be turned
+    into game moves.
+    """
 
-    code = request.query_params.get("code")
-    if not code:
-        raise HTTPException(status_code=400, detail="No code provided")
+    safe_title = article_title.replace(" ", "_")
+    remote_url = f"{SIMPLEWIKI_ORIGIN}/wiki/{quote(safe_title, safe='')}"
 
-    response = requests.post(
-        OAUTH_API_BASE,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": f"Basic {b64encode(f'{CLIENT_ID}:{CLIENT_SECRET}'.encode()).decode()}",
-        },
-        data={
-            "client_id": CLIENT_ID,
-            "code": code,
-            "grant_type": "authorization_code",
-            "redirect_uri": (
-                "http://localhost:8000/auth/callback"
-                if not IS_PROD
-                else "https://huggingfacetb-wikiracing-llms.hf.space/auth/callback"
-            ),
-        },
-    )
+    timeout = aiohttp.ClientTimeout(total=20)
+    headers = {"User-Agent": "wikiracing-llms"}
 
-    # response.json() =
-    # {
-    #     "access_token": "hf_oauth_eyJhbGciOiJFZERTQSJ9.eyJzY29wZSI6WyJvcGVuaWQiLCJwcm9maWxlIiwiZW1haWwiLCJpbmZlcmVuY2UtYXBpIl0sImF1ZCI6Imh0dHBzOi8vaHVnZ2luZ2ZhY2UuY28iLCJvYXV0aEFwcCI6ImE2N2VmMjQxLWZiN2UtNDMwMC1hNmJkLTg0MzBhNzU2NWM5YSIsInNlc3Npb25JZCI6IjY3YTBkYjk3OWNmZDQ3ZGFkOGNmNDMwNyIsImlhdCI6MTc0NjIxOTEwOCwic3ViIjoiNjE3OGQ4NDIyNjczMjBhYmI5OWRmNzc2IiwiZXhwIjoxNzQ2MjQ3OTA4LCJpc3MiOiJodHRwczovL2h1Z2dpbmdmYWNlLmNvIn0.TNK7Nb2X22LHlFqleo6rzJjBngjTWpVIksE1Mw7m8vVxgr7CBbK_a1J4cW488n02391qqopcaNlZKFP8noZSAA",
-    #     "token_type": "bearer",
-    #     "expires_in": 28799,
-    #     "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI2MTc4ZDg0MjI2NzMyMGFiYjk5ZGY3NzYiLCJuYW1lIjoiSmFzb24gU3RpbGxlcm1hbiIsInByZWZlcnJlZF91c2VybmFtZSI6InN0aWxsZXJtYW4iLCJwcm9maWxlIjoiaHR0cHM6Ly9odWdnaW5nZmFjZS5jby9zdGlsbGVybWFuIiwicGljdHVyZSI6Imh0dHBzOi8vaHVnZ2luZ2ZhY2UuY28vYXZhdGFycy84NzM5NzA1ZWY3ZWFiYzk0NWExZWYzYzA3MTk2YWYxMy5zdmciLCJlbWFpbCI6Imphc29uLnQuc3RpbGxlcm1hbkBnbWFpbC5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiYXVkIjoiYTY3ZWYyNDEtZmI3ZS00MzAwLWE2YmQtODQzMGE3NTY1YzlhIiwiYXV0aF90aW1lIjoxNzQ2MjE5MTA4LCJpYXQiOjE3NDYyMTkxMDgsImV4cCI6MTc0NjIyMjcwOCwiaXNzIjoiaHR0cHM6Ly9odWdnaW5nZmFjZS5jbyJ9.pB7j-jkxxMG3GJNzipMNCsKQimk8_R0TcPrwi-Kln6qXcSccwGcWJvyMZvFRHjKB779UkMTzgCO-eY1CINX75KaRALLS_Eu0w448F_5LMixwpBXA6dntXBEdP69VLXakpXaPHjFY2HuvUN7fbE8e2_v4a-s7RRwHTDJIcxyH2Bd_OUpebFy1N6RNB_9MIL3jxXhsXyLNL2uDry0WIB52BJKBXB4EzE12HDGgNaWR6lrqr4nvjAExsGcTwarPhFSA5ndcbgh82vJxB3rVFhSU4iZ5AmMV1mDX6SgRVdPmWZPgTBwGeGlVN-OAHvLlNJ9FZ_i0qjrtA5IRU0o6ctKrfw",
-    #     "scope": "openid profile email inference-api",
-    #     "refresh_token": "hf_oauth__refresh_RiVshOppmioFVoxvYMXSPkMdyyzbyIqadj",
-    # }
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(remote_url, allow_redirects=True) as response:
+                if response.status != 200:
+                    raise HTTPException(
+                        status_code=response.status,
+                        detail=f"Failed to fetch wiki page ({response.status})",
+                    )
+                html = await response.text()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
-    print(response.json())
-
-    # redirect to the home page with access token and id token in the url
-    return RedirectResponse(url=f"/?access_token={response.json()['access_token']}&id_token={response.json()['id_token']}")
-
-    """Auth callback endpoint"""
-    return {"message": "Auth callback received"}
+    return HTMLResponse(content=_rewrite_wiki_html(html))
 
 
-# Mount the dist folder for static files
-app.mount("/", StaticFiles(directory="dist", html=True), name="static")
+@app.post("/llm/chat", response_model=LLMChatResponse)
+async def llm_chat(request: LLMChatRequest):
+    """LLM chat endpoint backed by LiteLLM.
+
+    The frontend uses this to generate the agent's next move.
+
+    Configure provider keys via environment variables (e.g. OPENAI_API_KEY,
+    ANTHROPIC_API_KEY, etc.). For local OpenAI-compatible servers (vLLM, etc.),
+    pass `api_base` and optionally set `OPENAI_API_KEY=EMPTY`.
+    """
+
+    kwargs: dict = {
+        "model": request.model,
+        "messages": [{"role": "user", "content": request.prompt}],
+        "max_tokens": request.max_tokens,
+    }
+
+    if request.temperature is not None:
+        kwargs["temperature"] = request.temperature
+
+    reasoning_effort = request.reasoning_effort or request.effort
+    if reasoning_effort is not None:
+        reasoning_effort = reasoning_effort.strip()
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+
+    if request.api_base:
+        kwargs["api_base"] = request.api_base
+        # Many OpenAI-compatible local servers ignore auth, but LiteLLM still
+        # expects a key for OpenAI-style providers.
+        if "/" not in request.model or request.model.startswith(
+            ("openai/", "hosted_vllm/")
+        ):
+            kwargs["api_key"] = os.getenv("OPENAI_API_KEY") or "EMPTY"
+
+    try:
+        response = await litellm.acompletion(**kwargs)
+        content = response.choices[0].message.content
+        if not content:
+            raise RuntimeError("Model returned empty content")
+        return LLMChatResponse(content=content)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# Mount the dist folder for static files (production).
+#
+# In local development you typically run the Vite dev server (`yarn dev`) and only
+# need the API routes. Starlette's StaticFiles raises if the directory doesn't
+# exist, so we only mount when `dist/` is present.
+dist_dir = os.path.join(os.path.dirname(__file__), "dist")
+if os.path.isdir(dist_dir):
+    app.mount("/", StaticFiles(directory=dist_dir, html=True), name="static")
+else:
+    print(f"Static dist/ not found at {dist_dir}; skipping static file mount")
 
 
 if __name__ == "__main__":

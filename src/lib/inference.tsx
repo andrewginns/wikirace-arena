@@ -1,147 +1,64 @@
-import { InferenceClient } from "@huggingface/inference";
-import { useState } from "react";
+import { useState } from 'react'
+import { API_BASE } from '@/lib/constants'
 
-export default async function inference({
-  prompt,
-  model = "Qwen/Qwen3-235B-A22B",
-  apiKey,
-  maxTokens = 512
-}: {
-  prompt: string,
-  model?: string,
-  apiKey?: string,
-  maxTokens?: number
-}) {
-  if (!apiKey) {
-    const token = window.localStorage.getItem("huggingface_access_token");
-    if (!token) {
-      throw new Error("You must be signed in to use the inference API!");
-    }
-    apiKey = token;
-  }
-
-  console.log("Inference", prompt, model, apiKey);
-  const client = new InferenceClient(apiKey);
-
-  const chatCompletion = await client.chatCompletion({
-    provider: "fireworks-ai",
-    model: model,
-    messages: [
-      {
-        role: "user",
-        content: prompt,
-      },
-    ],
-    max_tokens: maxTokens,
-  });
-  
-
-  console.log("Inference response", chatCompletion.choices[0].message);
-  return chatCompletion.choices[0].message;
+type InferenceArgs = {
+  prompt: string
+  model: string
+  maxTokens: number
+  apiBase?: string
 }
 
-export function useInferenceOld({ apiKey }) {
-  const [isLoading, setIsLoading] = useState(false);
-  const [partialText, setPartialText] = useState("");
-  const [inferenceResult, setInferenceResult] = useState("");
-  const [error, setError] = useState<string | null>(null);
+export function useInference() {
+  const [isLoading, setIsLoading] = useState(false)
+  const [partialText, setPartialText] = useState('')
+  const [inferenceResult, setInferenceResult] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
   const inferenceInternal = async ({
     prompt,
     model,
     maxTokens,
-  }: {
-    prompt: string;
-    model: string;
-    maxTokens: number;
-  }) => {
-    setIsLoading(true);
-    setPartialText("boop boop partial text");
+    apiBase,
+  }: InferenceArgs) => {
+    setIsLoading(true)
+    setPartialText('')
+    setError(null)
 
     try {
-      const result = await inference({
-        prompt,
-        model,
-        apiKey,
-        maxTokens,
-      });
+      const response = await fetch(`${API_BASE}/llm/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          prompt,
+          max_tokens: maxTokens,
+          api_base: apiBase || null,
+        }),
+      })
 
-      setInferenceResult(result.content);
-      setIsLoading(false);
-
-      return result.content;
-    } catch (error) {
-      console.error("Error in inference", error);
-      setError(error.message);
-      setIsLoading(false);
-      return null;
-    }
-  };
-
-  const status = isLoading ? "thinking" : error ? "error" : "done";
-
-  return {
-    status,
-    partialText,
-    inferenceResult,
-    error,
-    inference: inferenceInternal,
-  };
-}
-
-
-export function useInference({ apiKey }) {
-  const [isLoading, setIsLoading] = useState(false);
-  const [partialText, setPartialText] = useState("");
-  const [inferenceResult, setInferenceResult] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const inferenceInternal = async ({
-    prompt,
-    model,
-    maxTokens,
-  }: {
-    prompt: string;
-    model: string;
-    maxTokens: number;
-  }) => {
-    setIsLoading(true);
-    setPartialText("");
-
-    const client = new InferenceClient(apiKey);
-
-    try {
-      const stream = client.chatCompletionStream({
-        provider: "nebius",
-        model,
-        maxTokens,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-      });
-
-      let result = "";
-
-      for await (const chunk of stream) {
-        result += chunk.choices[0].delta.content;
-        setPartialText(result);
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`LLM request failed (${response.status}): ${text}`)
       }
 
-      setIsLoading(false);
+      const data = await response.json()
+      const content = data.content || ''
 
-      setInferenceResult(result);
+      setInferenceResult(content)
+      setIsLoading(false)
 
-      return {status: "success", result};
-    } catch (error) {
-      console.error("Error in inference", error);
-      setError(error.message);
-      setIsLoading(false);
-      return {status: "error", result: error.message};
+      return { status: 'success', result: content }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setIsLoading(false)
+      return { status: 'error', result: message }
     }
-  };
+  }
 
-  const status = isLoading ? "thinking" : error ? "error" : "done";
+  const status = isLoading ? 'thinking' : error ? 'error' : 'done'
 
   return {
     status,
@@ -149,5 +66,6 @@ export function useInference({ apiKey }) {
     inferenceResult,
     error,
     inference: inferenceInternal,
-  };
+  }
 }
+

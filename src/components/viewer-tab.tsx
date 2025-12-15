@@ -17,7 +17,19 @@ import {
 import { Run as ForceGraphRun } from "@/components/reasoning-trace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { UploadIcon } from "lucide-react";
+import { Trash2, UploadIcon } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { addViewerDataset, removeViewerDataset, useViewerDatasetsStore } from "@/lib/viewer-datasets";
 
 const defaultModels = {
   "Qwen3-14B": q3Results,
@@ -49,12 +61,38 @@ export default function ViewerTab({
 }: {
   handleTryRun: (startArticle: string, destinationArticle: string) => void;
 }) {
+  const { datasets } = useViewerDatasetsStore();
   const [selectedRun, setSelectedRun] = useState<number | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>("Qwen3-14B");
   const [modelStats, setModelStats] = useState<ModelStats | null>(null);
-  const [models, setModels] = useState(defaultModels);
+  const [importText, setImportText] = useState<string>("");
+  const [importName, setImportName] = useState<string>("");
+  const [importError, setImportError] = useState<string | null>(null);
+  
+  const savedModels = useMemo(() => {
+    const obj: Record<string, unknown> = {};
+    for (const dataset of datasets) {
+      obj[`Saved: ${dataset.name}`] = dataset.data;
+    }
+    return obj;
+  }, [datasets]);
+  
+  const models = useMemo(() => {
+    return {
+      ...defaultModels,
+      ...savedModels,
+    };
+  }, [savedModels]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    // Keep selected model valid as models change.
+    if (!(selectedModel in models)) {
+      const first = Object.keys(models)[0];
+      if (first) setSelectedModel(first);
+    }
+  }, [models]);
 
   useEffect(() => {
     // Convert the model data to the format expected by RunsList
@@ -145,16 +183,10 @@ export default function ViewerTab({
         
         // Create a filename-based model name, removing extension and path
         const fileName = file.name.replace(/\.[^/.]+$/, "");
-        const modelName = `Custom: ${fileName}`;
-        
-        // Add the new model to the models object
-        setModels(prev => ({
-          ...prev,
-          [modelName]: jsonData
-        }));
-        
-        // Select the newly added model
-        setSelectedModel(modelName);
+        const modelName = fileName;
+
+        addViewerDataset({ name: modelName, data: jsonData });
+        setSelectedModel(`Saved: ${modelName}`);
       } catch (error) {
         alert(`Error parsing JSON file: ${error.message}`);
       }
@@ -171,8 +203,25 @@ export default function ViewerTab({
     fileInputRef.current?.click();
   };
 
+  const handleImportFromText = () => {
+    setImportError(null);
+    try {
+      const jsonData = JSON.parse(importText);
+      if (!jsonData.runs || !Array.isArray(jsonData.runs)) {
+        throw new Error("Invalid JSON format. JSON must contain a 'runs' array.");
+      }
+      const name = importName.trim() || "Pasted dataset";
+      addViewerDataset({ name, data: jsonData });
+      setSelectedModel(`Saved: ${name}`);
+      setImportText("");
+      setImportName("");
+    } catch (error) {
+      setImportError(error.message);
+    }
+  };
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 h-[calc(100vh-200px)] max-h-[calc(100vh-200px)] overflow-hidden p-2">
+    <div className="grid grid-cols-1 md:grid-cols-12 gap-4 h-[calc(100vh_-_200px)] max-h-[calc(100vh_-_200px)] overflow-hidden p-2">
      <Card className="p-3 col-span-12 row-start-1">
        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
          <div className="flex-shrink-0">
@@ -206,6 +255,85 @@ export default function ViewerTab({
              onChange={handleFileUpload} 
            />
          </Button>
+
+         <Dialog>
+           <DialogTrigger asChild>
+             <Button variant="outline" size="sm" className="flex items-center gap-1">
+               <UploadIcon size={14} />
+               <span>Paste JSON</span>
+             </Button>
+           </DialogTrigger>
+           <DialogContent className="max-w-3xl">
+             <DialogHeader>
+               <DialogTitle>Import dataset JSON</DialogTitle>
+               <DialogDescription>
+                 Paste a viewer-compatible JSON file (must contain a top-level 'runs' array).
+               </DialogDescription>
+             </DialogHeader>
+             <div className="space-y-3">
+               <div>
+                 <Label htmlFor="dataset-name">Name</Label>
+                 <Input
+                   id="dataset-name"
+                   value={importName}
+                   onChange={(e) => setImportName(e.target.value)}
+                   placeholder="My results"
+                 />
+               </div>
+               <textarea
+                 className="w-full h-64 text-xs font-mono border rounded-md p-2"
+                 value={importText}
+                 onChange={(e) => setImportText(e.target.value)}
+                 placeholder='{"runs": [...], ...}'
+               />
+               {importError && (
+                 <div className="text-sm text-red-800 bg-red-50 border border-red-200 rounded-md p-2">
+                   {importError}
+                 </div>
+               )}
+             </div>
+             <DialogFooter>
+               <Button onClick={handleImportFromText} disabled={importText.trim().length === 0}>
+                 Import
+               </Button>
+             </DialogFooter>
+           </DialogContent>
+         </Dialog>
+
+         {datasets.length > 0 && (
+           <Dialog>
+             <DialogTrigger asChild>
+               <Button variant="outline" size="sm" className="flex items-center gap-1">
+                 <Trash2 size={14} />
+                 <span>Manage</span>
+               </Button>
+             </DialogTrigger>
+             <DialogContent className="max-w-2xl">
+               <DialogHeader>
+                 <DialogTitle>Saved datasets</DialogTitle>
+                 <DialogDescription>
+                   Remove datasets saved locally in this browser.
+                 </DialogDescription>
+               </DialogHeader>
+               <div className="space-y-2">
+                 {datasets.map((d) => (
+                   <div key={d.id} className="flex items-center justify-between gap-2 border rounded-md p-2">
+                     <div className="text-sm font-medium">{d.name}</div>
+                     <Button
+                       variant="outline"
+                       size="sm"
+                       onClick={() => {
+                         removeViewerDataset(d.id);
+                       }}
+                     >
+                       Remove
+                     </Button>
+                   </div>
+                 ))}
+               </div>
+             </DialogContent>
+           </Dialog>
+         )}
          
          {modelStats && (
            <div className="flex flex-wrap gap-1.5 items-center">
@@ -218,7 +346,7 @@ export default function ViewerTab({
              <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
                <span className="text-xs font-medium">Mean:</span>
                <span className="text-xs font-semibold">{modelStats.avgSteps.toFixed(1)}</span>
-               <span className="text-xs text-muted-foreground">±{modelStats.stdDevSteps.toFixed(1)}</span>
+               <span className="text-xs text-muted-foreground">+/-{modelStats.stdDevSteps.toFixed(1)}</span>
              </Badge>
              
              <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">

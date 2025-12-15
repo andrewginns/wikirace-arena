@@ -1,38 +1,108 @@
-## Setup env
+# Parallel Eval (CLI)
+
+This folder contains the command-line tooling for:
+
+- Running a single WikiRace as a **human** or an **LLM agent** (`game.py`)
+- Running many races in parallel to benchmark a model (`proctor.py`)
+
+All Python commands in this repo are intended to be run via `uv`.
+
+## Setup
+
+Install Python dependencies once from the repo root:
 
 ```bash
-uv venv
-source .venv/bin/activate
-uv pip install -r requirements.txt
-
-# pull wikihop db
-wget https://huggingface.co/datasets/HuggingFaceTB/simplewiki-pruned-text-350k/blob/main/wikihop.db -o wikihop.db
+uv sync
 ```
 
-## Which models does it support?
-Under the hood it uses [LiteLLM](https://github.com/BerriAI/litellm) so you can use any major model (dont forget to export appropriate api key), or host any model on huggingface via [vLLM](https://github.com/vllm-project/vllm). 
+### Get the `wikihop.db` database
 
-
-## Play the game
-```
-# play the game with cli
-python game.py --human --start 'Saint Lucia' --end 'Italy' --db wikihop.db
-
-# have the agent play the game (gpt-4o)
-export OPENAI_API_KEY=sk_xxxxx
-python game.py --agent --start 'Saint Lucia' --end 'Italy' --db wikihop.db --model gpt-4o --max-steps 20
-
-# run an evaluation suite with qwen3 hosted on vLLM, 200 workers
-python proctor.py --model "hosted_vllm/Qwen/Qwen3-30B-A3B" --api-base "http://localhost:8000/v1" --workers 200
-
-# this will produce a `proctor_tmp/proctor_1-final-results.json` that can be visualized in the space, as well as the individual reasoning traces for each run. This is resumable if it is stopped and is idempotent.
-```
-
-## JQ command to strip out reasoning traces
-This output file will be very large because it contains all the reasoning traces. You can shrink it down and still be able to visualize it with
+Generate the DB via the script (recommended/required):
 
 ```bash
-jq '{                                  
+uv run python get_wikihop.py --output parallel_eval/wikihop.db
+```
+
+Why: direct download URLs have been brittle; a 404/error page saved to disk can cause `SQLITE_NOTADB` when opened by SQLite.
+
+## Which models are supported?
+
+Agent moves are generated via [LiteLLM](https://github.com/BerriAI/litellm), so you can use most major model providers.
+
+You typically just need to export the right API key for your provider, for example:
+
+```bash
+export OPENAI_API_KEY=...
+# or: export ANTHROPIC_API_KEY=...
+# or: export GEMINI_API_KEY=...
+```
+
+Common providers:
+
+- OpenAI: `OPENAI_API_KEY`, model like `gpt-4o-mini`
+- Anthropic: `ANTHROPIC_API_KEY`, model like `anthropic/claude-3-haiku-20240307`
+- Google AI Studio (Gemini): `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), model like `gemini/gemini-1.5-pro`
+
+For OpenAI-compatible hosted endpoints (vLLM, etc.), pass `--api-base`.
+If your server doesn’t require auth, setting `OPENAI_API_KEY=EMPTY` is often enough to satisfy client libraries.
+
+## Play a single game
+
+### Human (interactive)
+
+```bash
+uv run python parallel_eval/game.py --human --start 'Saint Lucia' --end 'Italy' --db parallel_eval/wikihop.db
+```
+
+### Agent (LLM)
+
+```bash
+export OPENAI_API_KEY=sk_...
+uv run python parallel_eval/game.py --agent --start 'Saint Lucia' --end 'Italy' --db parallel_eval/wikihop.db --model gpt-4o --max-steps 20
+```
+
+Notes:
+
+- `--model` is passed to LiteLLM. Make sure you use a model string LiteLLM understands.
+- `--api-base` defaults to `https://api.openai.com/v1` in `game.py`.
+
+## Run a parallel evaluation (many games)
+
+`proctor.py` runs a full cross-product of `article_list × article_list` (excluding same→same), optionally with multiple trials.
+
+The default article list is `supernodes.json`.
+
+Example: evaluate a vLLM-hosted model with 200 workers:
+
+```bash
+uv run python parallel_eval/proctor.py \
+  --model 'hosted_vllm/Qwen/Qwen3-30B-A3B' \
+  --api-base 'http://localhost:8000/v1' \
+  --workers 200 \
+  --db-path parallel_eval/wikihop.db
+```
+
+Outputs (in `--output-dir`, default `parallel_eval/proctor_tmp`):
+
+- `run_<proctor-id>_<start>_<destination>_<trial>.json` for each run (includes the full step list)
+- `<proctor-id>-final-results.json` summary file aggregating all runs (includes `runs` plus high-level metrics like win rate and hop distribution)
+
+The run files are idempotent: if you re-run the same command, existing run files are skipped.
+
+## Visualize results
+
+The web UI can load the `*-final-results.json` file.
+
+1) Start the web app (see the repo root `README.md`).
+2) Open **View Runs** → **Upload JSON**.
+
+## Shrinking large JSON files
+
+If your results include full LLM conversations in `step.metadata.conversation`, files can get large.
+You can strip the conversation payloads while keeping everything needed for visualization:
+
+```bash
+jq '{
   article_list: .article_list,
   num_trials: .num_trials,
   num_workers: .num_workers,
@@ -42,18 +112,15 @@ jq '{
     model: .model,
     api_base: .api_base,
     max_links: .max_links,
-    max_tries: .max_tries, result: .result,
+    max_tries: .max_tries,
+    result: .result,
     start_article: .start_article,
     destination_article: .destination_article,
     steps: [.steps[] | {
       type: .type,
       article: .article,
-      metadata: (if .metadata.conversation then
-        .metadata | del(.conversation)
-      else
-        .metadata
-      end)
+      metadata: (if (.metadata | has("conversation")) then (.metadata | del(.conversation)) else .metadata end)
     }]
   }]
-}' proctor_tmp/proctor_1-final-results.json > cleaned_data.json
+}' parallel_eval/proctor_tmp/proctor_1-final-results.json > cleaned_data.json
 ```

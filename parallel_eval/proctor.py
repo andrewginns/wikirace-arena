@@ -1,8 +1,23 @@
-from game import AgentPlayer, SQLiteDB, Game
+from pathlib import Path
+
+try:
+    from parallel_eval.game import AgentPlayer, SQLiteDB, Game
+except ModuleNotFoundError:
+    from game import AgentPlayer, SQLiteDB, Game
 import os
 import json
 import asyncio
 import argparse
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def _resolve_local_path(path: str) -> str:
+    p = Path(path)
+    if p.is_absolute():
+        return str(p)
+    return str((SCRIPT_DIR / p).resolve())
 
 
 class Proctor:
@@ -197,6 +212,12 @@ if __name__ == "__main__":
                         help="Path to JSON file with list of articles to test")
 
     args = parser.parse_args()
+
+    # Resolve default relative paths relative to this folder so the script can be
+    # run from anywhere (repo root, a CI runner, etc.).
+    args.db_path = _resolve_local_path(args.db_path)
+    args.article_list = _resolve_local_path(args.article_list)
+    args.output_dir = _resolve_local_path(args.output_dir)
 
     # check if db exists
     if not os.path.exists(args.db_path):
