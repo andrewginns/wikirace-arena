@@ -107,27 +107,34 @@ Remember to format your final answer by explicitly writing out the xml number ta
 interface GameComponentProps {
   player: "me" | "model";
   model?: string;
+  apiBase?: string;
   maxHops: number;
   startPage: string;
   targetPage: string;
   onReset: () => void;
   maxTokens: number;
   maxLinks: number;
+  onHumanMove?: (article: string) => void;
+  onHumanFinish?: (result: "win" | "lose" | "abandoned", finalArticle: string) => void;
 }
 
 export default function GameComponent({
   player,
   model,
+  apiBase,
   maxHops,
   startPage,
   targetPage,
   onReset,
   maxTokens,
   maxLinks,
+  onHumanMove,
+  onHumanFinish,
 }: GameComponentProps) {
   const [currentPage, setCurrentPage] = useState<string>(startPage);
   const [currentPageLinks, setCurrentPageLinks] = useState<string[]>([]);
   const [linksLoading, setLinksLoading] = useState<boolean>(false);
+  const [linksError, setLinksError] = useState<string | null>(null);
   const [hops, setHops] = useState<number>(0);
   const [timeElapsed, setTimeElapsed] = useState<number>(0);
   const [visitedNodes, setVisitedNodes] = useState<string[]>([startPage]);
@@ -141,24 +148,45 @@ export default function GameComponent({
     Record<number | string, boolean>
   >({ game: false });
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastIframeNavigateRef = useRef<{ title: string; at: number } | null>(
+    null
+  );
+  const humanFinishSentRef = useRef(false);
 
   const {
     status: modelStatus,
     partialText,
     inference
-  } = useInference({
-    apiKey:
-      window.localStorage.getItem("huggingface_access_token") || undefined,
-  });
+  } = useInference();
 
   const fetchCurrentPageLinks = useCallback(async () => {
     setLinksLoading(true);
-    const response = await fetch(
-      `${API_BASE}/get_article_with_links/${currentPage}`
-    );
-    const data = await response.json();
-    setCurrentPageLinks(data.links.slice(0, maxLinks));
-    setLinksLoading(false);
+    setLinksError(null);
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/get_article_with_links/${encodeURIComponent(currentPage)}`
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(
+          `Failed to load links for "${currentPage}" (${response.status}): ${text}`
+        );
+      }
+
+      const data = await response.json();
+      if (!data || !Array.isArray(data.links)) {
+        throw new Error("Unexpected API response (missing links array)");
+      }
+
+      setCurrentPageLinks(data.links.slice(0, maxLinks));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setCurrentPageLinks([]);
+      setLinksError(message);
+    } finally {
+      setLinksLoading(false);
+    }
   }, [currentPage, maxLinks]);
 
   useEffect(() => {
@@ -187,17 +215,61 @@ export default function GameComponent({
   const handleLinkClick = (link: string) => {
     if (gameStatus !== "playing") return;
 
+    // Prevent double-counting when the iframe navigates to a section anchor.
+    if (link === currentPage) return;
+
+    if (player === "me") {
+      if (link === targetPage) {
+        if (!humanFinishSentRef.current) {
+          humanFinishSentRef.current = true;
+          onHumanFinish?.("win", link);
+        }
+      } else {
+        onHumanMove?.(link);
+      }
+    }
+
     setCurrentPage(link);
     setHops((prev) => prev + 1);
     setVisitedNodes((prev) => [...prev, link]);
   };
 
+  // Allow navigation by clicking links inside the Wikipedia iframe.
+  useEffect(() => {
+    if (player !== "me") return;
+
+    const allowedOrigins = new Set<string>([window.location.origin]);
+    try {
+      if (API_BASE.startsWith("http")) {
+        allowedOrigins.add(new URL(API_BASE).origin);
+      }
+    } catch {
+      // ignore
+    }
+
+    const handleMessage = (event: MessageEvent) => {
+      if (!allowedOrigins.has(event.origin)) return;
+      const data = event.data;
+      if (!data || typeof data !== "object") return;
+      if (data.type !== "wikirace:navigate") return;
+      if (typeof data.title !== "string" || data.title.length === 0) return;
+
+      const now = Date.now();
+      const last = lastIframeNavigateRef.current;
+      if (last && last.title === data.title && now - last.at < 1000) {
+        return;
+      }
+      lastIframeNavigateRef.current = { title: data.title, at: now };
+
+      handleLinkClick(data.title);
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [player, handleLinkClick]);
+
   const currentRuns = useMemo(() => {
     const q3runs = qwen3Data.runs.filter((run) => run.result === "win");
-
-    if (visitedNodes.length === 0) {
-      return q3runs;
-    }
 
     return [
       {
@@ -206,7 +278,9 @@ export default function GameComponent({
             type: "start",
             article: startPage,
           },
-          ...visitedNodes.map((node) => ({ type: "move", article: node })),
+          ...visitedNodes
+            .slice(1)
+            .map((node) => ({ type: "move", article: node })),
         ],
         start_article: startPage,
         destination_article: targetPage,
@@ -216,6 +290,15 @@ export default function GameComponent({
   }, [visitedNodes, startPage, targetPage]);
 
   const makeModelMove = async () => {
+    if (!model) {
+      pushConvo({
+        role: "error",
+        content: "No model selected.",
+      });
+      setAutoRunning(false);
+      return;
+    }
+
     const prompt = buildPrompt(
       currentPage,
       targetPage,
@@ -229,9 +312,10 @@ export default function GameComponent({
     });
 
     const {status, result: modelResponse} = await inference({
-      model: model,
+      model,
       prompt,
       maxTokens: maxTokens,
+      apiBase: apiBase || undefined,
     });
 
     if (status === "error") {
@@ -298,8 +382,30 @@ export default function GameComponent({
   };
 
   const handleGiveUp = () => {
+    if (player === "me" && !humanFinishSentRef.current) {
+      humanFinishSentRef.current = true;
+      onHumanFinish?.("abandoned", currentPage);
+    }
     setGameStatus("lost");
   };
+
+  useEffect(() => {
+    if (player !== "me") return;
+    if (gameStatus !== "lost") return;
+    if (humanFinishSentRef.current) return;
+
+    humanFinishSentRef.current = true;
+    onHumanFinish?.("lose", currentPage);
+  }, [player, gameStatus, currentPage, onHumanFinish]);
+
+  useEffect(() => {
+    if (player !== "me") return;
+    if (gameStatus !== "won") return;
+    if (humanFinishSentRef.current) return;
+
+    humanFinishSentRef.current = true;
+    onHumanFinish?.("win", currentPage);
+  }, [player, gameStatus, currentPage, onHumanFinish]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -369,7 +475,7 @@ export default function GameComponent({
   }, [gameStatus]);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-12 gap-2 h-[calc(100vh-200px)] grid-rows-[auto_1fr_1fr]">
+    <div className="grid grid-cols-1 md:grid-cols-12 gap-2 h-[calc(100vh_-_200px)] grid-rows-[auto_1fr_1fr]">
       {/* Condensed Game Status Card */}
       <Card className="p-2 col-span-12 h-12 row-start-1">
         <div className="flex items-center justify-between h-full">
@@ -508,23 +614,42 @@ export default function GameComponent({
           </h2>
 
           {gameStatus === "playing" ? (
-            <div className="flex flex-wrap content-start overflow-y-auto h-[calc(100%-2.5rem)]">
-              {currentPageLinks
-                .sort((a, b) => a.localeCompare(b))
-                .map((link) => (
-                  <Button
-                    key={link}
-                    variant="outline"
-                    size="sm"
-                    className="justify-start overflow-hidden text-ellipsis whitespace-nowrap w-[calc(33.333%-0.5rem)] m-[0.25rem]"
-                    onClick={() => handleLinkClick(link)}
-                  >
-                    {link}
-                  </Button>
-                ))}
+            <div className="flex flex-wrap content-start overflow-y-auto h-[calc(100%_-_2.5rem)]">
+              {linksLoading ? (
+                <div className="text-sm text-muted-foreground p-2">
+                  Loading links…
+                </div>
+              ) : linksError ? (
+                <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md p-3 w-full">
+                  <div className="font-medium">Couldn’t load links</div>
+                  <div className="mt-1 break-words">{linksError}</div>
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    Make sure the API is running and `WIKISPEEDIA_DB_PATH` points
+                    to a valid `wikihop.db`.
+                  </div>
+                </div>
+              ) : currentPageLinks.length === 0 ? (
+                <div className="text-sm text-muted-foreground p-2">
+                  No links found for <span className="font-medium">{currentPage}</span>.
+                </div>
+              ) : (
+                [...currentPageLinks]
+                  .sort((a, b) => a.localeCompare(b))
+                  .map((link) => (
+                    <Button
+                      key={link}
+                      variant="outline"
+                      size="sm"
+                      className="justify-start overflow-hidden text-ellipsis whitespace-nowrap w-[calc(33.333%_-_0.5rem)] m-[0.25rem]"
+                      onClick={() => handleLinkClick(link)}
+                    >
+                      {link}
+                    </Button>
+                  ))
+              )}
             </div>
           ) : (
-            <div className="flex items-center justify-center h-[calc(100%-2.5rem)]">
+            <div className="flex items-center justify-center h-[calc(100%_-_2.5rem)]">
               {gameStatus === "won" ? (
                 <div className="bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 p-6 rounded-lg w-full shadow-sm">
                   <div className="flex flex-col items-center text-center">
@@ -589,7 +714,7 @@ export default function GameComponent({
       {player === "model" && (
         <Card className="p-3 md:col-span-6 h-full overflow-hidden row-span-2 row-start-2">
           <h2 className="text-lg font-bold mb-2">LLM Reasoning</h2>
-          <div className="overflow-y-auto h-[calc(100%-2.5rem)] space-y-2 pr-2">
+          <div className="overflow-y-auto h-[calc(100%_-_2.5rem)] space-y-2 pr-2">
             {convo.map((message, index) => {
               const isExpanded = expandedMessages[index] || false;
               
@@ -784,8 +909,15 @@ export default function GameComponent({
 
       {/* Wikipedia view - top right quadrant */}
       <Card className="p-3 md:col-span-6 h-full overflow-hidden row-start-2">
-        <h2 className="text-lg font-bold mb-2">Wikipedia View</h2>
-        <div className="relative w-full h-[calc(100%-2.5rem)] overflow-hidden">
+        <h2 className="text-lg font-bold mb-2">
+          Wikipedia View
+          {player === "me" && (
+            <span className="ml-2 text-xs font-normal text-muted-foreground">
+              Click a link to make a move.
+            </span>
+          )}
+        </h2>
+        <div className="relative w-full h-[calc(100%_-_2.5rem)] overflow-hidden">
           <iframe
             style={{
               transform: "scale(0.5, 0.5)",
@@ -796,9 +928,8 @@ export default function GameComponent({
               top: 0,
               left: 0,
             }}
-            src={`https://simple.wikipedia.org/wiki/${currentPage.replace(
-              " ",
-              "_"
+            src={`${API_BASE}/wiki/${encodeURIComponent(
+              currentPage.replaceAll(" ", "_")
             )}`}
             className="border-0"
           />
