@@ -21,6 +21,8 @@ export type RaceConfig = {
   targetPage: string;
   participants: RaceParticipantDraft[];
   rules: RaceRules;
+  humanTimer?: {
+    autoStartOnFirstAction: boolean;
+  };
 };
-
 
