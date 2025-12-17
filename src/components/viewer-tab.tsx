@@ -63,6 +63,7 @@ export default function ViewerTab({
 }) {
   const { datasets } = useViewerDatasetsStore();
   const [selectedRun, setSelectedRun] = useState<number | null>(null);
+  const [pauseAutoplayToken, setPauseAutoplayToken] = useState<number | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>("Qwen3-14B");
   const [modelStats, setModelStats] = useState<ModelStats | null>(null);
@@ -153,9 +154,15 @@ export default function ViewerTab({
     setSelectedRun(runId);
   };
 
+  const pauseAutoplay = () => {
+    setPauseAutoplayToken(Date.now());
+  };
+
   const filterRuns = useMemo(() => {
     return runs.filter(run => run.result === "win");
   }, [runs]);
+
+  const selectedRunData = selectedRun === null ? null : filterRuns[selectedRun] || null;
 
   // Convert the runs to the format expected by ForceDirectedGraph
   const forceGraphRuns = useMemo(() => {
@@ -378,14 +385,31 @@ export default function ViewerTab({
               onSelectRun={handleRunSelect}
               selectedRunId={selectedRun}
               onTryRun={handleTryRun}
+              pauseToken={pauseAutoplayToken}
             />
           </div>
         </div>
       </div>
 
       <div className="md:col-span-9 max-h-full overflow-hidden">
-        <Card className="w-full h-full flex items-center justify-center p-0 m-0 overflow-hidden">
-          <ForceDirectedGraph runs={forceGraphRuns} runId={selectedRun} />
+        <Card className="w-full h-full p-3 m-0 overflow-hidden flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-medium">Visualization</div>
+            <div className="text-xs text-muted-foreground">
+              {selectedRunData ? "Selected run highlighted" : "Select a run to highlight"}
+            </div>
+          </div>
+
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <div
+              className="w-full h-full"
+              onWheelCapture={pauseAutoplay}
+              onPointerDownCapture={pauseAutoplay}
+              onTouchStartCapture={pauseAutoplay}
+            >
+              <ForceDirectedGraph runs={forceGraphRuns} runId={selectedRun} />
+            </div>
+          </div>
         </Card>
       </div>
     </div>
