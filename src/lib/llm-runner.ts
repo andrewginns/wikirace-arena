@@ -1,5 +1,6 @@
 import { API_BASE } from '@/lib/constants'
 import type { StepV1 } from '@/lib/session-types'
+import { wikiTitlesMatch } from '@/lib/wiki-title'
 
 type RunLlmRaceArgs = {
   startArticle: string
@@ -7,6 +8,7 @@ type RunLlmRaceArgs = {
   model: string
   apiBase?: string
   reasoningEffort?: string
+  resumeFromSteps?: StepV1[]
   maxSteps: number
   maxLinks: number
   maxTokens: number
@@ -139,16 +141,30 @@ export async function runLlmRace({
   model,
   apiBase,
   reasoningEffort,
+  resumeFromSteps,
   maxSteps,
   maxLinks,
   maxTokens,
   signal,
   onStep,
 }: RunLlmRaceArgs) {
-  const pathSoFar: string[] = [startArticle]
-  let current = startArticle
+  const pathSoFar: string[] = []
+  if (resumeFromSteps && resumeFromSteps.length > 0) {
+    for (const step of resumeFromSteps) {
+      const last = pathSoFar[pathSoFar.length - 1]
+      if (step.article && step.article !== last) pathSoFar.push(step.article)
+    }
+  }
+  if (pathSoFar.length === 0) {
+    pathSoFar.push(startArticle)
+  } else if (pathSoFar[0] !== startArticle) {
+    pathSoFar.unshift(startArticle)
+  }
 
-  for (let step = 0; step < maxSteps; step++) {
+  let current = pathSoFar[pathSoFar.length - 1]
+  const movesTaken = Math.max(0, pathSoFar.length - 1)
+
+  for (let step = movesTaken; step < maxSteps; step++) {
     if (signal?.aborted) {
       onStep({
         type: 'lose',
@@ -158,8 +174,7 @@ export async function runLlmRace({
       return { result: 'abandoned' as const }
     }
 
-    if (current === destinationArticle) {
-      onStep({ type: 'win', article: current })
+    if (wikiTitlesMatch(current, destinationArticle)) {
       return { result: 'win' as const }
     }
 
@@ -234,10 +249,10 @@ export async function runLlmRace({
     }
 
     const selected = links[chosenIndex - 1]
-    if (selected === destinationArticle) {
+    if (wikiTitlesMatch(selected, destinationArticle)) {
       onStep({
         type: 'win',
-        article: selected,
+        article: destinationArticle,
         metadata: {
           selected_index: chosenIndex,
           ...llmMetadata,
