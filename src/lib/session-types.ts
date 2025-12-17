@@ -10,8 +10,20 @@ export type SessionV1 = {
   start_article: string
   destination_article: string
   created_at: string
+  rules?: SessionRulesV1
+  human_timer?: HumanTimerSettingsV1
   baseline_llm_run_id?: string
   runs: RunV1[]
+}
+
+export type SessionRulesV1 = {
+  max_hops: number
+  max_links: number
+  max_tokens: number
+}
+
+export type HumanTimerSettingsV1 = {
+  auto_start_on_first_action: boolean
 }
 
 export type RunKind = 'human' | 'llm'
@@ -28,6 +40,8 @@ export type StepV1 = {
   metadata?: Record<string, unknown>
 }
 
+export type RunTimerStateV1 = 'not_started' | 'running' | 'paused'
+
 export type RunV1 = {
   id: string
   kind: RunKind
@@ -37,6 +51,10 @@ export type RunV1 = {
   api_base?: string
   reasoning_effort?: string
 
+  max_steps?: number
+  max_links?: number
+  max_tokens?: number
+
   started_at: string
   finished_at?: string
   status: RunStatus
@@ -44,6 +62,11 @@ export type RunV1 = {
   result?: RunResult
   hops?: number
   duration_ms?: number
+
+  // Human active-time tracking (hotseat). When absent, fall back to wall clock.
+  timer_state?: RunTimerStateV1
+  active_ms?: number
+  last_resumed_at?: string
 
   steps: StepV1[]
 }
