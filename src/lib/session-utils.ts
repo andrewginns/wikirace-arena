@@ -18,8 +18,17 @@ export function computeHops(steps: StepV1[]) {
 
 export function finalizeRun(run: RunV1, result: RunResult, finishedAtIso?: string) {
   const finished_at = finishedAtIso || nowIso()
-  const duration_ms =
-    new Date(finished_at).getTime() - new Date(run.started_at).getTime()
+
+  let duration_ms = new Date(finished_at).getTime() - new Date(run.started_at).getTime()
+
+  if (run.kind === 'human' && run.timer_state) {
+    let activeMs = typeof run.active_ms === 'number' ? run.active_ms : 0
+    if (run.timer_state === 'running' && run.last_resumed_at) {
+      activeMs +=
+        new Date(finished_at).getTime() - new Date(run.last_resumed_at).getTime()
+    }
+    duration_ms = Math.max(0, activeMs)
+  }
 
   return {
     ...run,
@@ -28,6 +37,9 @@ export function finalizeRun(run: RunV1, result: RunResult, finishedAtIso?: strin
     finished_at,
     hops: computeHops(run.steps),
     duration_ms: Math.max(0, duration_ms),
+    ...(run.kind === 'human' && run.timer_state
+      ? { timer_state: 'paused' as const, active_ms: duration_ms, last_resumed_at: undefined }
+      : {}),
   } satisfies RunV1
 }
 
@@ -35,6 +47,24 @@ export function runDisplayName(run: RunV1) {
   if (run.kind === 'human') return run.player_name || 'Human'
   const model = run.model || 'LLM'
   const effort = run.reasoning_effort?.trim()
+  const override = run.player_name?.trim()
+  if (override && override !== model) {
+    const overrideLower = override.toLowerCase()
+    const modelLower = model.toLowerCase()
+    const effortLower = effort?.toLowerCase()
+    const overrideAlreadyIncludesModel = overrideLower.includes(modelLower)
+    const overrideAlreadyIncludesEffort = effortLower
+      ? overrideLower.includes(effortLower)
+      : true
+    if (overrideAlreadyIncludesModel && overrideAlreadyIncludesEffort) {
+      return override
+    }
+
+    const suffixParts = [model]
+    if (effort) suffixParts.push(effort)
+    return `${override} (${suffixParts.join(' • ')})`
+  }
+
   if (effort) return `${model} (${effort})`
   return model
 }

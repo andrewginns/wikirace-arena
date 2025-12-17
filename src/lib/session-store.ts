@@ -1,7 +1,10 @@
 import { useSyncExternalStore } from 'react'
 import type {
+  HumanTimerSettingsV1,
   RunResult,
+  RunTimerStateV1,
   RunV1,
+  SessionRulesV1,
   SessionExportV1,
   SessionSummary,
   SessionV1,
@@ -75,6 +78,7 @@ function updateSession(sessionId: string, updater: (session: SessionV1) => Sessi
   if (!existing) return null
 
   const updated = updater(existing)
+  if (updated === existing) return existing
   setState({
     ...state,
     sessions: {
@@ -90,10 +94,14 @@ export function createSession({
   startArticle,
   destinationArticle,
   title,
+  rules,
+  humanTimer,
 }: {
   startArticle: string
   destinationArticle: string
   title?: string
+  rules?: SessionRulesV1
+  humanTimer?: HumanTimerSettingsV1
 }) {
   const id = makeId('session')
   const created_at = nowIso()
@@ -103,6 +111,8 @@ export function createSession({
     start_article: startArticle,
     destination_article: destinationArticle,
     created_at,
+    rules,
+    human_timer: humanTimer,
     runs: [],
   }
 
@@ -116,6 +126,59 @@ export function createSession({
   })
 
   return session
+}
+
+export function getOrCreateSession({
+  startArticle,
+  destinationArticle,
+  title,
+  rules,
+  humanTimer,
+}: {
+  startArticle: string
+  destinationArticle: string
+  title?: string
+  rules?: SessionRulesV1
+  humanTimer?: HumanTimerSettingsV1
+}) {
+  const start = startArticle.trim()
+  const destination = destinationArticle.trim()
+
+  let match: SessionV1 | null = null
+  for (const session of Object.values(state.sessions)) {
+    if (session.start_article === start && session.destination_article === destination) {
+      if (!match) {
+        match = session
+      } else if (new Date(session.created_at).getTime() > new Date(match.created_at).getTime()) {
+        match = session
+      }
+    }
+  }
+
+  if (match) {
+    const titleToUse = title?.trim()
+    const shouldUpdateTitle =
+      Boolean(titleToUse) && (!match.title || match.title.trim().length === 0)
+
+    setState({
+      ...state,
+      active_session_id: match.id,
+    })
+
+    if (shouldUpdateTitle) {
+      return updateSession(match.id, (s) => ({ ...s, title: titleToUse }))!
+    }
+
+    return match
+  }
+
+  return createSession({
+    startArticle: start,
+    destinationArticle: destination,
+    title,
+    rules,
+    humanTimer,
+  })
 }
 
 export function setActiveSessionId(sessionId: string | null) {
@@ -150,21 +213,27 @@ export function listSessions(): SessionSummary[] {
 export function startHumanRun({
   sessionId,
   playerName,
+  maxSteps,
   startedAtIso,
 }: {
   sessionId: string
   playerName: string
+  maxSteps?: number
   startedAtIso?: string
 }) {
   const session = state.sessions[sessionId]
   if (!session) throw new Error('Session not found')
 
+  const timer_state: RunTimerStateV1 = 'not_started'
   const run: RunV1 = {
     id: makeId('run_human'),
     kind: 'human',
     player_name: playerName,
+    max_steps: typeof maxSteps === 'number' ? maxSteps : undefined,
     started_at: startedAtIso || nowIso(),
     status: 'running',
+    timer_state,
+    active_ms: 0,
     steps: [{ type: 'start', article: session.start_article }],
   }
 
@@ -175,15 +244,23 @@ export function startHumanRun({
 export function startLlmRun({
   sessionId,
   model,
+  playerName,
   apiBase,
   reasoningEffort,
+  maxSteps,
+  maxLinks,
+  maxTokens,
   isBaseline,
   startedAtIso,
 }: {
   sessionId: string
   model: string
+  playerName?: string
   apiBase?: string
   reasoningEffort?: string
+  maxSteps?: number
+  maxLinks?: number
+  maxTokens?: number
   isBaseline?: boolean
   startedAtIso?: string
 }) {
@@ -193,9 +270,13 @@ export function startLlmRun({
   const run: RunV1 = {
     id: makeId(isBaseline ? 'run_llm_baseline' : 'run_llm'),
     kind: 'llm',
+    player_name: playerName?.trim() ? playerName.trim() : undefined,
     model,
     api_base: apiBase || undefined,
     reasoning_effort: reasoningEffort || undefined,
+    max_steps: typeof maxSteps === 'number' ? maxSteps : undefined,
+    max_links: typeof maxLinks === 'number' ? maxLinks : undefined,
+    max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined,
     started_at: startedAtIso || nowIso(),
     status: 'running',
     steps: [{ type: 'start', article: session.start_article }],
@@ -210,6 +291,113 @@ export function startLlmRun({
   })
 
   return run
+}
+
+function pauseHumanTimer(run: RunV1, atIso: string): RunV1 {
+  if (run.kind !== 'human') return run
+  if (run.status !== 'running') return run
+  if (!run.timer_state) return run
+  if (run.timer_state !== 'running') return run
+
+  const lastResumedAt = run.last_resumed_at
+  const deltaMs = lastResumedAt
+    ? new Date(atIso).getTime() - new Date(lastResumedAt).getTime()
+    : 0
+  const activeMs = (typeof run.active_ms === 'number' ? run.active_ms : 0) + Math.max(0, deltaMs)
+
+  return {
+    ...run,
+    timer_state: 'paused',
+    active_ms: Math.max(0, activeMs),
+    last_resumed_at: undefined,
+  }
+}
+
+function resumeHumanTimer(run: RunV1, atIso: string): RunV1 {
+  if (run.kind !== 'human') return run
+  if (run.status !== 'running') return run
+  if (!run.timer_state) return run
+  if (run.timer_state === 'running') return run
+
+  return {
+    ...run,
+    timer_state: 'running',
+    last_resumed_at: atIso,
+    active_ms: typeof run.active_ms === 'number' ? run.active_ms : 0,
+  }
+}
+
+export function pauseHumanTimers({
+  sessionId,
+  exceptRunId,
+  pausedAtIso,
+}: {
+  sessionId: string
+  exceptRunId?: string | null
+  pausedAtIso?: string
+}) {
+  const atIso = pausedAtIso || nowIso()
+  return updateSession(sessionId, (s) => {
+    let changed = false
+    const nextRuns = s.runs.map((run) => {
+      if (run.kind !== 'human') return run
+      if (exceptRunId && run.id === exceptRunId) return run
+      const next = pauseHumanTimer(run, atIso)
+      if (next !== run) changed = true
+      return next
+    })
+
+    if (!changed) return s
+    return { ...s, runs: nextRuns }
+  })
+}
+
+export function resumeHumanTimerForRun({
+  sessionId,
+  runId,
+  resumedAtIso,
+}: {
+  sessionId: string
+  runId: string
+  resumedAtIso?: string
+}) {
+  const atIso = resumedAtIso || nowIso()
+  return updateSession(sessionId, (s) => {
+    let changed = false
+    const nextRuns = s.runs.map((run) => {
+      if (run.id !== runId) return run
+      const next = resumeHumanTimer(run, atIso)
+      if (next !== run) changed = true
+      return next
+    })
+
+    if (!changed) return s
+    return { ...s, runs: nextRuns }
+  })
+}
+
+export function pauseHumanTimerForRun({
+  sessionId,
+  runId,
+  pausedAtIso,
+}: {
+  sessionId: string
+  runId: string
+  pausedAtIso?: string
+}) {
+  const atIso = pausedAtIso || nowIso()
+  return updateSession(sessionId, (s) => {
+    let changed = false
+    const nextRuns = s.runs.map((run) => {
+      if (run.id !== runId) return run
+      const next = pauseHumanTimer(run, atIso)
+      if (next !== run) changed = true
+      return next
+    })
+
+    if (!changed) return s
+    return { ...s, runs: nextRuns }
+  })
 }
 
 export function ensureBaselineLlmRun({
@@ -280,6 +468,34 @@ export function finishRun({
   }))
 }
 
+export function forceWinRun({
+  sessionId,
+  runId,
+  finishedAtIso,
+}: {
+  sessionId: string
+  runId: string
+  finishedAtIso?: string
+}) {
+  return updateSession(sessionId, (s) => ({
+    ...s,
+    runs: s.runs.map((run) => {
+      if (run.id !== runId) return run
+      if (run.status !== 'running') return run
+
+      const steps: StepV1[] =
+        run.steps.length > 0
+          ? [...run.steps]
+          : [{ type: 'start', article: s.start_article }]
+      const lastIndex = steps.length - 1
+      const last = steps[lastIndex]
+      steps[lastIndex] = { ...last, type: 'win', article: s.destination_article }
+
+      return finalizeRun({ ...run, steps }, 'win', finishedAtIso)
+    }),
+  }))
+}
+
 export function abandonRun({ sessionId, runId }: { sessionId: string; runId: string }) {
   const session = state.sessions[sessionId]
   const run = session?.runs.find((r) => r.id === runId)
@@ -319,6 +535,7 @@ export function deleteRuns({
     return next
   })
 }
+
 
 export function exportSession(sessionId: string): SessionExportV1 {
   const session = state.sessions[sessionId]
