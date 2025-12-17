@@ -18,6 +18,7 @@ interface RunsListProps {
   onSelectRun: (runId: number) => void;
   selectedRunId: number | null;
   onTryRun?: (startArticle: string, destinationArticle: string) => void;
+  pauseToken?: number | null;
 }
 
 export default function RunsList({
@@ -25,6 +26,7 @@ export default function RunsList({
   onSelectRun,
   selectedRunId,
   onTryRun,
+  pauseToken,
 }: RunsListProps) {
   const [isPlaying, setIsPlaying] = useState(true);
   const [filter, setFilter] = useState("");
@@ -34,6 +36,11 @@ export default function RunsList({
   const userScrollLockRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   const programmaticScrollTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (pauseToken === null || typeof pauseToken === "undefined") return;
+    setIsPlaying(false);
+  }, [pauseToken]);
 
   // Filter runs based on start and end filters
   const filteredRuns = runs.filter((run) => {
