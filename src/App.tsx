@@ -2,6 +2,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ViewerTab from "@/components/viewer-tab";
 import PlayTab from "@/components/play-tab";
 import AboutTab from "@/components/about-tab";
+import LlmRunManager from "@/components/llm-run-manager";
 import { Github } from "lucide-react";
 import { useState, useEffect } from "react";
 
@@ -37,6 +38,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/30">
+      <LlmRunManager />
       <div className="container mx-auto p-4 max-w-7xl">
       {isSmallScreen && (
         <div className="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 mb-4 rounded shadow">
