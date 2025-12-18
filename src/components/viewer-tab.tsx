@@ -93,7 +93,7 @@ export default function ViewerTab({
       const first = Object.keys(models)[0];
       if (first) setSelectedModel(first);
     }
-  }, [models]);
+  }, [models, selectedModel]);
 
   useEffect(() => {
     // Convert the model data to the format expected by RunsList
