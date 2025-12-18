@@ -76,6 +76,8 @@ type ArenaCssVars = CSSProperties & {
   ["--links-pane-width"]?: string;
 };
 
+type WikiZoom = 60 | 75 | 90 | 100;
+
 type ArenaLayout = {
   leaderboardWidth: number;
   leaderboardCollapsed: boolean;
@@ -83,6 +85,7 @@ type ArenaLayout = {
   runDetailsHeight: number;
   wikiHeight: number;
   mapHeight: number;
+  wikiZoom?: WikiZoom;
 };
 
 const DEFAULT_LAYOUT: ArenaLayout = {
@@ -92,6 +95,7 @@ const DEFAULT_LAYOUT: ArenaLayout = {
   runDetailsHeight: 340,
   wikiHeight: 520,
   mapHeight: 840,
+  wikiZoom: 60,
 };
 
 const LEGACY_DEFAULT_MAP_HEIGHT = 420;
@@ -126,10 +130,11 @@ function loadLayout(): ArenaLayout {
     const runDetailsHeight =
       typeof parsed.runDetailsHeight === "number" ? parsed.runDetailsHeight : DEFAULT_LAYOUT.runDetailsHeight;
     const wikiHeight = typeof parsed.wikiHeight === "number" ? parsed.wikiHeight : DEFAULT_LAYOUT.wikiHeight;
-    const mapHeightRaw = typeof parsed.mapHeight === "number" ? parsed.mapHeight : DEFAULT_LAYOUT.mapHeight;
-    const shouldMigrateMapHeight =
-      mapHeightRaw === LEGACY_DEFAULT_MAP_HEIGHT && mapHeightRaw < DEFAULT_LAYOUT.mapHeight;
-    const mapHeight = shouldMigrateMapHeight ? DEFAULT_LAYOUT.mapHeight : mapHeightRaw;
+  const mapHeightRaw = typeof parsed.mapHeight === "number" ? parsed.mapHeight : DEFAULT_LAYOUT.mapHeight;
+  const shouldMigrateMapHeight =
+    mapHeightRaw === LEGACY_DEFAULT_MAP_HEIGHT && mapHeightRaw < DEFAULT_LAYOUT.mapHeight;
+  const mapHeight = shouldMigrateMapHeight ? DEFAULT_LAYOUT.mapHeight : mapHeightRaw;
+  const wikiZoom = (parsed.wikiZoom as WikiZoom) || 60;
 
     return {
       leaderboardWidth: clampNumber(leaderboardWidth, 240, 800),
@@ -138,6 +143,7 @@ function loadLayout(): ArenaLayout {
       runDetailsHeight: clampNumber(runDetailsHeight, 160, 1200),
       wikiHeight: clampNumber(wikiHeight, 240, 1600),
       mapHeight: clampNumber(mapHeight, 240, 2400),
+      wikiZoom,
     };
   } catch {
     return DEFAULT_LAYOUT;
@@ -228,6 +234,22 @@ function stepOutput(step: StepV1) {
   return typeof output === "string" ? output : null;
 }
 
+function stepMetrics(step: StepV1) {
+  if (!step.metadata) return {};
+  const meta = step.metadata as Record<string, unknown>;
+  const latencyMs =
+    typeof meta.latency_ms === "number"
+      ? meta.latency_ms
+      : typeof meta.duration_ms === "number"
+      ? meta.duration_ms
+      : undefined;
+  const promptTokens = typeof meta.prompt_tokens === "number" ? meta.prompt_tokens : undefined;
+  const completionTokens =
+    typeof meta.completion_tokens === "number" ? meta.completion_tokens : undefined;
+  const totalTokens = typeof meta.total_tokens === "number" ? meta.total_tokens : undefined;
+  return { latencyMs, promptTokens, completionTokens, totalTokens };
+}
+
 function formatLlmOutputForDisplay(raw: string) {
   const matches = Array.from(raw.matchAll(/<answer>\s*([\s\S]*?)\s*<\/answer>/gi));
   if (matches.length === 0) return { answerXml: null as string | null, markdown: raw.trim() };
@@ -277,6 +299,8 @@ export default function MatchupArena({
   const lastIframeNavigateRef = useRef<{ title: string; at: number } | null>(null);
   const prevSessionIdRef = useRef<string | null>(null);
   const prevRunStateRef = useRef<Map<string, string>>(new Map());
+  const [recentlyChangedRuns, setRecentlyChangedRuns] = useState<Set<string>>(new Set());
+  const [linkActiveIndex, setLinkActiveIndex] = useState<number>(0);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -316,6 +340,21 @@ export default function MatchupArena({
       next.set(run.id, key);
 
       const prevKey = prev.get(run.id);
+      if (prevKey !== key) {
+        setRecentlyChangedRuns((prevRuns) => {
+          const nextRuns = new Set(prevRuns);
+          nextRuns.add(run.id);
+          window.setTimeout(() => {
+            setRecentlyChangedRuns((inner) => {
+              const copy = new Set(inner);
+              copy.delete(run.id);
+              return copy;
+            });
+          }, 1200);
+          return nextRuns;
+        });
+      }
+
       if (prevKey === key) continue;
 
       if (run.status !== "finished" || run.result !== "win") continue;
@@ -440,6 +479,11 @@ export default function MatchupArena({
   const selectedRunKind = selectedRun?.kind ?? null;
   const selectedRunStatus = selectedRun?.status ?? null;
   const selectedRunIdValue = selectedRun?.id ?? null;
+  const selectedHumanTimerRunning =
+    selectedRun?.kind === "human" && selectedRun?.timer_state === "running";
+  const selectedRunElapsedSeconds = selectedRun
+    ? Math.max(0, Math.floor(runElapsedMs(selectedRun, nowTick) / 1000))
+    : 0;
 
   // Hotseat: only the active (selected) human's timer should run.
   useEffect(() => {
@@ -467,6 +511,7 @@ export default function MatchupArena({
 
   useEffect(() => {
     setLinkQuery("");
+    setLinkActiveIndex(0);
   }, [selectedRunId, displayedArticle]);
 
   const leaderboardSections = useMemo(() => {
@@ -595,6 +640,10 @@ export default function MatchupArena({
   const visibleLinks = useMemo(() => {
     return filteredLinks.slice(0, linkDisplayLimit);
   }, [filteredLinks, linkDisplayLimit]);
+
+  useEffect(() => {
+    setLinkActiveIndex((prev) => clampNumber(prev, 0, Math.max(0, visibleLinks.length - 1)));
+  }, [visibleLinks.length]);
 
 
   const fetchLinks = useCallback(
@@ -758,6 +807,10 @@ export default function MatchupArena({
       displayedArticle.replaceAll(" ", "_")
     )}`;
   }, [displayedArticle]);
+
+  const wikiZoomValue: WikiZoom = (layout.wikiZoom as WikiZoom) || 60;
+  const wikiScale = wikiZoomValue / 100;
+  const wikiZoomMultiplier = 1 / wikiScale;
 
   useEffect(() => {
     if (!session) return;
@@ -1148,6 +1201,8 @@ export default function MatchupArena({
                 const maxSteps = runMaxSteps(r);
                 const last = r.steps[r.steps.length - 1]?.article || session.start_article;
                 const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
+                const isTimerRunning = r.kind === "human" && r.timer_state === "running";
+                const isRecentlyChanged = recentlyChangedRuns.has(r.id);
                 const statusLabel =
                   r.kind === "human" && r.timer_state
                     ? r.timer_state === "running"
@@ -1165,14 +1220,16 @@ export default function MatchupArena({
                   <button
                     key={r.id}
                     type="button"
-                    onClick={() => setSelectedRunId(r.id)}
-                    className={cn(
-                      "w-full text-left rounded-lg border p-2 transition-colors",
-                      isActive
-                        ? "border-primary/50 bg-primary/5"
-                        : "hover:bg-muted/50 border-border"
-                    )}
-                  >
+                  onClick={() => setSelectedRunId(r.id)}
+                  className={cn(
+                    "w-full text-left rounded-lg border p-2 transition-colors",
+                    isActive
+                      ? "border-primary/50 bg-primary/5"
+                      : "hover:bg-muted/50 border-border",
+                    isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                    isRecentlyChanged && "animate-pulse"
+                  )}
+                >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex items-start gap-2">
                           <input
@@ -1232,6 +1289,8 @@ export default function MatchupArena({
                 const maxSteps = runMaxSteps(r);
                 const last = r.steps[r.steps.length - 1]?.article || session.start_article;
                 const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
+                const isTimerRunning = r.kind === "human" && r.timer_state === "running";
+                const isRecentlyChanged = recentlyChangedRuns.has(r.id);
 
                 return (
                   <button
@@ -1242,7 +1301,9 @@ export default function MatchupArena({
                       "w-full text-left rounded-lg border p-2 transition-colors",
                       isActive
                         ? "border-primary/50 bg-primary/5"
-                        : "hover:bg-muted/50 border-border"
+                        : "hover:bg-muted/50 border-border",
+                      isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                      isRecentlyChanged && "animate-pulse"
                     )}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -1308,6 +1369,8 @@ export default function MatchupArena({
                 const last = r.steps[r.steps.length - 1]?.article || session.start_article;
                 const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
                 const badgeLabel = r.result === "abandoned" ? "Abandoned" : "Fail";
+                const isTimerRunning = r.kind === "human" && r.timer_state === "running";
+                const isRecentlyChanged = recentlyChangedRuns.has(r.id);
 
                 return (
                   <button
@@ -1319,7 +1382,9 @@ export default function MatchupArena({
                       "opacity-80 bg-muted/20",
                       isActive
                         ? "border-primary/50 bg-primary/5 opacity-100"
-                        : "hover:bg-muted/40 border-border"
+                        : "hover:bg-muted/40 border-border",
+                      isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                      isRecentlyChanged && "animate-pulse"
                     )}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -1415,11 +1480,16 @@ export default function MatchupArena({
                           <span className="inline-flex items-center gap-1">
                             <Hourglass className="h-3.5 w-3.5" />
                             Limit:{" "}
-                            <span className="font-medium">
-                              {runMaxSteps(selectedRun)} hops
-                            </span>
+                          <span className="font-medium">
+                            {runMaxSteps(selectedRun)} hops
                           </span>
-                        )}
+                        </span>
+                      )}
+                      {selectedHumanTimerRunning && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5">
+                          Active player • {formatTime(selectedRunElapsedSeconds)}
+                        </span>
+                      )}
                       </div>
                     </div>
                   </div>
@@ -1562,24 +1632,49 @@ export default function MatchupArena({
                               <SelectItem value="200">Show 200</SelectItem>
                             </SelectContent>
                           </Select>
-                          <div className="text-xs text-muted-foreground whitespace-nowrap">
-                            {visibleLinks.length} of {filteredLinks.length} shown
-                          </div>
                         </div>
                       </div>
                       <Separator className="my-3" />
 
-                      <div className="flex items-center gap-2">
-                        <Input
-                          value={linkQuery}
-                          onChange={(e) => setLinkQuery(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key !== "Enter") return;
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>
+                            {visibleLinks.length} of {filteredLinks.length} shown
+                          </span>
+                          {linkQuery.trim().length > 0 && <span className="text-muted-foreground/70">Filtered</span>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            value={linkQuery}
+                            onChange={(e) => {
+                              setLinkQuery(e.target.value);
+                              setLinkActiveIndex(0);
+                            }}
+                            onKeyDown={(e) => {
                             if (replayEnabled) return;
                             if (selectedRun.status !== "running") return;
+                            if (e.key === "ArrowDown") {
+                              e.preventDefault();
+                              setLinkActiveIndex((prev) =>
+                                clampNumber(prev + 1, 0, Math.max(0, visibleLinks.length - 1))
+                              );
+                              return;
+                            }
+                            if (e.key === "ArrowUp") {
+                              e.preventDefault();
+                              setLinkActiveIndex((prev) =>
+                                clampNumber(prev - 1, 0, Math.max(0, visibleLinks.length - 1))
+                              );
+                              return;
+                            }
+                            if (e.key !== "Enter") return;
                             const q = linkQuery.trim().toLowerCase();
+                            const activeLink = visibleLinks[linkActiveIndex];
+                            if (activeLink) {
+                              recordHumanMove(activeLink);
+                              setLinkQuery("");
+                              return;
+                            }
                             if (q.length === 0) return;
-
                             const exact = filteredLinks.find((link) => link.toLowerCase() === q);
                             if (exact) {
                               recordHumanMove(exact);
@@ -1629,17 +1724,21 @@ export default function MatchupArena({
 	                      ) : (
 	                        <div className="mt-3 flex-1 min-h-0 overflow-y-auto">
 	                          <div className="space-y-2">
-	                            {visibleLinks.map((link) => (
-	                                <Button
-	                                  key={link}
-	                                  variant="outline"
-	                                  size="sm"
-	                                  className="w-full justify-start text-left whitespace-normal break-words h-auto py-2"
-	                                  onClick={() => recordHumanMove(link)}
-	                                  disabled={replayEnabled || selectedRun.status !== "running"}
-	                                >
-	                                  {link}
-	                                </Button>
+                            {visibleLinks.map((link, idx) => (
+                                <Button
+                                  key={link}
+                                  variant="outline"
+                                  size="sm"
+                                  className={cn(
+                                    "w-full justify-start text-left whitespace-normal break-words h-auto py-2 text-sm",
+                                    idx === linkActiveIndex && "ring-2 ring-primary ring-offset-1",
+                                    humanPaneMode === "links" && "py-1.5"
+                                  )}
+                                  onClick={() => recordHumanMove(link)}
+                                  disabled={replayEnabled || selectedRun.status !== "running"}
+                                >
+                                  {link}
+                                </Button>
                               ))}
                           </div>
                         </div>
@@ -1672,31 +1771,50 @@ export default function MatchupArena({
 	                    >
                     <div className="space-y-1">
                       <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium">Wikipedia view</div>
-                        <div className="flex items-center gap-2 min-w-0">
-                          {selectedRun?.kind === "human" && (
-                            <Tabs
-                              value={humanPaneMode}
-                              onValueChange={(v) => setHumanPaneMode(v as HumanPaneMode)}
-                            >
-                              <TabsList className="h-8">
-                                <TabsTrigger value="wiki" className="text-xs px-2">
-                                  Wiki
-                                </TabsTrigger>
-                                <TabsTrigger value="split" className="text-xs px-2">
-                                  Split
-                                </TabsTrigger>
-                                <TabsTrigger value="links" className="text-xs px-2">
-                                  Links
-                                </TabsTrigger>
-                              </TabsList>
-                            </Tabs>
-                          )}
-                          {replayEnabled && (
-                            <Badge variant="outline" className="text-[11px]">
-                              Replay
-                            </Badge>
-                          )}
+                      <div className="text-sm font-medium">Wikipedia view</div>
+                      <div className="flex items-center gap-2 min-w-0">
+                        {selectedRun?.kind === "human" && (
+                          <Tabs
+                            value={humanPaneMode}
+                            onValueChange={(v) => setHumanPaneMode(v as HumanPaneMode)}
+                          >
+                            <TabsList className="h-8">
+                              <TabsTrigger value="wiki" className="text-xs px-2">
+                                Wiki
+                              </TabsTrigger>
+                              <TabsTrigger value="split" className="text-xs px-2">
+                                Split
+                              </TabsTrigger>
+                              <TabsTrigger value="links" className="text-xs px-2">
+                                Links
+                              </TabsTrigger>
+                            </TabsList>
+                          </Tabs>
+                        )}
+                        <Select
+                          value={String(wikiZoomValue)}
+                          onValueChange={(v) =>
+                            setLayout((prev) => ({
+                              ...prev,
+                              wikiZoom: Number.parseInt(v, 10) as WikiZoom,
+                            }))
+                          }
+                        >
+                          <SelectTrigger className="h-8 w-[110px] text-xs">
+                            <SelectValue placeholder="Zoom" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="60">60%</SelectItem>
+                            <SelectItem value="75">75%</SelectItem>
+                            <SelectItem value="90">90%</SelectItem>
+                            <SelectItem value="100">100%</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {replayEnabled && (
+                          <Badge variant="outline" className="text-[11px]">
+                            Replay
+                          </Badge>
+                        )}
                           <div className="text-xs text-muted-foreground truncate max-w-[70%]">
                             {displayedArticle}
                           </div>
@@ -1720,9 +1838,9 @@ export default function MatchupArena({
                       <iframe
                         key={wikiSrc}
                         style={{
-                          transform: "scale(0.6, 0.6)",
-                          width: "calc(100% * 1.6667)",
-                          height: "calc(100% * 1.6667)",
+                          transform: `scale(${wikiScale}, ${wikiScale})`,
+                          width: `calc(100% * ${wikiZoomMultiplier})`,
+                          height: `calc(100% * ${wikiZoomMultiplier})`,
                           transformOrigin: "top left",
                           position: "absolute",
                           top: 0,
@@ -1976,24 +2094,50 @@ export default function MatchupArena({
 	                          </div>
 
 	                          <div className="space-y-2">
-	                            {selectedRun.steps
-	                              .filter((s) => s.type !== "start")
-	                              .map((s, idx) => {
-	                                const meta = summarizeStepMeta(s);
-	                                const output = stepOutput(s);
-	                                const formatted = output ? formatLlmOutputForDisplay(output) : null;
+                            {selectedRun.steps
+                              .filter((s) => s.type !== "start")
+                              .map((s, idx) => {
+                                const meta = summarizeStepMeta(s);
+                                const output = stepOutput(s);
+                                const metrics = stepMetrics(s);
+                                const tokenLabel =
+                                  typeof metrics.totalTokens === "number"
+                                    ? `${metrics.totalTokens} tok`
+                                    : metrics.promptTokens || metrics.completionTokens
+                                    ? `${metrics.promptTokens ?? 0}/${metrics.completionTokens ?? 0} tok`
+                                    : null;
+                                const latencyLabel =
+                                  typeof metrics.latencyMs === "number"
+                                    ? `${Math.round(metrics.latencyMs)} ms`
+                                    : null;
+                                const formatted = output ? formatLlmOutputForDisplay(output) : null;
 
-		                                return (
-		                                  <details
-		                                    key={`${selectedRun.id}-trace-${idx}`}
+                                return (
+                                  <details
+                                    key={`${selectedRun.id}-trace-${idx}`}
 		                                    className="rounded-md border p-2"
 		                                  >
-	                                    <summary className="cursor-pointer text-sm">
-	                                      <span className="font-medium">{s.type}</span>{" "}
-	                                      <span className="text-muted-foreground">{s.article}</span>
-	                                      {meta && (
-                                        <span className="text-xs text-muted-foreground"> — {meta}</span>
-                                      )}
+                                    <summary className="cursor-pointer text-sm">
+                                      <span className="font-medium">{s.type}</span>{" "}
+                                      <span className="text-muted-foreground">{s.article}</span>
+                                      <div className="inline-flex flex-wrap items-center gap-2 ml-2 align-middle">
+                                        {meta && (
+                                          <span className="text-xs text-muted-foreground">{meta}</span>
+                                        )}
+                                        {latencyLabel && (
+                                          <Badge variant="outline" className="text-[11px]">
+                                            {latencyLabel}
+                                          </Badge>
+                                        )}
+                                        {tokenLabel && (
+                                          <Badge variant="outline" className="text-[11px]">
+                                            {tokenLabel}
+                                          </Badge>
+                                        )}
+                                        {output && (
+                                          <span className="text-[11px] text-muted-foreground">Show reasoning</span>
+                                        )}
+                                      </div>
                                     </summary>
 		                                    {formatted && (
 		                                      <div className="mt-2 space-y-2">

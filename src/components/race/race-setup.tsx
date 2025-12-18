@@ -142,8 +142,23 @@ export default function RaceSetup({
     startPage.trim().length > 0 &&
     targetPage.trim().length > 0 &&
     startPage.trim() !== targetPage.trim();
-  const canStart =
-    pagesValid && participants.length > 0;
+  const duplicateKeys = useMemo(() => {
+    const seen = new Set<string>();
+    const dups = new Set<string>();
+    for (const p of participants) {
+      const key = participantKey(p);
+      if (seen.has(key)) dups.add(key);
+      seen.add(key);
+    }
+    return dups;
+  }, [participants]);
+
+  const errors: string[] = [];
+  if (!pagesValid) errors.push("Pick two different pages.");
+  if (participants.length === 0) errors.push("Add at least one participant.");
+  if (duplicateKeys.size > 0) errors.push("Participants must be unique.");
+
+  const canStart = pagesValid && participants.length > 0 && duplicateKeys.size === 0;
 
   const selectRandomArticle = (setter: (article: string) => void) => {
     if (popularNodes.length > 0) {
@@ -512,8 +527,11 @@ export default function RaceSetup({
                     )}
                   >
                     <div className="font-medium">{p.name}</div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {p.rules.maxHops} hops
+                    <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                      <div>{p.rules.maxHops} hops</div>
+                      <div className="text-[11px] text-muted-foreground/80">
+                        LLM: {p.rules.maxLinks} links • {p.rules.maxTokens} tokens
+                      </div>
                     </div>
                   </button>
                 ))}
@@ -523,10 +541,18 @@ export default function RaceSetup({
                   Race length presets adjust hop limits (LLM budgets are under Advanced).
                 </div>
               )}
+              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground mt-1">
+                <Badge variant="outline" className="text-[11px]">
+                  Effective limits
+                </Badge>
+                <span className="inline-flex items-center gap-1">{rules.maxHops} hops</span>
+                <span className="inline-flex items-center gap-1">{rules.maxLinks} links</span>
+                <span className="inline-flex items-center gap-1">{rules.maxTokens} tokens</span>
+              </div>
             </div>
           </div>
 
-          <div className="md:col-span-5 space-y-4">
+          <div className="md:col-span-5 space-y-4" id="participants-section">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Users className="h-4 w-4 text-muted-foreground" />
@@ -707,9 +733,11 @@ export default function RaceSetup({
               </div>
             )}
 
-            {!pagesValid && (
-              <div className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-md p-3">
-                Pick two different pages to race between.
+            {errors.length > 0 && (
+              <div className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-md p-3 space-y-1">
+                {errors.map((err) => (
+                  <div key={err}>{err}</div>
+                ))}
               </div>
             )}
 

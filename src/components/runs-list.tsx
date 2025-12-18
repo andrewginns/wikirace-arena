@@ -11,6 +11,8 @@ interface Run {
   start_article: string;
   destination_article: string;
   steps: string[];
+  result?: string;
+  near_miss?: boolean;
 }
 
 interface RunsListProps {
@@ -208,6 +210,8 @@ export default function RunsList({
       >
         {filteredRuns.map((run) => {
           const originalIndex = runs.indexOf(run);
+          const isNearMiss = run.near_miss;
+          const isWin = run.result === "win";
           return (
             <Card
               key={originalIndex}
@@ -254,6 +258,16 @@ export default function RunsList({
                       <Badge variant="outline" className="text-xs px-2 py-0 h-5">
                         {run.steps.length} {run.steps.length === 1 ? 'hop' : 'hops'}
                       </Badge>
+                      {run.result && !isWin && (
+                        <Badge variant="secondary" className="text-[11px] h-5 px-2 py-0">
+                          {run.result}
+                        </Badge>
+                      )}
+                      {isNearMiss && (
+                        <Badge variant="outline" className="text-[11px] h-5 px-2 py-0 border-amber-200 bg-amber-50 text-amber-800">
+                          Near miss
+                        </Badge>
+                      )}
                       {selectedRunId === originalIndex && (
                         <div className="flex items-center gap-1 text-xs text-primary">
                           <div

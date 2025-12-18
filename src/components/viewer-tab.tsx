@@ -42,6 +42,7 @@ interface Run {
   destination_article: string;
   steps: string[];
   result: string;
+  near_miss?: boolean;
 }
 
 // Interface for model statistics
@@ -70,6 +71,7 @@ export default function ViewerTab({
   const [importText, setImportText] = useState<string>("");
   const [importName, setImportName] = useState<string>("");
   const [importError, setImportError] = useState<string | null>(null);
+  const [showWinsOnly, setShowWinsOnly] = useState<boolean>(true);
   
   const savedModels = useMemo(() => {
     const obj: Record<string, unknown> = {};
@@ -86,6 +88,15 @@ export default function ViewerTab({
     };
   }, [savedModels]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const winRuns = useMemo(() => runs.filter((run) => run.result === "win"), [runs]);
+  const bestRun = useMemo(() => {
+    if (winRuns.length === 0) return null;
+    return winRuns.reduce((best, run) => (run.steps.length < best.steps.length ? run : best));
+  }, [winRuns]);
+  const worstRun = useMemo(() => {
+    if (runs.length === 0) return null;
+    return runs.reduce((worst, run) => (run.steps.length > worst.steps.length ? run : worst));
+  }, [runs]);
 
   useEffect(() => {
     // Keep selected model valid as models change.
@@ -93,11 +104,11 @@ export default function ViewerTab({
       const first = Object.keys(models)[0];
       if (first) setSelectedModel(first);
     }
-  }, [models]);
+  }, [models, selectedModel]);
 
   useEffect(() => {
     // Convert the model data to the format expected by RunsList
-    const convertedRuns = models[selectedModel]?.runs?.map((run: {
+    const convertedRuns: Run[] = models[selectedModel]?.runs?.map((run: {
       start_article: string;
       destination_article: string;
       steps: { type: string; article: string }[];
@@ -108,10 +119,16 @@ export default function ViewerTab({
       steps: run.steps.map((step: { article: string }) => step.article),
       result: run.result
     })) || [];
-    setRuns(convertedRuns);
+    const winRuns = convertedRuns.filter((run) => run.result === "win");
+    const minWinHops = winRuns.length > 0 ? Math.min(...winRuns.map((run) => run.steps.length)) : null;
+    const withNearMiss = convertedRuns.map((run) => ({
+      ...run,
+      near_miss:
+        minWinHops !== null && run.result !== "win" && run.steps.length <= minWinHops + 2,
+    }));
+    setRuns(withNearMiss);
 
     // Calculate model statistics
-    const winRuns = convertedRuns.filter(run => run.result === "win");
     const totalRuns = convertedRuns.length;
     const wins = winRuns.length;
     const winPercentage = totalRuns > 0 ? (wins / totalRuns) * 100 : 0;
@@ -159,10 +176,22 @@ export default function ViewerTab({
   };
 
   const filterRuns = useMemo(() => {
-    return runs.filter(run => run.result === "win");
-  }, [runs]);
+    if (showWinsOnly) return runs.filter((run) => run.result === "win");
+    return runs;
+  }, [runs, showWinsOnly]);
 
   const selectedRunData = selectedRun === null ? null : filterRuns[selectedRun] || null;
+
+  useEffect(() => {
+    if (selectedRun === null) return;
+    if (filterRuns.length === 0) {
+      setSelectedRun(null);
+      return;
+    }
+    if (selectedRun > filterRuns.length - 1) {
+      setSelectedRun(0);
+    }
+  }, [filterRuns.length, selectedRun]);
 
   // Convert the runs to the format expected by ForceDirectedGraph
   const forceGraphRuns = useMemo(() => {
@@ -342,38 +371,81 @@ export default function ViewerTab({
            </Dialog>
          )}
          
-         {modelStats && (
-           <div className="flex flex-wrap gap-1.5 items-center">
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Success:</span>
-               <span className="text-xs font-semibold">{modelStats.winPercentage.toFixed(1)}%</span>
-               <span className="text-xs text-muted-foreground">({modelStats.wins}/{modelStats.totalRuns})</span>
-             </Badge>
-             
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Mean:</span>
-               <span className="text-xs font-semibold">{modelStats.avgSteps.toFixed(1)}</span>
-               <span className="text-xs text-muted-foreground">+/-{modelStats.stdDevSteps.toFixed(1)}</span>
-             </Badge>
-             
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Median:</span>
-               <span className="text-xs font-semibold">{modelStats.medianSteps.toFixed(1)}</span>
-             </Badge>
-             
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Min:</span>
-               <span className="text-xs font-semibold">{modelStats.minSteps}</span>
-             </Badge>
-             
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Max:</span>
-               <span className="text-xs font-semibold">{modelStats.maxSteps}</span>
-             </Badge>
-           </div>
-         )}
-       </div>
-     </Card>
+        {(modelStats || runs.length > 0) && (
+          <div className="flex flex-col gap-2 w-full">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              {modelStats && (
+                <div className="flex flex-wrap gap-1.5 items-center">
+                  <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                    <span className="text-xs font-medium">Success:</span>
+                    <span className="text-xs font-semibold">{modelStats.winPercentage.toFixed(1)}%</span>
+                    <span className="text-xs text-muted-foreground">({modelStats.wins}/{modelStats.totalRuns})</span>
+                  </Badge>
+                  
+                  <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                    <span className="text-xs font-medium">Mean:</span>
+                    <span className="text-xs font-semibold">{modelStats.avgSteps.toFixed(1)}</span>
+                    <span className="text-xs text-muted-foreground">+/-{modelStats.stdDevSteps.toFixed(1)}</span>
+                  </Badge>
+                  
+                  <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                    <span className="text-xs font-medium">Median:</span>
+                    <span className="text-xs font-semibold">{modelStats.medianSteps.toFixed(1)}</span>
+                  </Badge>
+                  
+                  <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                    <span className="text-xs font-medium">Min:</span>
+                    <span className="text-xs font-semibold">{modelStats.minSteps}</span>
+                  </Badge>
+                  
+                  <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                    <span className="text-xs font-medium">Max:</span>
+                    <span className="text-xs font-semibold">{modelStats.maxSteps}</span>
+                  </Badge>
+                </div>
+              )}
+              <div className="flex items-center gap-2 text-xs">
+                <Button
+                  size="sm"
+                  variant={showWinsOnly ? "secondary" : "outline"}
+                  className="h-8 px-3"
+                  onClick={() => setShowWinsOnly((prev) => !prev)}
+                >
+                  {showWinsOnly ? "Wins only: On" : "Wins only: Off"}
+                </Button>
+              </div>
+            </div>
+
+            {runs.length > 0 && (
+              <div className="grid gap-3 sm:grid-cols-2 text-xs text-muted-foreground">
+                <div className="rounded-md border p-2 bg-muted/30">
+                  <div className="font-medium text-foreground text-sm">Best run</div>
+                  {bestRun ? (
+                    <div className="mt-1">
+                      {bestRun.start_article} → {bestRun.destination_article}
+                      <div className="text-[11px]">{bestRun.steps.length} hops</div>
+                    </div>
+                  ) : (
+                    <div className="mt-1">No wins yet</div>
+                  )}
+                </div>
+                <div className="rounded-md border p-2 bg-muted/30">
+                  <div className="font-medium text-foreground text-sm">Longest run</div>
+                  {worstRun ? (
+                    <div className="mt-1">
+                      {worstRun.start_article} → {worstRun.destination_article}
+                      <div className="text-[11px]">{worstRun.steps.length} hops</div>
+                    </div>
+                  ) : (
+                    <div className="mt-1">No data yet</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </Card>
       <div className="md:col-span-3 flex flex-col max-h-full overflow-hidden">
         <div className="bg-card rounded-lg p-3 border flex-grow overflow-hidden flex flex-col">
           <h3 className="text-sm font-medium mb-2 text-muted-foreground flex-shrink-0">
