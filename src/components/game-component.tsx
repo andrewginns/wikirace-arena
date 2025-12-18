@@ -212,27 +212,30 @@ export default function GameComponent({
     }
   }, [currentPage, targetPage, hops, maxHops]);
 
-  const handleLinkClick = (link: string) => {
-    if (gameStatus !== "playing") return;
+  const handleLinkClick = useCallback(
+    (link: string) => {
+      if (gameStatus !== "playing") return;
 
-    // Prevent double-counting when the iframe navigates to a section anchor.
-    if (link === currentPage) return;
+      // Prevent double-counting when the iframe navigates to a section anchor.
+      if (link === currentPage) return;
 
-    if (player === "me") {
-      if (link === targetPage) {
-        if (!humanFinishSentRef.current) {
-          humanFinishSentRef.current = true;
-          onHumanFinish?.("win", link);
+      if (player === "me") {
+        if (link === targetPage) {
+          if (!humanFinishSentRef.current) {
+            humanFinishSentRef.current = true;
+            onHumanFinish?.("win", link);
+          }
+        } else {
+          onHumanMove?.(link);
         }
-      } else {
-        onHumanMove?.(link);
       }
-    }
 
-    setCurrentPage(link);
-    setHops((prev) => prev + 1);
-    setVisitedNodes((prev) => [...prev, link]);
-  };
+      setCurrentPage(link);
+      setHops((prev) => prev + 1);
+      setVisitedNodes((prev) => [...prev, link]);
+    },
+    [currentPage, gameStatus, onHumanFinish, onHumanMove, player, targetPage]
+  );
 
   // Allow navigation by clicking links inside the Wikipedia iframe.
   useEffect(() => {
@@ -289,7 +292,11 @@ export default function GameComponent({
     ];
   }, [visitedNodes, startPage, targetPage]);
 
-  const makeModelMove = async () => {
+  const pushConvo = useCallback((message: Message) => {
+    setConvo((prev) => [...prev, message]);
+  }, []);
+
+  const makeModelMove = useCallback(async () => {
     if (!model) {
       pushConvo({
         role: "error",
@@ -379,7 +386,18 @@ export default function GameComponent({
     );
 
     handleLinkClick(selectedLink);
-  };
+  }, [
+    apiBase,
+    currentPage,
+    currentPageLinks,
+    handleLinkClick,
+    inference,
+    maxTokens,
+    model,
+    pushConvo,
+    targetPage,
+    visitedNodes,
+  ]);
 
   const handleGiveUp = () => {
     if (player === "me" && !humanFinishSentRef.current) {
@@ -411,10 +429,6 @@ export default function GameComponent({
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
-  };
-
-  const pushConvo = (message: Message) => {
-    setConvo((prev) => [...prev, message]);
   };
 
   const scrollToBottom = () => {
@@ -449,13 +463,13 @@ export default function GameComponent({
       return () => clearTimeout(timer);
     }
   }, [
-    continuousPlay,
     autoRunning,
-    player,
+    continuousPlay,
     gameStatus,
-    modelStatus,
     linksLoading,
-    currentPage,
+    makeModelMove,
+    modelStatus,
+    player,
   ]);
 
   // Add a result message when the game ends
@@ -472,7 +486,7 @@ export default function GameComponent({
         },
       });
     }
-  }, [gameStatus]);
+  }, [convo, gameStatus, hops, maxHops, model, pushConvo, targetPage, visitedNodes]);
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-12 gap-2 h-[calc(100vh_-_200px)] grid-rows-[auto_1fr_1fr]">
