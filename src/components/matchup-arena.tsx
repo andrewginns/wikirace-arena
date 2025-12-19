@@ -1079,7 +1079,7 @@ export default function MatchupArena({
         <Card className="p-6">
           <div className="text-lg font-semibold">Matchup arena</div>
           <p className="text-sm text-muted-foreground mt-1">
-            Start a Solo run or add racers to begin building a persistent leaderboard.
+            Start a race or add racers to begin building a persistent leaderboard.
           </p>
         </Card>
       </div>

@@ -1,11 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { API_BASE } from "@/lib/constants";
 import RaceSetup from "@/components/race/race-setup";
 import type { RaceConfig } from "@/components/race/race-types";
-import SoloPlay from "@/components/solo-play";
 import MatchupArena from "@/components/matchup-arena";
 import {
   createSession,
@@ -32,7 +30,6 @@ export default function PlayTab({
     "gpt-5-nano",
   ]);
   const [allArticles, setAllArticles] = useState<string[]>([]);
-  const [mode, setMode] = useState<"race" | "solo">("race");
   const [setupCollapsed, setSetupCollapsed] = useState<boolean>(false);
   const [scrollTarget, setScrollTarget] = useState<"setup" | "arena" | null>(null);
 
@@ -143,73 +140,20 @@ export default function PlayTab({
     <div className="space-y-6">
       <div id="play-setup" className="space-y-6">
         {!setupCollapsed && (
-          <Tabs value={mode} onValueChange={(v) => setMode(v as "race" | "solo")}>
-            <TabsList className="grid grid-cols-2 w-full max-w-[420px]">
-              <TabsTrigger value="race">Race</TabsTrigger>
-              <TabsTrigger value="solo">Solo</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="race" className="mt-6">
-              <RaceSetup
-                initialStartPage={initialStartPage}
-                initialTargetPage={initialTargetPage}
-                allArticles={effectiveArticles}
-                modelList={modelList}
-                isServerConnected={isServerConnected}
-                onStartRace={launchRaceRuns}
-              />
-            </TabsContent>
-
-            <TabsContent value="solo" className="mt-6">
-              <SoloPlay
-                startArticle={initialStartPage}
-                destinationArticle={initialTargetPage}
-                isServerConnected={isServerConnected}
-                modelList={modelList}
-                allArticles={effectiveArticles}
-                onLaunchSolo={({
-                  startPage,
-                  targetPage,
-                  player,
-                  model,
-                  maxHops,
-                  maxTokens,
-                  maxLinks,
-                }) => {
-                  const session = getOrCreateSession({
-                    startArticle: startPage,
-                    destinationArticle: targetPage,
-                  });
-
-                  if (player === "me") {
-                    startHumanRun({
-                      sessionId: session.id,
-                      playerName: "You",
-                      maxSteps: maxHops,
-                    });
-                  } else if (model) {
-                    startLlmRun({
-                      sessionId: session.id,
-                      model,
-                      maxSteps: maxHops,
-                      maxLinks,
-                      maxTokens,
-                    });
-                  }
-
-                  setSetupCollapsed(true);
-                  setScrollTarget("arena");
-                }}
-              />
-            </TabsContent>
-          </Tabs>
+          <RaceSetup
+            initialStartPage={initialStartPage}
+            initialTargetPage={initialTargetPage}
+            allArticles={effectiveArticles}
+            modelList={modelList}
+            isServerConnected={isServerConnected}
+            onStartRace={launchRaceRuns}
+          />
         )}
       </div>
 
       <MatchupArena
         onGoToViewerTab={onGoToViewerTab}
         onNewRace={() => {
-          setMode("race");
           setSetupCollapsed(false);
           setScrollTarget("setup");
         }}
