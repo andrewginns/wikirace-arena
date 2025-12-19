@@ -43,6 +43,12 @@ Backend + DB (local API):
 - Tailwind: prefer utility classes over bespoke CSS.
 - Keep components small and composable; reuse `src/components/ui/` primitives when possible.
 
+## Product Semantics (Avoid Regressions)
+
+- **Hop definition:** a hop is one move/link-click between articles (edge count). Many `steps[]` arrays include the start page at index 0, so hops are typically `max(0, steps.length - 1)` (see `src/lib/session-utils.ts` / `src/lib/hops.ts`).
+- **Unlimited budgets:** LLM limits use `null` to mean “unlimited” for `max_links` and `max_tokens` (stored in session rules and passed down to runs). Classic/Marathon presets default to unlimited; Sprint retains finite defaults.
+- **Token accounting:** per-step metadata may include either `prompt_tokens`/`completion_tokens` or `input_tokens`/`output_tokens` (and sometimes `total_tokens`). The UI aggregates these across a run and also displays per-step usage in the Arena run details.
+
 ## Testing Guidelines
 
 - No dedicated unit-test suite currently; minimum checks are `yarn lint` + `yarn build` (note: `make test` calls `yarn test`).

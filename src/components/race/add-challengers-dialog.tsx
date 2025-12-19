@@ -40,10 +40,26 @@ function participantKey(p: RaceParticipantDraft) {
     const normalized = p.name.trim().toLowerCase();
     return `human:${normalized || "human"}`;
   }
-  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.reasoningEffort || ""}:${p.name || ""}`;
+  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.reasoningEffort || ""}`;
 }
 
-const DEFAULT_RULES = { max_hops: 20, max_links: 200, max_tokens: 3000 };
+function normalizedHumanName(name: string) {
+  const trimmed = name.trim();
+  return trimmed.length > 0 ? trimmed : "Human";
+}
+
+function participantDuplicateLabel(p: RaceParticipantDraft) {
+  if (p.kind === "human") return normalizedHumanName(p.name);
+  const model = p.model || "llm";
+  const effort = p.reasoningEffort?.trim();
+  const apiBase = p.apiBase?.trim();
+  const parts: string[] = [];
+  if (effort) parts.push(`effort: ${effort}`);
+  if (apiBase) parts.push(`api_base: ${apiBase}`);
+  return parts.length > 0 ? `${model} (${parts.join(" • ")})` : model;
+}
+
+const DEFAULT_RULES = { max_hops: 20, max_links: null, max_tokens: null };
 
 export default function AddChallengersDialog({
   modelList,
@@ -65,7 +81,48 @@ export default function AddChallengersDialog({
 
   const rules = session?.rules || DEFAULT_RULES;
 
-  const canStart = Boolean(session) && participants.length > 0;
+  const duplicateParticipants = useMemo(() => {
+    const counts = new Map<string, number>();
+    const firstByKey = new Map<string, RaceParticipantDraft>();
+
+    for (const p of participants) {
+      const key = participantKey(p);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (!firstByKey.has(key)) firstByKey.set(key, p);
+    }
+
+    const duplicateKeys = new Set<string>();
+    const duplicateIds = new Set<string>();
+    const labels: Array<{ label: string; count: number }> = [];
+
+    for (const [key, count] of counts.entries()) {
+      if (count <= 1) continue;
+      duplicateKeys.add(key);
+      const first = firstByKey.get(key);
+      labels.push({
+        label: first ? participantDuplicateLabel(first) : key,
+        count,
+      });
+    }
+
+    labels.sort((a, b) => a.label.localeCompare(b.label));
+
+    for (const p of participants) {
+      const key = participantKey(p);
+      if (duplicateKeys.has(key)) duplicateIds.add(p.id);
+    }
+
+    return { duplicateKeys, duplicateIds, labels };
+  }, [participants]);
+
+  const duplicateSummary =
+    duplicateParticipants.duplicateKeys.size > 0
+      ? duplicateParticipants.labels
+          .map(({ label, count }) => `${label} (×${count})`)
+          .join(", ")
+      : null;
+
+  const canStart = Boolean(session) && participants.length > 0 && duplicateSummary === null;
   const disabledReason = useMemo(() => {
     if (!session) return "No active race session.";
     if (!isServerConnected) return "API server not connected.";
@@ -146,6 +203,18 @@ export default function AddChallengersDialog({
     setParticipants((prev) => prev.filter((p) => p.id !== id));
   };
 
+  const removeDuplicateParticipants = () => {
+    setParticipants((prev) => {
+      const seen = new Set<string>();
+      return prev.filter((p) => {
+        const key = participantKey(p);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    });
+  };
+
   const clearParticipants = () => {
     setParticipants([]);
     setParticipantPresetsOpen(false);
@@ -154,6 +223,7 @@ export default function AddChallengersDialog({
   const startRuns = () => {
     if (!session) return;
     if (participants.length === 0) return;
+    if (duplicateSummary) return;
 
     const startedRuns: RunV1[] = [];
 
@@ -209,19 +279,23 @@ export default function AddChallengersDialog({
                   {session ? `${session.start_article} → ${session.destination_article}` : "—"}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="text-[11px]">
-                  {rules.max_hops} hops
-                </Badge>
-                <Badge variant="outline" className="text-[11px]">
-                  {rules.max_links} links
-                </Badge>
-                <Badge variant="outline" className="text-[11px]">
-                  {rules.max_tokens} tokens
-                </Badge>
-              </div>
-            </div>
-          </Card>
+	              <div className="flex items-center gap-2">
+	                <Badge variant="outline" className="text-[11px]">
+	                  {rules.max_hops} hops
+	                </Badge>
+	                <Badge variant="outline" className="text-[11px]">
+	                  {rules.max_links === null
+	                    ? "∞ links"
+	                    : `${rules.max_links ?? DEFAULT_RULES.max_links} links`}
+	                </Badge>
+	                <Badge variant="outline" className="text-[11px]">
+	                  {rules.max_tokens === null
+	                    ? "∞ tokens"
+	                    : `${rules.max_tokens ?? DEFAULT_RULES.max_tokens} tokens`}
+	                </Badge>
+	              </div>
+	            </div>
+	          </Card>
 
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -288,11 +362,17 @@ export default function AddChallengersDialog({
             </div>
           ) : (
             <div className="space-y-3">
-              {participants.map((p) => (
-                <div
-                  key={p.id}
-                  className="rounded-lg border p-3 bg-card flex flex-col gap-3"
-                >
+              {participants.map((p) => {
+                const isDuplicate = duplicateParticipants.duplicateIds.has(p.id);
+
+                return (
+                  <div
+                    key={p.id}
+                    className={cn(
+                      "rounded-lg border p-3 bg-card flex flex-col gap-3",
+                      isDuplicate && "border-red-300 bg-red-50/40"
+                    )}
+                  >
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2">
                       {p.kind === "human" ? (
@@ -303,6 +383,14 @@ export default function AddChallengersDialog({
                       <div className="text-sm font-medium">
                         {p.kind === "human" ? "Human" : "Model"}
                       </div>
+                      {isDuplicate && (
+                        <Badge
+                          variant="outline"
+                          className="text-[11px] border-red-200 bg-red-50 text-red-800"
+                        >
+                          Duplicate
+                        </Badge>
+                      )}
                       {p.kind === "llm" && p.reasoningEffort?.trim() && (
                         <Badge variant="outline" className="text-[11px]">
                           effort: {p.reasoningEffort.trim()}
@@ -393,7 +481,8 @@ export default function AddChallengersDialog({
                     )}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
@@ -403,6 +492,21 @@ export default function AddChallengersDialog({
             </div>
           )}
         </div>
+
+        {duplicateSummary && (
+          <div className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-md p-3 flex flex-wrap items-center justify-between gap-2">
+            <div>Duplicates: {duplicateSummary}</div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7"
+              onClick={removeDuplicateParticipants}
+            >
+              Remove duplicates
+            </Button>
+          </div>
+        )}
 
         <Separator />
 

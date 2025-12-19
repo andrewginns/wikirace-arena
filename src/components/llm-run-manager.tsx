@@ -8,18 +8,38 @@ import {
   forceWinRun,
   useSessionsStore,
 } from "@/lib/session-store";
-import type { RunV1 } from "@/lib/session-types";
+import type { RunV1, SessionV1 } from "@/lib/session-types";
 import { wikiTitlesMatch } from "@/lib/wiki-title";
 
 const DEFAULT_MAX_STEPS = 20;
-const DEFAULT_MAX_LINKS = 200;
-const DEFAULT_MAX_TOKENS = 3000;
+const DEFAULT_MAX_LINKS: number | null = null;
+const DEFAULT_MAX_TOKENS: number | null = null;
 
-function getRunLimits(run: RunV1) {
+function getRunLimits(run: RunV1, session: SessionV1) {
+  const sessionRules = session.rules;
   return {
-    maxSteps: typeof run.max_steps === "number" ? run.max_steps : DEFAULT_MAX_STEPS,
-    maxLinks: typeof run.max_links === "number" ? run.max_links : DEFAULT_MAX_LINKS,
-    maxTokens: typeof run.max_tokens === "number" ? run.max_tokens : DEFAULT_MAX_TOKENS,
+    maxSteps:
+      typeof run.max_steps === "number"
+        ? run.max_steps
+        : typeof sessionRules?.max_hops === "number"
+        ? sessionRules.max_hops
+        : DEFAULT_MAX_STEPS,
+    maxLinks:
+      typeof run.max_links === "number"
+        ? run.max_links
+        : sessionRules?.max_links === null
+        ? null
+        : typeof sessionRules?.max_links === "number"
+        ? sessionRules.max_links
+        : DEFAULT_MAX_LINKS,
+    maxTokens:
+      typeof run.max_tokens === "number"
+        ? run.max_tokens
+        : sessionRules?.max_tokens === null
+        ? null
+        : typeof sessionRules?.max_tokens === "number"
+        ? sessionRules.max_tokens
+        : DEFAULT_MAX_TOKENS,
   };
 }
 
@@ -52,7 +72,7 @@ export default function LlmRunManager() {
         const controller = new AbortController();
         controllers.set(run.id, controller);
 
-        const limits = getRunLimits(run);
+        const limits = getRunLimits(run, session);
         let lastArticle = run.steps[run.steps.length - 1]?.article || session.start_article;
 
         void (async () => {

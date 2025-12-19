@@ -20,6 +20,48 @@ type StoreState = {
 const SESSIONS_STORAGE_KEY = 'wikirace:sessions:v1'
 const ACTIVE_SESSION_STORAGE_KEY = 'wikirace:active-session-id'
 
+const DEFAULT_SESSION_RULES: SessionRulesV1 = {
+  max_hops: 20,
+  max_links: null,
+  max_tokens: null,
+}
+
+function normalizeSessionRules(rules: unknown): SessionRulesV1 {
+  const raw = rules as Partial<SessionRulesV1> | null | undefined
+
+  const max_hops =
+    typeof raw?.max_hops === 'number' && Number.isFinite(raw.max_hops) && raw.max_hops > 0
+      ? raw.max_hops
+      : DEFAULT_SESSION_RULES.max_hops
+
+  const max_links =
+    raw?.max_links === null
+      ? null
+      : typeof raw?.max_links === 'number' &&
+          Number.isFinite(raw.max_links) &&
+          raw.max_links > 0
+        ? raw.max_links
+        : DEFAULT_SESSION_RULES.max_links
+
+  const max_tokens =
+    raw?.max_tokens === null
+      ? null
+      : typeof raw?.max_tokens === 'number' &&
+          Number.isFinite(raw.max_tokens) &&
+          raw.max_tokens > 0
+        ? raw.max_tokens
+        : DEFAULT_SESSION_RULES.max_tokens
+
+  return { max_hops, max_links, max_tokens }
+}
+
+function normalizeSession(session: SessionV1): SessionV1 {
+  return {
+    ...session,
+    rules: normalizeSessionRules(session.rules),
+  }
+}
+
 function safeParseJson<T>(value: string | null): T | null {
   if (!value) return null
   try {
@@ -36,8 +78,30 @@ function loadInitialState(): StoreState {
 
   const active_session_id = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY)
 
+  const sessionsRaw = stored?.sessions || {}
+  let changed = false
+  const sessions: Record<string, SessionV1> = {}
+
+  for (const [id, session] of Object.entries(sessionsRaw)) {
+    const normalized = normalizeSession(session)
+    sessions[id] = normalized
+
+    const a = session.rules
+    const b = normalized.rules
+    const rulesChanged =
+      !a ||
+      a.max_hops !== b.max_hops ||
+      a.max_links !== b.max_links ||
+      a.max_tokens !== b.max_tokens
+    if (rulesChanged) changed = true
+  }
+
+  if (changed) {
+    window.localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify({ sessions }))
+  }
+
   return {
-    sessions: stored?.sessions || {},
+    sessions,
     active_session_id: active_session_id || null,
   }
 }
@@ -105,13 +169,14 @@ export function createSession({
 }) {
   const id = makeId('session')
   const created_at = nowIso()
+  const normalizedRules = normalizeSessionRules(rules)
   const session: SessionV1 = {
     id,
     title,
     start_article: startArticle,
     destination_article: destinationArticle,
     created_at,
-    rules,
+    rules: normalizedRules,
     human_timer: humanTimer,
     runs: [],
   }
@@ -259,8 +324,8 @@ export function startLlmRun({
   apiBase?: string
   reasoningEffort?: string
   maxSteps?: number
-  maxLinks?: number
-  maxTokens?: number
+  maxLinks?: number | null
+  maxTokens?: number | null
   isBaseline?: boolean
   startedAtIso?: string
 }) {

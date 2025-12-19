@@ -7,6 +7,7 @@ import { useMemo, useState, useEffect, useRef } from "react";
 import { Card } from "@/components/ui/card";
 import ForceDirectedGraph from "@/components/force-directed-graph";
 import RunsList from "@/components/runs-list";
+import { cn } from "@/lib/utils";
 import { 
   Select, 
   SelectContent, 
@@ -30,6 +31,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { addViewerDataset, removeViewerDataset, useViewerDatasetsStore } from "@/lib/viewer-datasets";
+import { formatHops, viewerRunHops } from "@/lib/hops";
 
 const defaultModels = {
   "Qwen3-14B": q3Results,
@@ -42,18 +44,19 @@ interface Run {
   destination_article: string;
   steps: string[];
   result: string;
+  near_miss?: boolean;
 }
 
 // Interface for model statistics
 interface ModelStats {
   winPercentage: number;
-  avgSteps: number;
-  stdDevSteps: number;
+  avgHops: number;
+  stdDevHops: number;
   totalRuns: number;
   wins: number;
-  medianSteps: number;
-  minSteps: number;
-  maxSteps: number;
+  medianHops: number;
+  minHops: number;
+  maxHops: number;
 }
 
 export default function ViewerTab({
@@ -70,6 +73,8 @@ export default function ViewerTab({
   const [importText, setImportText] = useState<string>("");
   const [importName, setImportName] = useState<string>("");
   const [importError, setImportError] = useState<string | null>(null);
+  const [showWinsOnly, setShowWinsOnly] = useState<boolean>(true);
+  const [pendingSelectRun, setPendingSelectRun] = useState<Run | null>(null);
   
   const savedModels = useMemo(() => {
     const obj: Record<string, unknown> = {};
@@ -87,6 +92,24 @@ export default function ViewerTab({
   }, [savedModels]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const winRuns = useMemo(() => runs.filter((run) => run.result === "win"), [runs]);
+  const bestRun = useMemo(() => {
+    if (winRuns.length === 0) return null;
+    return winRuns.reduce((best, run) => {
+      const bestHops = viewerRunHops(best);
+      const runHops = viewerRunHops(run);
+      return runHops < bestHops ? run : best;
+    });
+  }, [winRuns]);
+  const worstRun = useMemo(() => {
+    if (runs.length === 0) return null;
+    return runs.reduce((worst, run) => {
+      const worstHops = viewerRunHops(worst);
+      const runHops = viewerRunHops(run);
+      return runHops > worstHops ? run : worst;
+    });
+  }, [runs]);
+
   useEffect(() => {
     // Keep selected model valid as models change.
     if (!(selectedModel in models)) {
@@ -97,7 +120,7 @@ export default function ViewerTab({
 
   useEffect(() => {
     // Convert the model data to the format expected by RunsList
-    const convertedRuns = models[selectedModel]?.runs?.map((run: {
+    const convertedRuns: Run[] = models[selectedModel]?.runs?.map((run: {
       start_article: string;
       destination_article: string;
       steps: { type: string; article: string }[];
@@ -108,45 +131,56 @@ export default function ViewerTab({
       steps: run.steps.map((step: { article: string }) => step.article),
       result: run.result
     })) || [];
-    setRuns(convertedRuns);
+    const winRunsForModel = convertedRuns.filter((run) => run.result === "win");
+    const minWinHops =
+      winRunsForModel.length > 0
+        ? Math.min(...winRunsForModel.map((run) => viewerRunHops(run)))
+        : null;
+    const withNearMiss: Run[] = convertedRuns.map((run) => ({
+      ...run,
+      near_miss:
+        minWinHops !== null &&
+        run.result !== "win" &&
+        viewerRunHops(run) <= minWinHops + 2,
+    }));
+    setRuns(withNearMiss);
 
     // Calculate model statistics
-    const winRuns = convertedRuns.filter(run => run.result === "win");
     const totalRuns = convertedRuns.length;
-    const wins = winRuns.length;
+    const wins = winRunsForModel.length;
     const winPercentage = totalRuns > 0 ? (wins / totalRuns) * 100 : 0;
     
-    // Calculate steps statistics for winning runs
-    const stepCounts = winRuns.map(run => run.steps.length);
-    const avgSteps = stepCounts.length > 0 
-      ? stepCounts.reduce((sum, count) => sum + count, 0) / stepCounts.length 
+    // Calculate hops statistics for winning runs (hops = link-clicks/moves, not nodes)
+    const hopCounts = winRunsForModel.map((run) => viewerRunHops(run));
+    const avgHops = hopCounts.length > 0 
+      ? hopCounts.reduce((sum, count) => sum + count, 0) / hopCounts.length 
       : 0;
     
     // Calculate standard deviation
-    const variance = stepCounts.length > 0
-      ? stepCounts.reduce((sum, count) => sum + Math.pow(count - avgSteps, 2), 0) / stepCounts.length
+    const variance = hopCounts.length > 0
+      ? hopCounts.reduce((sum, count) => sum + Math.pow(count - avgHops, 2), 0) / hopCounts.length
       : 0;
-    const stdDevSteps = Math.sqrt(variance);
+    const stdDevHops = Math.sqrt(variance);
 
     // Calculate median, min, max steps
-    const sortedSteps = [...stepCounts].sort((a, b) => a - b);
-    const medianSteps = stepCounts.length > 0
-      ? stepCounts.length % 2 === 0
-        ? (sortedSteps[stepCounts.length / 2 - 1] + sortedSteps[stepCounts.length / 2]) / 2
-        : sortedSteps[Math.floor(stepCounts.length / 2)]
+    const sortedHops = [...hopCounts].sort((a, b) => a - b);
+    const medianHops = hopCounts.length > 0
+      ? hopCounts.length % 2 === 0
+        ? (sortedHops[hopCounts.length / 2 - 1] + sortedHops[hopCounts.length / 2]) / 2
+        : sortedHops[Math.floor(hopCounts.length / 2)]
       : 0;
-    const minSteps = stepCounts.length > 0 ? Math.min(...stepCounts) : 0;
-    const maxSteps = stepCounts.length > 0 ? Math.max(...stepCounts) : 0;
+    const minHops = hopCounts.length > 0 ? Math.min(...hopCounts) : 0;
+    const maxHops = hopCounts.length > 0 ? Math.max(...hopCounts) : 0;
 
     setModelStats({
       winPercentage,
-      avgSteps,
-      stdDevSteps,
+      avgHops,
+      stdDevHops,
       totalRuns,
       wins,
-      medianSteps,
-      minSteps,
-      maxSteps
+      medianHops,
+      minHops,
+      maxHops
     });
   }, [selectedModel, models]);
 
@@ -159,10 +193,46 @@ export default function ViewerTab({
   };
 
   const filterRuns = useMemo(() => {
-    return runs.filter(run => run.result === "win");
-  }, [runs]);
+    if (showWinsOnly) return runs.filter((run) => run.result === "win");
+    return runs;
+  }, [runs, showWinsOnly]);
 
   const selectedRunData = selectedRun === null ? null : filterRuns[selectedRun] || null;
+
+  const selectRunFromSummary = (run: Run | null) => {
+    if (!run) return;
+    pauseAutoplay();
+
+    const idx = filterRuns.indexOf(run);
+    if (idx >= 0) {
+      setSelectedRun(idx);
+      return;
+    }
+
+    // The run is hidden by the wins-only filter (or filtered out); expand and then select.
+    setSelectedRun(null);
+    setPendingSelectRun(run);
+    setShowWinsOnly(false);
+  };
+
+  useEffect(() => {
+    if (!pendingSelectRun) return;
+    const idx = filterRuns.indexOf(pendingSelectRun);
+    if (idx < 0) return;
+    setSelectedRun(idx);
+    setPendingSelectRun(null);
+  }, [filterRuns, pendingSelectRun]);
+
+  useEffect(() => {
+    if (selectedRun === null) return;
+    if (filterRuns.length === 0) {
+      setSelectedRun(null);
+      return;
+    }
+    if (selectedRun > filterRuns.length - 1) {
+      setSelectedRun(0);
+    }
+  }, [filterRuns.length, selectedRun]);
 
   // Convert the runs to the format expected by ForceDirectedGraph
   const forceGraphRuns = useMemo(() => {
@@ -230,150 +300,215 @@ export default function ViewerTab({
   return (
     <div className="grid grid-cols-1 md:grid-cols-12 gap-4 h-[calc(100vh_-_200px)] max-h-[calc(100vh_-_200px)] overflow-hidden p-2">
      <Card className="p-3 col-span-12 row-start-1">
-       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-         <div className="flex-shrink-0">
-           <Select value={selectedModel} onValueChange={setSelectedModel}>
-             <SelectTrigger className="w-[180px]">
-               <SelectValue placeholder="Select model" />
-             </SelectTrigger>
-             <SelectContent>
-               {Object.keys(models).map((modelName) => (
-                 <SelectItem key={modelName} value={modelName}>
-                   {modelName}
-                 </SelectItem>
-               ))}
-             </SelectContent>
-           </Select>
-         </div>
-         
-         <Button 
-           variant="outline" 
-           size="sm" 
-           className="flex items-center gap-1" 
-           onClick={handleUploadClick}
-         >
-           <UploadIcon size={14} />
-           <span>Upload JSON</span>
-           <input 
-             type="file" 
-             ref={fileInputRef}
-             accept=".json" 
-             className="hidden" 
-             onChange={handleFileUpload} 
-           />
-         </Button>
+       <div className="space-y-3">
+         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+           <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+             <div className="flex-shrink-0">
+               <Select value={selectedModel} onValueChange={setSelectedModel}>
+                 <SelectTrigger className="w-[220px]">
+                   <SelectValue placeholder="Select model" />
+                 </SelectTrigger>
+                 <SelectContent>
+                   {Object.keys(models).map((modelName) => (
+                     <SelectItem key={modelName} value={modelName}>
+                       {modelName}
+                     </SelectItem>
+                   ))}
+                 </SelectContent>
+               </Select>
+             </div>
 
-         <Dialog>
-           <DialogTrigger asChild>
-             <Button variant="outline" size="sm" className="flex items-center gap-1">
-               <UploadIcon size={14} />
-               <span>Paste JSON</span>
-             </Button>
-           </DialogTrigger>
-           <DialogContent className="max-w-3xl">
-             <DialogHeader>
-               <DialogTitle>Import dataset JSON</DialogTitle>
-               <DialogDescription>
-                 Paste a viewer-compatible JSON file (must contain a top-level 'runs' array).
-               </DialogDescription>
-             </DialogHeader>
-             <div className="space-y-3">
-               <div>
-                 <Label htmlFor="dataset-name">Name</Label>
-                 <Input
-                   id="dataset-name"
-                   value={importName}
-                   onChange={(e) => setImportName(e.target.value)}
-                   placeholder="My results"
+             <div className="flex flex-wrap items-center gap-2">
+               <Button
+                 variant="outline"
+                 size="sm"
+                 className="flex items-center gap-1"
+                 onClick={handleUploadClick}
+               >
+                 <UploadIcon size={14} />
+                 <span>Upload JSON</span>
+                 <input
+                   type="file"
+                   ref={fileInputRef}
+                   accept=".json"
+                   className="hidden"
+                   onChange={handleFileUpload}
                  />
-               </div>
-               <textarea
-                 className="w-full h-64 text-xs font-mono border rounded-md p-2"
-                 value={importText}
-                 onChange={(e) => setImportText(e.target.value)}
-                 placeholder='{"runs": [...], ...}'
-               />
-               {importError && (
-                 <div className="text-sm text-red-800 bg-red-50 border border-red-200 rounded-md p-2">
-                   {importError}
-                 </div>
+               </Button>
+
+               <Dialog>
+                 <DialogTrigger asChild>
+                   <Button variant="outline" size="sm" className="flex items-center gap-1">
+                     <UploadIcon size={14} />
+                     <span>Paste JSON</span>
+                   </Button>
+                 </DialogTrigger>
+                 <DialogContent className="max-w-3xl">
+                   <DialogHeader>
+                     <DialogTitle>Import dataset JSON</DialogTitle>
+                     <DialogDescription>
+                       Paste a viewer-compatible JSON file (must contain a top-level 'runs' array).
+                     </DialogDescription>
+                   </DialogHeader>
+                   <div className="space-y-3">
+                     <div>
+                       <Label htmlFor="dataset-name">Name</Label>
+                       <Input
+                         id="dataset-name"
+                         value={importName}
+                         onChange={(e) => setImportName(e.target.value)}
+                         placeholder="My results"
+                       />
+                     </div>
+                     <textarea
+                       className="w-full h-64 text-xs font-mono border rounded-md p-2"
+                       value={importText}
+                       onChange={(e) => setImportText(e.target.value)}
+                       placeholder='{"runs": [...], ...}'
+                     />
+                     {importError && (
+                       <div className="text-sm text-red-800 bg-red-50 border border-red-200 rounded-md p-2">
+                         {importError}
+                       </div>
+                     )}
+                   </div>
+                   <DialogFooter>
+                     <Button onClick={handleImportFromText} disabled={importText.trim().length === 0}>
+                       Import
+                     </Button>
+                   </DialogFooter>
+                 </DialogContent>
+               </Dialog>
+
+               {datasets.length > 0 && (
+                 <Dialog>
+                   <DialogTrigger asChild>
+                     <Button variant="outline" size="sm" className="flex items-center gap-1">
+                       <Trash2 size={14} />
+                       <span>Manage</span>
+                     </Button>
+                   </DialogTrigger>
+                   <DialogContent className="max-w-2xl">
+                     <DialogHeader>
+                       <DialogTitle>Saved datasets</DialogTitle>
+                       <DialogDescription>
+                         Remove datasets saved locally in this browser.
+                       </DialogDescription>
+                     </DialogHeader>
+                     <div className="space-y-2">
+                       {datasets.map((d) => (
+                         <div key={d.id} className="flex items-center justify-between gap-2 border rounded-md p-2">
+                           <div className="text-sm font-medium">{d.name}</div>
+                           <Button
+                             variant="outline"
+                             size="sm"
+                             onClick={() => {
+                               removeViewerDataset(d.id);
+                             }}
+                           >
+                             Remove
+                           </Button>
+                         </div>
+                       ))}
+                     </div>
+                   </DialogContent>
+                 </Dialog>
                )}
              </div>
-             <DialogFooter>
-               <Button onClick={handleImportFromText} disabled={importText.trim().length === 0}>
-                 Import
-               </Button>
-             </DialogFooter>
-           </DialogContent>
-         </Dialog>
+           </div>
 
-         {datasets.length > 0 && (
-           <Dialog>
-             <DialogTrigger asChild>
-               <Button variant="outline" size="sm" className="flex items-center gap-1">
-                 <Trash2 size={14} />
-                 <span>Manage</span>
-               </Button>
-             </DialogTrigger>
-             <DialogContent className="max-w-2xl">
-               <DialogHeader>
-                 <DialogTitle>Saved datasets</DialogTitle>
-                 <DialogDescription>
-                   Remove datasets saved locally in this browser.
-                 </DialogDescription>
-               </DialogHeader>
-               <div className="space-y-2">
-                 {datasets.map((d) => (
-                   <div key={d.id} className="flex items-center justify-between gap-2 border rounded-md p-2">
-                     <div className="text-sm font-medium">{d.name}</div>
-                     <Button
-                       variant="outline"
-                       size="sm"
-                       onClick={() => {
-                         removeViewerDataset(d.id);
-                       }}
-                     >
-                       Remove
-                     </Button>
-                   </div>
-                 ))}
+           <div className="flex items-center gap-2 text-xs sm:flex-shrink-0">
+             <Button
+               size="sm"
+               variant={showWinsOnly ? "secondary" : "outline"}
+               className="h-8 px-3"
+               onClick={() => setShowWinsOnly((prev) => !prev)}
+             >
+               {showWinsOnly ? "Wins only: On" : "Wins only: Off"}
+             </Button>
+           </div>
+         </div>
+
+         {(modelStats || runs.length > 0) && (
+           <div className="flex flex-col gap-2 w-full">
+             {modelStats && (
+               <div className="flex flex-wrap gap-1.5 items-center">
+                 <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                   <span className="text-xs font-medium">Success:</span>
+                   <span className="text-xs font-semibold">{modelStats.winPercentage.toFixed(1)}%</span>
+                   <span className="text-xs text-muted-foreground">({modelStats.wins}/{modelStats.totalRuns})</span>
+                 </Badge>
+
+                 <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                   <span className="text-xs font-medium">Mean hops:</span>
+                   <span className="text-xs font-semibold">{modelStats.avgHops.toFixed(1)}</span>
+                   <span className="text-xs text-muted-foreground">+/-{modelStats.stdDevHops.toFixed(1)}</span>
+                 </Badge>
+
+                 <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                   <span className="text-xs font-medium">Median hops:</span>
+                   <span className="text-xs font-semibold">{modelStats.medianHops.toFixed(1)}</span>
+                 </Badge>
+
+                 <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                   <span className="text-xs font-medium">Min hops:</span>
+                   <span className="text-xs font-semibold">{modelStats.minHops}</span>
+                 </Badge>
+
+                 <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                   <span className="text-xs font-medium">Max hops:</span>
+                   <span className="text-xs font-semibold">{modelStats.maxHops}</span>
+                 </Badge>
                </div>
-             </DialogContent>
-           </Dialog>
-         )}
-         
-         {modelStats && (
-           <div className="flex flex-wrap gap-1.5 items-center">
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Success:</span>
-               <span className="text-xs font-semibold">{modelStats.winPercentage.toFixed(1)}%</span>
-               <span className="text-xs text-muted-foreground">({modelStats.wins}/{modelStats.totalRuns})</span>
-             </Badge>
-             
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Mean:</span>
-               <span className="text-xs font-semibold">{modelStats.avgSteps.toFixed(1)}</span>
-               <span className="text-xs text-muted-foreground">+/-{modelStats.stdDevSteps.toFixed(1)}</span>
-             </Badge>
-             
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Median:</span>
-               <span className="text-xs font-semibold">{modelStats.medianSteps.toFixed(1)}</span>
-             </Badge>
-             
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Min:</span>
-               <span className="text-xs font-semibold">{modelStats.minSteps}</span>
-             </Badge>
-             
-             <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-               <span className="text-xs font-medium">Max:</span>
-               <span className="text-xs font-semibold">{modelStats.maxSteps}</span>
-             </Badge>
+             )}
+
+             {runs.length > 0 && (
+               <div className="grid gap-3 sm:grid-cols-2 text-xs text-muted-foreground">
+                 <button
+                   type="button"
+                   className={cn(
+                     "rounded-md border p-2 bg-muted/30 text-left transition-colors",
+                     bestRun ? "hover:bg-muted/40" : "opacity-60 cursor-not-allowed"
+                   )}
+                   onClick={() => selectRunFromSummary(bestRun)}
+                   disabled={!bestRun}
+                 >
+                   <div className="font-medium text-foreground text-sm">Best run</div>
+                   {bestRun ? (
+                     <div className="mt-1">
+                       {bestRun.start_article} → {bestRun.destination_article}
+                       <div className="text-[11px]">{formatHops(viewerRunHops(bestRun))}</div>
+                     </div>
+                   ) : (
+                     <div className="mt-1">No wins yet</div>
+                   )}
+                 </button>
+
+                 <button
+                   type="button"
+                   className={cn(
+                     "rounded-md border p-2 bg-muted/30 text-left transition-colors",
+                     worstRun ? "hover:bg-muted/40" : "opacity-60 cursor-not-allowed"
+                   )}
+                   onClick={() => selectRunFromSummary(worstRun)}
+                   disabled={!worstRun}
+                 >
+                   <div className="font-medium text-foreground text-sm">Longest run</div>
+                   {worstRun ? (
+                     <div className="mt-1">
+                       {worstRun.start_article} → {worstRun.destination_article}
+                       <div className="text-[11px]">{formatHops(viewerRunHops(worstRun))}</div>
+                     </div>
+                   ) : (
+                     <div className="mt-1">No data yet</div>
+                   )}
+                 </button>
+               </div>
+             )}
            </div>
          )}
        </div>
-     </Card>
+      </Card>
       <div className="md:col-span-3 flex flex-col max-h-full overflow-hidden">
         <div className="bg-card rounded-lg p-3 border flex-grow overflow-hidden flex flex-col">
           <h3 className="text-sm font-medium mb-2 text-muted-foreground flex-shrink-0">

@@ -11,8 +11,8 @@ export type RaceParticipantDraft = {
 
 export type RaceRules = {
   maxHops: number;
-  maxLinks: number;
-  maxTokens: number;
+  maxLinks: number | null;
+  maxTokens: number | null;
 };
 
 export type RaceConfig = {
@@ -25,4 +25,3 @@ export type RaceConfig = {
     autoStartOnFirstAction: boolean;
   };
 };
-

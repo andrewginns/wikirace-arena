@@ -6,11 +6,14 @@ import { useState, useEffect, useRef } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { formatHops, viewerRunHops } from "@/lib/hops";
 
 interface Run {
   start_article: string;
   destination_article: string;
   steps: string[];
+  result?: string;
+  near_miss?: boolean;
 }
 
 interface RunsListProps {
@@ -128,23 +131,24 @@ export default function RunsList({
 
   // Scroll selected run into view when it changes
   useEffect(() => {
-    if (selectedRunId !== null && isPlaying && !userScrollLockRef.current) {
-      const selectedElement = runItemsRef.current.get(selectedRunId);
-      if (selectedElement && listContainerRef.current) {
-        programmaticScrollRef.current = true;
-        selectedElement.scrollIntoView({
-          behavior: 'smooth',
-          block: 'nearest'
-        });
+    if (selectedRunId === null) return;
+    if (isPlaying && userScrollLockRef.current) return;
 
-        if (programmaticScrollTimeoutRef.current) {
-          window.clearTimeout(programmaticScrollTimeoutRef.current);
-        }
-        programmaticScrollTimeoutRef.current = window.setTimeout(() => {
-          programmaticScrollRef.current = false;
-          programmaticScrollTimeoutRef.current = null;
-        }, 1000);
+    const selectedElement = runItemsRef.current.get(selectedRunId);
+    if (selectedElement && listContainerRef.current) {
+      programmaticScrollRef.current = true;
+      selectedElement.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest'
+      });
+
+      if (programmaticScrollTimeoutRef.current) {
+        window.clearTimeout(programmaticScrollTimeoutRef.current);
       }
+      programmaticScrollTimeoutRef.current = window.setTimeout(() => {
+        programmaticScrollRef.current = false;
+        programmaticScrollTimeoutRef.current = null;
+      }, 1000);
     }
   }, [selectedRunId, isPlaying]);
 
@@ -208,6 +212,9 @@ export default function RunsList({
       >
         {filteredRuns.map((run) => {
           const originalIndex = runs.indexOf(run);
+          const isNearMiss = run.near_miss;
+          const isWin = run.result === "win";
+          const hops = viewerRunHops(run);
           return (
             <Card
               key={originalIndex}
@@ -252,8 +259,21 @@ export default function RunsList({
                     </div>
                     <div className="flex items-center gap-2">
                       <Badge variant="outline" className="text-xs px-2 py-0 h-5">
-                        {run.steps.length} {run.steps.length === 1 ? 'hop' : 'hops'}
+                        {formatHops(hops)}
                       </Badge>
+                      {run.result && !isWin && (
+                        <Badge variant="secondary" className="text-[11px] h-5 px-2 py-0">
+                          {run.result}
+                        </Badge>
+                      )}
+                      {isNearMiss && (
+                        <Badge
+                          variant="outline"
+                          className="text-[11px] h-5 px-2 py-0 border-amber-200 bg-amber-50 text-amber-800"
+                        >
+                          Near miss
+                        </Badge>
+                      )}
                       {selectedRunId === originalIndex && (
                         <div className="flex items-center gap-1 text-xs text-primary">
                           <div
