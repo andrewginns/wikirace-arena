@@ -51,6 +51,22 @@ function participantKey(p: RaceParticipantDraft) {
   return `llm:${p.model || ""}:${p.apiBase || ""}:${p.reasoningEffort || ""}`;
 }
 
+function normalizedHumanName(name: string) {
+  const trimmed = name.trim();
+  return trimmed.length > 0 ? trimmed : "Human";
+}
+
+function participantDuplicateLabel(p: RaceParticipantDraft) {
+  if (p.kind === "human") return normalizedHumanName(p.name);
+  const model = p.model || "llm";
+  const effort = p.reasoningEffort?.trim();
+  const apiBase = p.apiBase?.trim();
+  const parts: string[] = [];
+  if (effort) parts.push(`effort: ${effort}`);
+  if (apiBase) parts.push(`api_base: ${apiBase}`);
+  return parts.length > 0 ? `${model} (${parts.join(" • ")})` : model;
+}
+
 type Preset = {
   id: "sprint" | "classic" | "marathon";
   name: string;
@@ -69,13 +85,13 @@ const PRESETS: Preset[] = [
     id: "classic",
     name: "Classic",
     description: "Balanced default.",
-    rules: { maxHops: 20, maxLinks: 200, maxTokens: 3000 },
+    rules: { maxHops: 20, maxLinks: null, maxTokens: null },
   },
   {
     id: "marathon",
     name: "Marathon",
     description: "More hops + more thinking time.",
-    rules: { maxHops: 35, maxLinks: 300, maxTokens: 4500 },
+    rules: { maxHops: 35, maxLinks: null, maxTokens: null },
   },
 ];
 
@@ -142,8 +158,53 @@ export default function RaceSetup({
     startPage.trim().length > 0 &&
     targetPage.trim().length > 0 &&
     startPage.trim() !== targetPage.trim();
-  const canStart =
-    pagesValid && participants.length > 0;
+
+  const duplicateParticipants = useMemo(() => {
+    const counts = new Map<string, number>();
+    const firstByKey = new Map<string, RaceParticipantDraft>();
+
+    for (const p of participants) {
+      const key = participantKey(p);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (!firstByKey.has(key)) firstByKey.set(key, p);
+    }
+
+    const duplicateKeys = new Set<string>();
+    const duplicateIds = new Set<string>();
+    const labels: Array<{ label: string; count: number }> = [];
+
+    for (const [key, count] of counts.entries()) {
+      if (count <= 1) continue;
+      duplicateKeys.add(key);
+      const first = firstByKey.get(key);
+      labels.push({
+        label: first ? participantDuplicateLabel(first) : key,
+        count,
+      });
+    }
+
+    labels.sort((a, b) => a.label.localeCompare(b.label));
+
+    for (const p of participants) {
+      const key = participantKey(p);
+      if (duplicateKeys.has(key)) duplicateIds.add(p.id);
+    }
+
+    return { duplicateKeys, duplicateIds, labels };
+  }, [participants]);
+
+  const duplicateSummary =
+    duplicateParticipants.duplicateKeys.size > 0
+      ? duplicateParticipants.labels
+          .map(({ label, count }) => `${label} (×${count})`)
+          .join(", ")
+      : null;
+
+  const errors: string[] = [];
+  if (!pagesValid) errors.push("Pick two different pages.");
+  if (participants.length === 0) errors.push("Add at least one participant.");
+
+  const canStart = pagesValid && participants.length > 0 && duplicateSummary === null;
 
   const selectRandomArticle = (setter: (article: string) => void) => {
     if (popularNodes.length > 0) {
@@ -255,6 +316,18 @@ export default function RaceSetup({
     setParticipants((prev) => prev.filter((p) => p.id !== id));
   };
 
+  const removeDuplicateParticipants = () => {
+    setParticipants((prev) => {
+      const seen = new Set<string>();
+      return prev.filter((p) => {
+        const key = participantKey(p);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    });
+  };
+
   const startRace = () => {
     const config: RaceConfig = {
       title: title.trim().length > 0 ? title.trim() : undefined,
@@ -334,39 +407,55 @@ export default function RaceSetup({
                     />
                   </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="max-links">Max links per page (LLMs)</Label>
-                    <Input
-                      id="max-links"
-                      type="number"
-                      min={1}
-                      max={1000}
-                      value={rules.maxLinks}
-                      onChange={(e) =>
-                        setRules((r) => ({
-                          ...r,
-                          maxLinks: Number.parseInt(e.target.value || "0"),
-                        }))
-                      }
-                    />
-                  </div>
+	                  <div className="space-y-2">
+	                    <Label htmlFor="max-links">Max links per page (LLMs)</Label>
+	                    <Input
+	                      id="max-links"
+	                      type="number"
+	                      min={1}
+	                      max={1000}
+	                      placeholder="Unlimited"
+	                      value={rules.maxLinks === null ? "" : String(rules.maxLinks)}
+	                      onChange={(e) => {
+	                        const raw = e.target.value;
+	                        const parsed = Number.parseInt(raw, 10);
+	                        setRules((r) => ({
+	                          ...r,
+	                          maxLinks:
+	                            raw.trim().length === 0
+	                              ? null
+	                              : Number.isFinite(parsed) && parsed > 0
+	                              ? parsed
+	                              : null,
+	                        }));
+	                      }}
+	                    />
+	                  </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="max-tokens">Max tokens (LLMs)</Label>
-                    <Input
-                      id="max-tokens"
-                      type="number"
-                      min={1}
-                      max={10000}
-                      value={rules.maxTokens}
-                      onChange={(e) =>
-                        setRules((r) => ({
-                          ...r,
-                          maxTokens: Number.parseInt(e.target.value || "0"),
-                        }))
-                      }
-                    />
-                  </div>
+	                  <div className="space-y-2">
+	                    <Label htmlFor="max-tokens">Max tokens (LLMs)</Label>
+	                    <Input
+	                      id="max-tokens"
+	                      type="number"
+	                      min={1}
+	                      max={10000}
+	                      placeholder="Unlimited"
+	                      value={rules.maxTokens === null ? "" : String(rules.maxTokens)}
+	                      onChange={(e) => {
+	                        const raw = e.target.value;
+	                        const parsed = Number.parseInt(raw, 10);
+	                        setRules((r) => ({
+	                          ...r,
+	                          maxTokens:
+	                            raw.trim().length === 0
+	                              ? null
+	                              : Number.isFinite(parsed) && parsed > 0
+	                              ? parsed
+	                              : null,
+	                        }));
+	                      }}
+	                    />
+	                  </div>
 
                   <div className="md:col-span-2 rounded-lg border bg-muted/20 p-3 flex items-start justify-between gap-3">
                     <div className="space-y-0.5">
@@ -418,8 +507,8 @@ export default function RaceSetup({
 
         <Separator className="my-6" />
 
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-          <div className="md:col-span-7 space-y-6">
+	        <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+	          <div className="md:col-span-7 lg:col-span-6 space-y-6">
             <div className="space-y-3">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                 <div className="space-y-1">
@@ -512,11 +601,14 @@ export default function RaceSetup({
                     )}
                   >
                     <div className="font-medium">{p.name}</div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {p.rules.maxHops} hops
-                    </div>
-                  </button>
-                ))}
+                    <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
+	                      <div>{p.rules.maxHops} hops</div>
+	                      <div className="text-[11px] text-muted-foreground/80">
+	                        LLM: {p.rules.maxLinks ?? "∞"} links • {p.rules.maxTokens ?? "∞"} tokens
+	                      </div>
+	                    </div>
+	                  </button>
+	                ))}
               </div>
               {matchedPreset === null && (
                 <div className="text-xs text-muted-foreground">
@@ -526,206 +618,273 @@ export default function RaceSetup({
             </div>
           </div>
 
-          <div className="md:col-span-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Users className="h-4 w-4 text-muted-foreground" />
-                <h4 className="text-sm font-medium">Participants</h4>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button size="sm" variant="outline" className="gap-1" onClick={addHuman}>
-                  <Plus className="h-4 w-4" />
-                  Human
-                </Button>
-                <Button size="sm" variant="outline" className="gap-1" onClick={addLlm}>
-                  <Plus className="h-4 w-4" />
-                  Model
-                </Button>
-                <Popover open={participantPresetsOpen} onOpenChange={setParticipantPresetsOpen}>
-                  <PopoverTrigger asChild>
-                    <Button size="sm" variant="outline">
-                      Presets
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="p-1 w-72" align="end">
-                    <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                      Add multiple participants at once (additive).
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="w-full justify-start"
-                      onClick={() => {
-                        addAllPresetModels();
-                        setParticipantPresetsOpen(false);
-                      }}
-                    >
-                      All preset models
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="w-full justify-start"
-                      onClick={() => {
-                        addGpt52ReasoningSweep();
-                        setParticipantPresetsOpen(false);
-                      }}
-                    >
-                      GPT-5.2 reasoning sweep
-                    </Button>
-                  </PopoverContent>
-                </Popover>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={clearParticipants}
-                  disabled={participants.length === 0}
-                >
-                  Clear
-                </Button>
-              </div>
-            </div>
+	          <div
+	            className="md:col-span-5 lg:col-span-6 md:sticky md:top-6 md:self-start"
+	            id="participants-section"
+	          >
+	            <div className="rounded-xl border bg-muted/10 overflow-hidden md:max-h-[calc(100vh-8rem)] md:flex md:flex-col md:min-h-0">
+	              <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between border-b bg-background/40">
+	                <div className="flex items-center gap-2">
+	                  <Users className="h-4 w-4 text-muted-foreground" />
+	                  <div className="space-y-0.5">
+	                    <h4 className="text-sm font-medium">Participants</h4>
+	                    <div className="text-xs text-muted-foreground">
+	                      {participants.length} participant
+	                      {participants.length === 1 ? "" : "s"} • hotseat supported
+	                    </div>
+	                  </div>
+	                </div>
 
-            <div className="space-y-3">
-              {participants.map((p) => (
-                <div
-                  key={p.id}
-                  className="rounded-lg border p-3 bg-card flex flex-col gap-3"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      {p.kind === "human" ? (
-                        <Users className="h-4 w-4 text-muted-foreground" />
-                      ) : (
-                        <Bot className="h-4 w-4 text-muted-foreground" />
-                      )}
-                      <div className="flex items-center gap-2">
-                        <div className="text-sm font-medium">
-                          {p.kind === "human" ? "Human" : "Model"}
-                        </div>
-                        {p.kind === "llm" && p.reasoningEffort?.trim() && (
-                          <Badge variant="outline" className="text-[11px]">
-                            effort: {p.reasoningEffort.trim()}
-                          </Badge>
-                        )}
-                      </div>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="text-muted-foreground"
-                      aria-label="Remove participant"
-                      onClick={() => removeParticipant(p.id)}
-                      disabled={participants.length <= 1}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
+	                <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+	                  <Button size="sm" variant="outline" className="gap-1" onClick={addHuman}>
+	                    <Plus className="h-4 w-4" />
+	                    Human
+	                  </Button>
+	                  <Button size="sm" variant="outline" className="gap-1" onClick={addLlm}>
+	                    <Plus className="h-4 w-4" />
+	                    Model
+	                  </Button>
+	                  <Popover
+	                    open={participantPresetsOpen}
+	                    onOpenChange={setParticipantPresetsOpen}
+	                  >
+	                    <PopoverTrigger asChild>
+	                      <Button size="sm" variant="outline">
+	                        Presets
+	                      </Button>
+	                    </PopoverTrigger>
+	                    <PopoverContent className="p-1 w-72" align="end">
+	                      <div className="px-2 py-1.5 text-xs text-muted-foreground">
+	                        Add multiple participants at once (additive).
+	                      </div>
+	                      <Button
+	                        type="button"
+	                        variant="ghost"
+	                        className="w-full justify-start"
+	                        onClick={() => {
+	                          addAllPresetModels();
+	                          setParticipantPresetsOpen(false);
+	                        }}
+	                      >
+	                        All preset models
+	                      </Button>
+	                      <Button
+	                        type="button"
+	                        variant="ghost"
+	                        className="w-full justify-start"
+	                        onClick={() => {
+	                          addGpt52ReasoningSweep();
+	                          setParticipantPresetsOpen(false);
+	                        }}
+	                      >
+	                        GPT-5.2 reasoning sweep
+	                      </Button>
+	                    </PopoverContent>
+	                  </Popover>
+	                  <Button
+	                    size="sm"
+	                    variant="outline"
+	                    onClick={clearParticipants}
+	                    disabled={participants.length === 0}
+	                  >
+	                    Clear
+	                  </Button>
+	                </div>
+	              </div>
 
-                  <div className="grid grid-cols-1 gap-3">
-                    {p.kind === "human" && (
-                      <div className="space-y-2">
-                        <Label className="text-xs text-muted-foreground">
-                          Display name
-                        </Label>
-                        <Input
-                          value={p.name}
-                          onChange={(e) => updateParticipant(p.id, { name: e.target.value })}
-                          placeholder="Player name"
-                        />
-                      </div>
-                    )}
+	              <div className="p-4 pt-3 md:flex-1 md:min-h-0 md:overflow-y-auto md:pr-1">
+	                {participants.length === 0 ? (
+	                  <div className="rounded-lg border bg-background/60 p-4 text-sm text-muted-foreground">
+	                    No participants yet. Add a Human or Model to race.
+	                  </div>
+	                ) : (
+	                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+	                    {participants.map((p) => {
+	                      const isDuplicate = duplicateParticipants.duplicateIds.has(p.id);
 
-                    {p.kind === "llm" && (
-                      <>
-                        <div className="space-y-2">
-                          <ModelPicker
-                            label="Model"
-                            value={p.model}
-                            onValueChange={(v) => updateParticipant(p.id, { model: v })}
-                            options={modelList}
-                            description="Pick from the list or type any LiteLLM model string."
-                          />
-                        </div>
+	                      return (
+	                        <div
+	                          key={p.id}
+	                          className={cn(
+	                            "rounded-lg border p-3 bg-card flex flex-col gap-3",
+	                            isDuplicate && "border-red-300 bg-red-50/40"
+	                          )}
+	                        >
+	                          <div className="flex items-center justify-between gap-3">
+	                            <div className="flex items-center gap-2">
+	                              {p.kind === "human" ? (
+	                                <Users className="h-4 w-4 text-muted-foreground" />
+	                              ) : (
+	                                <Bot className="h-4 w-4 text-muted-foreground" />
+	                              )}
+	                              <div className="flex items-center gap-2">
+	                                <div className="text-sm font-medium">
+	                                  {p.kind === "human" ? "Human" : "Model"}
+	                                </div>
+	                                {isDuplicate && (
+	                                  <Badge
+	                                    variant="outline"
+	                                    className="text-[11px] border-red-200 bg-red-50 text-red-800"
+	                                  >
+	                                    Duplicate
+	                                  </Badge>
+	                                )}
+	                                {p.kind === "llm" && p.reasoningEffort?.trim() && (
+	                                  <Badge variant="outline" className="text-[11px]">
+	                                    effort: {p.reasoningEffort.trim()}
+	                                  </Badge>
+	                                )}
+	                              </div>
+	                            </div>
+	                            <Button
+	                              variant="ghost"
+	                              size="icon"
+	                              className="text-muted-foreground"
+	                              aria-label="Remove participant"
+	                              onClick={() => removeParticipant(p.id)}
+	                              disabled={participants.length <= 1}
+	                            >
+	                              <Trash2 className="h-4 w-4" />
+	                            </Button>
+	                          </div>
 
-                        <details className="rounded-md border bg-muted/30 p-3">
-                          <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
-                            Provider overrides (advanced)
-                          </summary>
-                          <div className="mt-3 grid grid-cols-1 gap-3">
-                            <div className="space-y-2">
-                              <Label className="text-xs text-muted-foreground">
-                                Display name override (optional)
-                              </Label>
-                              <Input
-                                value={p.name}
-                                onChange={(e) => updateParticipant(p.id, { name: e.target.value })}
-                                placeholder="Defaults to model name"
-                              />
-                            </div>
-                            <div className="space-y-2">
-                              <Label className="text-xs text-muted-foreground">
-                                `api_base` (optional)
-                              </Label>
-                              <Input
-                                value={p.apiBase || ""}
-                                onChange={(e) =>
-                                  updateParticipant(p.id, {
-                                    apiBase: e.target.value || undefined,
-                                  })
-                                }
-                                placeholder="e.g. http://localhost:8000"
-                              />
-                            </div>
-                            <div className="space-y-2">
-                              <Label className="text-xs text-muted-foreground">
-                                `reasoning_effort` (optional)
-                              </Label>
-                              <Input
-                                value={p.reasoningEffort || ""}
-                                onChange={(e) =>
-                                  updateParticipant(p.id, {
-                                    reasoningEffort: e.target.value || undefined,
-                                  })
-                                }
-                                placeholder="e.g. low / medium / high"
-                              />
-                            </div>
-                          </div>
-                        </details>
-                      </>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+	                          <div className="grid grid-cols-1 gap-3">
+	                            {p.kind === "human" && (
+	                              <div className="space-y-2">
+	                                <Label className="text-xs text-muted-foreground">
+	                                  Display name
+	                                </Label>
+	                                <Input
+	                                  value={p.name}
+	                                  onChange={(e) =>
+	                                    updateParticipant(p.id, { name: e.target.value })
+	                                  }
+	                                  placeholder="Player name"
+	                                />
+	                              </div>
+	                            )}
 
-            {!isServerConnected && (
-              <div className="text-xs text-yellow-900 bg-yellow-50 border border-yellow-200 rounded-md p-3">
-                Server connection issue. The game may be unavailable until the API is
-                running.
-              </div>
-            )}
+	                            {p.kind === "llm" && (
+	                              <>
+	                                <div className="space-y-2">
+	                                  <ModelPicker
+	                                    label="Model"
+	                                    value={p.model}
+	                                    onValueChange={(v) =>
+	                                      updateParticipant(p.id, { model: v })
+	                                    }
+	                                    options={modelList}
+	                                    description="Pick from the list or type a LiteLLM model string."
+	                                  />
+	                                </div>
 
-            {!pagesValid && (
-              <div className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-md p-3">
-                Pick two different pages to race between.
-              </div>
-            )}
+	                                <details className="rounded-md border bg-muted/30 p-3">
+	                                  <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+	                                    Provider overrides (advanced)
+	                                  </summary>
+	                                  <div className="mt-3 grid grid-cols-1 gap-3">
+	                                    <div className="space-y-2">
+	                                      <Label className="text-xs text-muted-foreground">
+	                                        Display name override (optional)
+	                                      </Label>
+	                                      <Input
+	                                        value={p.name}
+	                                        onChange={(e) =>
+	                                          updateParticipant(p.id, {
+	                                            name: e.target.value,
+	                                          })
+	                                        }
+	                                        placeholder="Defaults to model name"
+	                                      />
+	                                    </div>
+	                                    <div className="space-y-2">
+	                                      <Label className="text-xs text-muted-foreground">
+	                                        `api_base` (optional)
+	                                      </Label>
+	                                      <Input
+	                                        value={p.apiBase || ""}
+	                                        onChange={(e) =>
+	                                          updateParticipant(p.id, {
+	                                            apiBase: e.target.value || undefined,
+	                                          })
+	                                        }
+	                                        placeholder="e.g. http://localhost:8000"
+	                                      />
+	                                    </div>
+	                                    <div className="space-y-2">
+	                                      <Label className="text-xs text-muted-foreground">
+	                                        `reasoning_effort` (optional)
+	                                      </Label>
+	                                      <Input
+	                                        value={p.reasoningEffort || ""}
+	                                        onChange={(e) =>
+	                                          updateParticipant(p.id, {
+	                                            reasoningEffort: e.target.value || undefined,
+	                                          })
+	                                        }
+	                                        placeholder="e.g. low / medium / high"
+	                                      />
+	                                    </div>
+	                                  </div>
+	                                </details>
+	                              </>
+	                            )}
+	                          </div>
+	                        </div>
+	                      );
+	                    })}
+	                  </div>
+	                )}
+	              </div>
 
-            <div className="sticky bottom-4">
-              <div className="rounded-lg border bg-background/90 backdrop-blur p-3 shadow-sm">
-                <Button className="w-full" size="lg" onClick={startRace} disabled={!canStart}>
-                  Start race
-                </Button>
-                <div className="mt-2 text-xs text-muted-foreground">
-                  Humans play “hotseat”: select the active player, then click links.
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </Card>
+	              <div className="border-t bg-background/70 backdrop-blur p-4 space-y-3">
+	                {!isServerConnected && (
+	                  <div className="text-xs text-yellow-900 bg-yellow-50 border border-yellow-200 rounded-md p-3">
+	                    Server connection issue. The game may be unavailable until the API
+	                    is running.
+	                  </div>
+	                )}
+
+	                {(errors.length > 0 || duplicateSummary) && (
+	                  <div className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-md p-3 space-y-1">
+	                    {errors.map((err) => (
+	                      <div key={err}>{err}</div>
+	                    ))}
+	                    {duplicateSummary && (
+	                      <div className="flex flex-wrap items-center justify-between gap-2">
+	                        <div>Duplicates: {duplicateSummary}</div>
+	                        <Button
+	                          type="button"
+	                          variant="outline"
+	                          size="sm"
+	                          className="h-7"
+	                          onClick={removeDuplicateParticipants}
+	                        >
+	                          Remove duplicates
+	                        </Button>
+	                      </div>
+	                    )}
+	                  </div>
+	                )}
+
+	                <div className="space-y-2">
+	                  <Button
+	                    className="w-full"
+	                    size="lg"
+	                    onClick={startRace}
+	                    disabled={!canStart}
+	                  >
+	                    Start race
+	                  </Button>
+	                  <div className="text-xs text-muted-foreground">
+	                    Humans play “hotseat”: select the active player, then click links.
+	                  </div>
+	                </div>
+	              </div>
+	            </div>
+	          </div>
+	        </div>
+	      </Card>
 
     </div>
   );

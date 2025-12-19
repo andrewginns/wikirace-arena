@@ -32,7 +32,7 @@ SIMPLEWIKI_ORIGIN = "https://simple.wikipedia.org"
 class LLMChatRequest(BaseModel):
     model: str
     prompt: str
-    max_tokens: int = 512
+    max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     api_base: Optional[str] = None
     # Advanced (provider-specific) parameters.
@@ -43,8 +43,15 @@ class LLMChatRequest(BaseModel):
     effort: Optional[str] = None
 
 
+class LLMUsage(BaseModel):
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+
+
 class LLMChatResponse(BaseModel):
     content: str
+    usage: Optional[LLMUsage] = None
 class ArticleResponse(BaseModel):
     title: str
     links: List[str]
@@ -123,6 +130,20 @@ def _inject_wiki_bridge(html: str) -> str:
     script = """
 <script>
 (function () {
+  var replayMode = false
+
+  function setReplayMode(enabled) {
+    replayMode = !!enabled
+  }
+
+  window.addEventListener("message", function (event) {
+    var data = event && event.data
+    if (!data || typeof data !== "object") return
+    if (data.type === "wikirace:setReplayMode") {
+      setReplayMode(!!data.enabled)
+    }
+  })
+
   function decodePart(raw) {
     try {
       return decodeURIComponent(raw)
@@ -186,6 +207,11 @@ def _inject_wiki_bridge(html: str) -> str:
         }
       } catch {
         // ignore
+      }
+
+      if (replayMode) {
+        event.preventDefault()
+        return
       }
 
       event.preventDefault()
@@ -290,8 +316,9 @@ async def llm_chat(request: LLMChatRequest):
     kwargs: dict = {
         "model": request.model,
         "messages": [{"role": "user", "content": request.prompt}],
-        "max_tokens": request.max_tokens,
     }
+    if request.max_tokens is not None and request.max_tokens > 0:
+        kwargs["max_tokens"] = request.max_tokens
 
     if request.temperature is not None:
         kwargs["temperature"] = request.temperature
@@ -316,7 +343,43 @@ async def llm_chat(request: LLMChatRequest):
         content = response.choices[0].message.content
         if not content:
             raise RuntimeError("Model returned empty content")
-        return LLMChatResponse(content=content)
+
+        usage_payload = None
+        raw_usage = getattr(response, "usage", None)
+        if raw_usage:
+            try:
+                if isinstance(raw_usage, dict):
+                    usage_payload = raw_usage
+                elif hasattr(raw_usage, "model_dump"):
+                    usage_payload = raw_usage.model_dump()
+                elif hasattr(raw_usage, "dict"):
+                    usage_payload = raw_usage.dict()
+                else:
+                    usage_payload = dict(raw_usage)
+            except Exception:
+                usage_payload = None
+
+        usage = None
+        if isinstance(usage_payload, dict):
+            prompt_tokens = usage_payload.get("prompt_tokens") or usage_payload.get("input_tokens")
+            completion_tokens = usage_payload.get("completion_tokens") or usage_payload.get(
+                "output_tokens"
+            )
+            total_tokens = usage_payload.get("total_tokens")
+
+            usage = LLMUsage(
+                prompt_tokens=prompt_tokens
+                if isinstance(prompt_tokens, int)
+                else None,
+                completion_tokens=completion_tokens
+                if isinstance(completion_tokens, int)
+                else None,
+                total_tokens=total_tokens
+                if isinstance(total_tokens, int)
+                else None,
+            )
+
+        return LLMChatResponse(content=content, usage=usage)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

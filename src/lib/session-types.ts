@@ -18,8 +18,8 @@ export type SessionV1 = {
 
 export type SessionRulesV1 = {
   max_hops: number
-  max_links: number
-  max_tokens: number
+  max_links: number | null
+  max_tokens: number | null
 }
 
 export type HumanTimerSettingsV1 = {
@@ -52,8 +52,8 @@ export type RunV1 = {
   reasoning_effort?: string
 
   max_steps?: number
-  max_links?: number
-  max_tokens?: number
+  max_links?: number | null
+  max_tokens?: number | null
 
   started_at: string
   finished_at?: string

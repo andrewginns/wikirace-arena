@@ -42,6 +42,7 @@ import {
 } from "lucide-react";
 import ForceDirectedGraph from "@/components/force-directed-graph";
 import ConfettiCanvas from "@/components/confetti-canvas";
+import WikiArticlePreview from "@/components/wiki-article-preview";
 import AddChallengersDialog from "@/components/race/add-challengers-dialog";
 import {
   abandonRun,
@@ -76,6 +77,8 @@ type ArenaCssVars = CSSProperties & {
   ["--links-pane-width"]?: string;
 };
 
+type WikiZoom = 60 | 75 | 90 | 100;
+
 type ArenaLayout = {
   leaderboardWidth: number;
   leaderboardCollapsed: boolean;
@@ -83,6 +86,7 @@ type ArenaLayout = {
   runDetailsHeight: number;
   wikiHeight: number;
   mapHeight: number;
+  wikiZoom?: WikiZoom;
 };
 
 const DEFAULT_LAYOUT: ArenaLayout = {
@@ -91,10 +95,12 @@ const DEFAULT_LAYOUT: ArenaLayout = {
   linksPaneWidth: 360,
   runDetailsHeight: 340,
   wikiHeight: 520,
-  mapHeight: 840,
+  mapHeight: 672,
+  wikiZoom: 60,
 };
 
 const LEGACY_DEFAULT_MAP_HEIGHT = 420;
+const PREVIOUS_DEFAULT_MAP_HEIGHT = 840;
 
 function loadHumanPaneMode(): HumanPaneMode {
   if (typeof window === "undefined") return "wiki";
@@ -107,37 +113,61 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function normalizeWikiZoom(value: unknown): WikiZoom {
+  if (value === 60 || value === 75 || value === 90 || value === 100) return value;
+  return 60;
+}
+
 function loadLayout(): ArenaLayout {
   if (typeof window === "undefined") return DEFAULT_LAYOUT;
   try {
     const raw = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
     if (!raw) return DEFAULT_LAYOUT;
     const parsed = JSON.parse(raw) as Partial<ArenaLayout>;
-    const leaderboardWidth =
-      typeof parsed.leaderboardWidth === "number" ? parsed.leaderboardWidth : DEFAULT_LAYOUT.leaderboardWidth;
-    const leaderboardCollapsed =
+    const leaderboardWidthRaw =
+      typeof parsed.leaderboardWidth === "number"
+        ? parsed.leaderboardWidth
+        : DEFAULT_LAYOUT.leaderboardWidth;
+    const leaderboardCollapsedRaw =
       typeof parsed.leaderboardCollapsed === "boolean"
         ? parsed.leaderboardCollapsed
         : DEFAULT_LAYOUT.leaderboardCollapsed;
-    const linksPaneWidth =
+    const linksPaneWidthRaw =
       typeof parsed.linksPaneWidth === "number"
         ? parsed.linksPaneWidth
         : DEFAULT_LAYOUT.linksPaneWidth;
-    const runDetailsHeight =
-      typeof parsed.runDetailsHeight === "number" ? parsed.runDetailsHeight : DEFAULT_LAYOUT.runDetailsHeight;
-    const wikiHeight = typeof parsed.wikiHeight === "number" ? parsed.wikiHeight : DEFAULT_LAYOUT.wikiHeight;
+    const runDetailsHeightRaw =
+      typeof parsed.runDetailsHeight === "number"
+        ? parsed.runDetailsHeight
+        : DEFAULT_LAYOUT.runDetailsHeight;
+    const wikiHeightRaw =
+      typeof parsed.wikiHeight === "number" ? parsed.wikiHeight : DEFAULT_LAYOUT.wikiHeight;
     const mapHeightRaw = typeof parsed.mapHeight === "number" ? parsed.mapHeight : DEFAULT_LAYOUT.mapHeight;
+    const wikiZoom = normalizeWikiZoom(parsed.wikiZoom);
+    const shouldShrinkFromPreviousDefault =
+      mapHeightRaw === PREVIOUS_DEFAULT_MAP_HEIGHT &&
+      leaderboardWidthRaw === 360 &&
+      leaderboardCollapsedRaw === false &&
+      linksPaneWidthRaw === 360 &&
+      runDetailsHeightRaw === 340 &&
+      wikiHeightRaw === 520 &&
+      wikiZoom === 60;
     const shouldMigrateMapHeight =
       mapHeightRaw === LEGACY_DEFAULT_MAP_HEIGHT && mapHeightRaw < DEFAULT_LAYOUT.mapHeight;
-    const mapHeight = shouldMigrateMapHeight ? DEFAULT_LAYOUT.mapHeight : mapHeightRaw;
+    const mapHeight = shouldShrinkFromPreviousDefault
+      ? DEFAULT_LAYOUT.mapHeight
+      : shouldMigrateMapHeight
+        ? DEFAULT_LAYOUT.mapHeight
+        : mapHeightRaw;
 
     return {
-      leaderboardWidth: clampNumber(leaderboardWidth, 240, 800),
-      leaderboardCollapsed,
-      linksPaneWidth: clampNumber(linksPaneWidth, 240, 900),
-      runDetailsHeight: clampNumber(runDetailsHeight, 160, 1200),
-      wikiHeight: clampNumber(wikiHeight, 240, 1600),
+      leaderboardWidth: clampNumber(leaderboardWidthRaw, 240, 800),
+      leaderboardCollapsed: leaderboardCollapsedRaw,
+      linksPaneWidth: clampNumber(linksPaneWidthRaw, 240, 900),
+      runDetailsHeight: clampNumber(runDetailsHeightRaw, 160, 1200),
+      wikiHeight: clampNumber(wikiHeightRaw, 240, 1600),
       mapHeight: clampNumber(mapHeight, 240, 2400),
+      wikiZoom,
     };
   } catch {
     return DEFAULT_LAYOUT;
@@ -228,6 +258,31 @@ function stepOutput(step: StepV1) {
   return typeof output === "string" ? output : null;
 }
 
+function stepMetrics(step: StepV1) {
+  if (!step.metadata) return {};
+  const meta = step.metadata as Record<string, unknown>;
+  const latencyMs =
+    typeof meta.latency_ms === "number"
+      ? meta.latency_ms
+      : typeof meta.duration_ms === "number"
+        ? meta.duration_ms
+        : undefined;
+  const promptTokens =
+    typeof meta.prompt_tokens === "number"
+      ? meta.prompt_tokens
+      : typeof meta.input_tokens === "number"
+        ? meta.input_tokens
+        : undefined;
+  const completionTokens =
+    typeof meta.completion_tokens === "number"
+      ? meta.completion_tokens
+      : typeof meta.output_tokens === "number"
+        ? meta.output_tokens
+        : undefined;
+  const totalTokens = typeof meta.total_tokens === "number" ? meta.total_tokens : undefined;
+  return { latencyMs, promptTokens, completionTokens, totalTokens };
+}
+
 function formatLlmOutputForDisplay(raw: string) {
   const matches = Array.from(raw.matchAll(/<answer>\s*([\s\S]*?)\s*<\/answer>/gi));
   if (matches.length === 0) return { answerXml: null as string | null, markdown: raw.trim() };
@@ -275,8 +330,11 @@ export default function MatchupArena({
   const [replayHop, setReplayHop] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const lastIframeNavigateRef = useRef<{ title: string; at: number } | null>(null);
+  const wikiIframeRef = useRef<HTMLIFrameElement | null>(null);
   const prevSessionIdRef = useRef<string | null>(null);
   const prevRunStateRef = useRef<Map<string, string>>(new Map());
+  const [recentlyChangedRuns, setRecentlyChangedRuns] = useState<Set<string>>(new Set());
+  const [linkActiveIndex, setLinkActiveIndex] = useState<number>(0);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -316,6 +374,22 @@ export default function MatchupArena({
       next.set(run.id, key);
 
       const prevKey = prev.get(run.id);
+
+      if (prevKey !== key) {
+        setRecentlyChangedRuns((prevRuns) => {
+          const nextRuns = new Set(prevRuns);
+          nextRuns.add(run.id);
+          window.setTimeout(() => {
+            setRecentlyChangedRuns((inner) => {
+              const copy = new Set(inner);
+              copy.delete(run.id);
+              return copy;
+            });
+          }, 1200);
+          return nextRuns;
+        });
+      }
+
       if (prevKey === key) continue;
 
       if (run.status !== "finished" || run.result !== "win") continue;
@@ -360,6 +434,11 @@ export default function MatchupArena({
       setReplayPlaying(false);
     }
   }, [replayEnabled, replayPlaying]);
+
+  useEffect(() => {
+    setReplayEnabled(false);
+    setReplayPlaying(false);
+  }, [selectedRunId]);
 
   useEffect(() => {
     setReplayHop((prev) => clampNumber(prev, 0, selectedReplayMaxHop));
@@ -440,6 +519,56 @@ export default function MatchupArena({
   const selectedRunKind = selectedRun?.kind ?? null;
   const selectedRunStatus = selectedRun?.status ?? null;
   const selectedRunIdValue = selectedRun?.id ?? null;
+  const selectedHumanTimerState =
+    selectedRun?.kind === "human" ? selectedRun.timer_state ?? null : null;
+  const selectedHumanTimerRunning =
+    selectedRun?.kind === "human" && selectedRun?.timer_state === "running";
+  const selectedRunElapsedSeconds = selectedRun
+    ? Math.max(0, Math.floor(runElapsedMs(selectedRun, nowTick) / 1000))
+    : 0;
+
+  const selectedRunTokenTotals = useMemo(() => {
+    if (!selectedRun || selectedRun.kind !== "llm") return null;
+
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let totalTokens = 0;
+    let sawPromptTokens = false;
+    let sawCompletionTokens = false;
+    let sawTotalTokens = false;
+
+    for (const step of selectedRun.steps) {
+      const metrics = stepMetrics(step);
+      if (typeof metrics.promptTokens === "number") {
+        promptTokens += metrics.promptTokens;
+        sawPromptTokens = true;
+      }
+      if (typeof metrics.completionTokens === "number") {
+        completionTokens += metrics.completionTokens;
+        sawCompletionTokens = true;
+      }
+      if (typeof metrics.totalTokens === "number") {
+        totalTokens += metrics.totalTokens;
+        sawTotalTokens = true;
+      } else if (
+        typeof metrics.promptTokens === "number" ||
+        typeof metrics.completionTokens === "number"
+      ) {
+        totalTokens += (metrics.promptTokens ?? 0) + (metrics.completionTokens ?? 0);
+        sawTotalTokens = true;
+      }
+    }
+
+    if (!sawPromptTokens && !sawCompletionTokens && !sawTotalTokens) return null;
+
+    return {
+      promptTokens: sawPromptTokens ? promptTokens : null,
+      completionTokens: sawCompletionTokens ? completionTokens : null,
+      totalTokens: sawTotalTokens ? totalTokens : null,
+    };
+  }, [selectedRun]);
+
+  const autoStartHumanTimer = session?.human_timer?.auto_start_on_first_action !== false;
 
   // Hotseat: only the active (selected) human's timer should run.
   useEffect(() => {
@@ -457,6 +586,26 @@ export default function MatchupArena({
     pauseHumanTimers({ sessionId, exceptRunId: null });
   }, [sessionId, selectedRunIdValue, selectedRunKind, selectedRunStatus]);
 
+  useEffect(() => {
+    if (!sessionId) return;
+    if (!autoStartHumanTimer) return;
+    if (!selectedRunIdValue) return;
+    if (selectedRunKind !== "human" || selectedRunStatus !== "running") return;
+    if (selectedHumanTimerState !== "not_started") return;
+    if (replayEnabled) return;
+
+    pauseHumanTimers({ sessionId, exceptRunId: selectedRunIdValue });
+    resumeHumanTimerForRun({ sessionId, runId: selectedRunIdValue });
+  }, [
+    autoStartHumanTimer,
+    replayEnabled,
+    selectedHumanTimerState,
+    selectedRunIdValue,
+    selectedRunKind,
+    selectedRunStatus,
+    sessionId,
+  ]);
+
   // When a human run is finished/abandoned, hide the (now irrelevant) links panel by default.
   useEffect(() => {
     if (!selectedRunKind || !selectedRunStatus) return;
@@ -467,6 +616,7 @@ export default function MatchupArena({
 
   useEffect(() => {
     setLinkQuery("");
+    setLinkActiveIndex(0);
   }, [selectedRunId, displayedArticle]);
 
   const leaderboardSections = useMemo(() => {
@@ -595,6 +745,12 @@ export default function MatchupArena({
   const visibleLinks = useMemo(() => {
     return filteredLinks.slice(0, linkDisplayLimit);
   }, [filteredLinks, linkDisplayLimit]);
+
+  useEffect(() => {
+    setLinkActiveIndex((prev) =>
+      clampNumber(prev, 0, Math.max(0, visibleLinks.length - 1))
+    );
+  }, [visibleLinks.length]);
 
 
   const fetchLinks = useCallback(
@@ -759,11 +915,27 @@ export default function MatchupArena({
     )}`;
   }, [displayedArticle]);
 
+  const wikiZoomValue = normalizeWikiZoom(layout.wikiZoom);
+  const wikiScale = wikiZoomValue / 100;
+  const wikiZoomMultiplier = 1 / wikiScale;
+
+  const postWikiReplayMode = useCallback((enabled: boolean) => {
+    wikiIframeRef.current?.contentWindow?.postMessage(
+      { type: "wikirace:setReplayMode", enabled },
+      "*"
+    );
+  }, []);
+
   useEffect(() => {
     if (!session) return;
     if (!wikiSrc) return;
     setWikiLoading(true);
   }, [session, wikiSrc]);
+
+  useEffect(() => {
+    if (!wikiSrc) return;
+    postWikiReplayMode(replayEnabled);
+  }, [postWikiReplayMode, replayEnabled, wikiSrc]);
 
   const exportViewerJson = () => {
     if (!session) return;
@@ -939,9 +1111,19 @@ export default function MatchupArena({
 	        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 	          <div className="space-y-1">
 	            <div className="text-sm text-muted-foreground">Arena</div>
-	            <div className="text-lg font-semibold">{headerTitle}</div>
-	            {headerSubtitle && (
-	              <div className="text-sm text-muted-foreground">{headerSubtitle}</div>
+	            {headerSubtitle ? (
+	              <>
+	                <div className="text-lg font-semibold">{headerTitle}</div>
+	                <div className="flex items-center gap-2 min-w-0 text-sm text-muted-foreground">
+	                  <div className="min-w-0 truncate">{headerSubtitle}</div>
+	                  <WikiArticlePreview title={session.destination_article} size={28} />
+	                </div>
+	              </>
+	            ) : (
+	              <div className="flex items-center gap-2 min-w-0">
+	                <div className="min-w-0 text-lg font-semibold truncate">{headerTitle}</div>
+	                <WikiArticlePreview title={session.destination_article} size={32} />
+	              </div>
 	            )}
 	          </div>
 	          <div className="flex flex-wrap items-center gap-2">
@@ -1142,37 +1324,41 @@ export default function MatchupArena({
               )}
 
               {leaderboardSections.running.map((r) => {
-                const isActive = r.id === selectedRunId;
-                const isSelected = selectedRunIds.has(r.id);
-                const hops = runHops(r);
-                const maxSteps = runMaxSteps(r);
-                const last = r.steps[r.steps.length - 1]?.article || session.start_article;
-                const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
-                const statusLabel =
-                  r.kind === "human" && r.timer_state
-                    ? r.timer_state === "running"
-                      ? "Running"
-                      : r.timer_state === "paused"
-                      ? "Paused"
-                      : "Waiting"
-                    : "Running";
-                const statusBadgeClass =
-                  statusLabel === "Running"
-                    ? "border-blue-200 bg-blue-50 text-blue-800"
-                    : "border-zinc-200 bg-zinc-50 text-zinc-700";
+                  const isActive = r.id === selectedRunId;
+                  const isSelected = selectedRunIds.has(r.id);
+                  const hops = runHops(r);
+                  const maxSteps = runMaxSteps(r);
+                  const last = r.steps[r.steps.length - 1]?.article || session.start_article;
+                  const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
+                  const isTimerRunning = r.kind === "human" && r.timer_state === "running";
+                  const isRecentlyChanged = recentlyChangedRuns.has(r.id);
+                  const statusLabel =
+                    r.kind === "human" && r.timer_state
+                      ? r.timer_state === "running"
+                        ? "Running"
+                        : r.timer_state === "paused"
+                        ? "Paused"
+                        : "Waiting"
+                      : "Running";
+                  const statusBadgeClass =
+                    statusLabel === "Running"
+                      ? "border-blue-200 bg-blue-50 text-blue-800"
+                      : "border-zinc-200 bg-zinc-50 text-zinc-700";
 
                 return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => setSelectedRunId(r.id)}
-                    className={cn(
-                      "w-full text-left rounded-lg border p-2 transition-colors",
-                      isActive
-                        ? "border-primary/50 bg-primary/5"
-                        : "hover:bg-muted/50 border-border"
-                    )}
-                  >
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => setSelectedRunId(r.id)}
+                      className={cn(
+                        "w-full text-left rounded-lg border p-2 transition-colors",
+                        isActive
+                          ? "border-primary/50 bg-primary/5"
+                          : "hover:bg-muted/50 border-border",
+                        isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                        isRecentlyChanged && "animate-pulse"
+                      )}
+                    >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex items-start gap-2">
                           <input
@@ -1226,25 +1412,29 @@ export default function MatchupArena({
               )}
 
               {leaderboardSections.ranked.map((r, idx) => {
-                const isActive = r.id === selectedRunId;
-                const isSelected = selectedRunIds.has(r.id);
-                const hops = runHops(r);
-                const maxSteps = runMaxSteps(r);
-                const last = r.steps[r.steps.length - 1]?.article || session.start_article;
-                const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
+                  const isActive = r.id === selectedRunId;
+                  const isSelected = selectedRunIds.has(r.id);
+                  const hops = runHops(r);
+                  const maxSteps = runMaxSteps(r);
+                  const last = r.steps[r.steps.length - 1]?.article || session.start_article;
+                  const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
+                  const isTimerRunning = r.kind === "human" && r.timer_state === "running";
+                  const isRecentlyChanged = recentlyChangedRuns.has(r.id);
 
                 return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => setSelectedRunId(r.id)}
-                    className={cn(
-                      "w-full text-left rounded-lg border p-2 transition-colors",
-                      isActive
-                        ? "border-primary/50 bg-primary/5"
-                        : "hover:bg-muted/50 border-border"
-                    )}
-                  >
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => setSelectedRunId(r.id)}
+                      className={cn(
+                        "w-full text-left rounded-lg border p-2 transition-colors",
+                        isActive
+                          ? "border-primary/50 bg-primary/5"
+                          : "hover:bg-muted/50 border-border",
+                        isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                        isRecentlyChanged && "animate-pulse"
+                      )}
+                    >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex items-start gap-2">
                           <input
@@ -1301,27 +1491,31 @@ export default function MatchupArena({
               )}
 
               {leaderboardSections.unranked.map((r) => {
-                const isActive = r.id === selectedRunId;
-                const isSelected = selectedRunIds.has(r.id);
-                const hops = runHops(r);
-                const maxSteps = runMaxSteps(r);
-                const last = r.steps[r.steps.length - 1]?.article || session.start_article;
-                const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
-                const badgeLabel = r.result === "abandoned" ? "Abandoned" : "Fail";
+                  const isActive = r.id === selectedRunId;
+                  const isSelected = selectedRunIds.has(r.id);
+                  const hops = runHops(r);
+                  const maxSteps = runMaxSteps(r);
+                  const last = r.steps[r.steps.length - 1]?.article || session.start_article;
+                  const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
+                  const badgeLabel = r.result === "abandoned" ? "Abandoned" : "Fail";
+                  const isTimerRunning = r.kind === "human" && r.timer_state === "running";
+                  const isRecentlyChanged = recentlyChangedRuns.has(r.id);
 
                 return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => setSelectedRunId(r.id)}
-                    className={cn(
-                      "w-full text-left rounded-lg border p-2 transition-colors",
-                      "opacity-80 bg-muted/20",
-                      isActive
-                        ? "border-primary/50 bg-primary/5 opacity-100"
-                        : "hover:bg-muted/40 border-border"
-                    )}
-                  >
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => setSelectedRunId(r.id)}
+                      className={cn(
+                        "w-full text-left rounded-lg border p-2 transition-colors",
+                        "opacity-80 bg-muted/20",
+                        isActive
+                          ? "border-primary/50 bg-primary/5 opacity-100"
+                          : "hover:bg-muted/40 border-border",
+                        isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                        isRecentlyChanged && "animate-pulse"
+                      )}
+                    >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex items-start gap-2">
                           <input
@@ -1405,12 +1599,14 @@ export default function MatchupArena({
                       <div className="text-sm font-medium">
                         {selectedRun ? runDisplayName(selectedRun) : "Select a run"}
                       </div>
-                      <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
-                        <span className="inline-flex items-center gap-1">
-                          <Flag className="h-3.5 w-3.5" />
-                          Target:{" "}
-                          <span className="font-medium">{session.destination_article}</span>
-                        </span>
+	                        <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
+                        <div className="inline-flex items-center gap-2 min-w-0">
+                          <Flag className="h-3.5 w-3.5 flex-shrink-0" />
+                          <span>Target:</span>
+                          <span className="font-medium truncate">
+                            {session.destination_article}
+                          </span>
+                        </div>
                         {selectedRun && (
                           <span className="inline-flex items-center gap-1">
                             <Hourglass className="h-3.5 w-3.5" />
@@ -1418,6 +1614,11 @@ export default function MatchupArena({
                             <span className="font-medium">
                               {runMaxSteps(selectedRun)} hops
                             </span>
+                          </span>
+                        )}
+                        {selectedHumanTimerRunning && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5">
+                            Active player • {formatTime(selectedRunElapsedSeconds)}
                           </span>
                         )}
                       </div>
@@ -1562,22 +1763,50 @@ export default function MatchupArena({
                               <SelectItem value="200">Show 200</SelectItem>
                             </SelectContent>
                           </Select>
-                          <div className="text-xs text-muted-foreground whitespace-nowrap">
-                            {visibleLinks.length} of {filteredLinks.length} shown
-                          </div>
                         </div>
                       </div>
                       <Separator className="my-3" />
 
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span>
+                          {visibleLinks.length} of {filteredLinks.length} shown
+                        </span>
+                        {linkQuery.trim().length > 0 && (
+                          <span className="text-muted-foreground/70">Filtered</span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-2">
                         <Input
                           value={linkQuery}
-                          onChange={(e) => setLinkQuery(e.target.value)}
+                          onChange={(e) => {
+                            setLinkQuery(e.target.value);
+                            setLinkActiveIndex(0);
+                          }}
                           onKeyDown={(e) => {
-                            if (e.key !== "Enter") return;
                             if (replayEnabled) return;
                             if (selectedRun.status !== "running") return;
+                            if (e.key === "ArrowDown") {
+                              e.preventDefault();
+                              setLinkActiveIndex((prev) =>
+                                clampNumber(prev + 1, 0, Math.max(0, visibleLinks.length - 1))
+                              );
+                              return;
+                            }
+                            if (e.key === "ArrowUp") {
+                              e.preventDefault();
+                              setLinkActiveIndex((prev) =>
+                                clampNumber(prev - 1, 0, Math.max(0, visibleLinks.length - 1))
+                              );
+                              return;
+                            }
+                            if (e.key !== "Enter") return;
                             const q = linkQuery.trim().toLowerCase();
+                            const activeLink = visibleLinks[linkActiveIndex];
+                            if (activeLink) {
+                              recordHumanMove(activeLink);
+                              setLinkQuery("");
+                              return;
+                            }
                             if (q.length === 0) return;
 
                             const exact = filteredLinks.find((link) => link.toLowerCase() === q);
@@ -1629,21 +1858,25 @@ export default function MatchupArena({
 	                      ) : (
 	                        <div className="mt-3 flex-1 min-h-0 overflow-y-auto">
 	                          <div className="space-y-2">
-	                            {visibleLinks.map((link) => (
-	                                <Button
-	                                  key={link}
-	                                  variant="outline"
-	                                  size="sm"
-	                                  className="w-full justify-start text-left whitespace-normal break-words h-auto py-2"
-	                                  onClick={() => recordHumanMove(link)}
-	                                  disabled={replayEnabled || selectedRun.status !== "running"}
-	                                >
-	                                  {link}
-	                                </Button>
-                              ))}
-                          </div>
-                        </div>
-                      )}
+	                            {visibleLinks.map((link, idx) => (
+	                              <Button
+	                                key={link}
+	                                variant="outline"
+	                                size="sm"
+	                                className={cn(
+	                                  "w-full justify-start text-left whitespace-normal break-words h-auto py-2 text-sm",
+	                                  idx === linkActiveIndex && "ring-2 ring-primary ring-offset-1",
+	                                  humanPaneMode === "links" && "py-1.5"
+	                                )}
+	                                onClick={() => recordHumanMove(link)}
+	                                disabled={replayEnabled || selectedRun.status !== "running"}
+	                              >
+	                                {link}
+	                              </Button>
+	                            ))}
+	                          </div>
+	                        </div>
+	                      )}
 	                    </Card>
 	                  )}
 
@@ -1692,6 +1925,38 @@ export default function MatchupArena({
                               </TabsList>
                             </Tabs>
                           )}
+                          <Select
+                            value={String(wikiZoomValue)}
+                            onValueChange={(v) =>
+                              setLayout((prev) => ({
+                                ...prev,
+                                wikiZoom: normalizeWikiZoom(Number.parseInt(v, 10)),
+                              }))
+                            }
+                          >
+                            <SelectTrigger className="h-8 w-[110px] text-xs">
+                              <SelectValue placeholder="Zoom" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="60">60%</SelectItem>
+                              <SelectItem value="75">75%</SelectItem>
+                              <SelectItem value="90">90%</SelectItem>
+                              <SelectItem value="100">100%</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          {replayEnabled && (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              className="h-8 text-xs"
+                              onClick={() => {
+                                setReplayEnabled(false);
+                                setReplayPlaying(false);
+                              }}
+                            >
+                              Back to live
+                            </Button>
+                          )}
                           {replayEnabled && (
                             <Badge variant="outline" className="text-[11px]">
                               Replay
@@ -1719,19 +1984,22 @@ export default function MatchupArena({
                       )}
                       <iframe
                         key={wikiSrc}
+                        ref={wikiIframeRef}
                         style={{
-                          transform: "scale(0.6, 0.6)",
-                          width: "calc(100% * 1.6667)",
-                          height: "calc(100% * 1.6667)",
+                          transform: `scale(${wikiScale}, ${wikiScale})`,
+                          width: `calc(100% * ${wikiZoomMultiplier})`,
+                          height: `calc(100% * ${wikiZoomMultiplier})`,
                           transformOrigin: "top left",
                           position: "absolute",
                           top: 0,
                           left: 0,
-                          pointerEvents: replayEnabled ? "none" : "auto",
                         }}
                         src={wikiSrc}
                         className="border-0"
-                        onLoad={() => setWikiLoading(false)}
+                        onLoad={() => {
+                          setWikiLoading(false);
+                          postWikiReplayMode(replayEnabled);
+                        }}
                       />
                     </div>
                   </Card>
@@ -1803,25 +2071,47 @@ export default function MatchupArena({
 	                        </div>
                       </div>
 
-	                      {selectedRun.kind === "llm" && (
-	                        <>
-	                          <div>
-	                            <div className="text-xs text-muted-foreground">Model</div>
-	                            <div className="mt-0.5">{selectedRun.model || "(unknown)"}</div>
-	                          </div>
-	                          <div>
-	                            <div className="text-xs text-muted-foreground">LiteLLM params</div>
-	                            <div className="mt-0.5 text-xs text-muted-foreground">
-	                              api_base: {selectedRun.api_base || "(default)"}
+		                      {selectedRun.kind === "llm" && (
+		                        <>
+		                          <div>
+		                            <div className="text-xs text-muted-foreground">Model</div>
+		                            <div className="mt-0.5">{selectedRun.model || "(unknown)"}</div>
+		                          </div>
+		                          <div>
+		                            <div className="text-xs text-muted-foreground">Tokens used</div>
+		                            <div className="mt-0.5 text-xs text-muted-foreground">
+		                              {selectedRunTokenTotals
+		                                ? `in: ${selectedRunTokenTotals.promptTokens ?? "—"} • out: ${selectedRunTokenTotals.completionTokens ?? "—"} • total: ${selectedRunTokenTotals.totalTokens ?? "—"}`
+		                                : "—"}
+		                            </div>
+		                          </div>
+		                          <div>
+		                            <div className="text-xs text-muted-foreground">LiteLLM params</div>
+		                            <div className="mt-0.5 text-xs text-muted-foreground">
+		                              api_base: {selectedRun.api_base || "(default)"}
 	                              {" • "}
 	                              reasoning_effort: {selectedRun.reasoning_effort || "(default)"}
 	                              {" • "}
-                              max_tokens: {selectedRun.max_tokens ?? "(default)"}
-                              {" • "}
-                              max_links: {selectedRun.max_links ?? "(default)"}
-                            </div>
-                          </div>
-                        </>
+	                              max_tokens:{" "}
+	                              {typeof selectedRun.max_tokens === "number"
+	                                ? selectedRun.max_tokens
+	                                : session?.rules?.max_tokens === null
+	                                ? "unlimited"
+	                                : typeof session?.rules?.max_tokens === "number"
+	                                ? session.rules.max_tokens
+	                                : "(default)"}
+	                              {" • "}
+	                              max_links:{" "}
+	                              {typeof selectedRun.max_links === "number"
+	                                ? selectedRun.max_links
+	                                : session?.rules?.max_links === null
+	                                ? "unlimited"
+	                                : typeof session?.rules?.max_links === "number"
+	                                ? session.rules.max_links
+	                                : "(default)"}
+	                            </div>
+	                          </div>
+	                        </>
 	                      )}
 	                    </div>
 
@@ -1979,22 +2269,65 @@ export default function MatchupArena({
 	                            {selectedRun.steps
 	                              .filter((s) => s.type !== "start")
 	                              .map((s, idx) => {
-	                                const meta = summarizeStepMeta(s);
-	                                const output = stepOutput(s);
+		                                const meta = summarizeStepMeta(s);
+		                                const output = stepOutput(s);
+		                                const metrics = stepMetrics(s);
+		                                const tokenLabel = (() => {
+		                                  const total =
+		                                    typeof metrics.totalTokens === "number"
+		                                      ? metrics.totalTokens
+		                                      : typeof metrics.promptTokens === "number" ||
+		                                          typeof metrics.completionTokens === "number"
+		                                        ? (metrics.promptTokens ?? 0) +
+		                                          (metrics.completionTokens ?? 0)
+		                                        : null;
+
+		                                  if (total === null) return null;
+
+		                                  if (
+		                                    typeof metrics.promptTokens === "number" ||
+		                                    typeof metrics.completionTokens === "number"
+		                                  ) {
+		                                    return `in/out/total: ${metrics.promptTokens ?? 0}/${metrics.completionTokens ?? 0}/${total} tok`;
+		                                  }
+
+		                                  return `total: ${total} tok`;
+		                                })();
+		                                const latencyLabel =
+		                                  typeof metrics.latencyMs === "number"
+		                                    ? `${Math.round(metrics.latencyMs)} ms`
+		                                    : null;
 	                                const formatted = output ? formatLlmOutputForDisplay(output) : null;
 
-		                                return (
-		                                  <details
-		                                    key={`${selectedRun.id}-trace-${idx}`}
-		                                    className="rounded-md border p-2"
-		                                  >
+	                                return (
+	                                  <details
+	                                    key={`${selectedRun.id}-trace-${idx}`}
+	                                    className="rounded-md border p-2"
+	                                  >
 	                                    <summary className="cursor-pointer text-sm">
 	                                      <span className="font-medium">{s.type}</span>{" "}
 	                                      <span className="text-muted-foreground">{s.article}</span>
-	                                      {meta && (
-                                        <span className="text-xs text-muted-foreground"> — {meta}</span>
-                                      )}
-                                    </summary>
+	                                      <span className="inline-flex flex-wrap items-center gap-2 ml-2 align-middle">
+	                                        {meta && (
+	                                          <span className="text-xs text-muted-foreground">{meta}</span>
+	                                        )}
+	                                        {latencyLabel && (
+	                                          <Badge variant="outline" className="text-[11px]">
+	                                            {latencyLabel}
+	                                          </Badge>
+	                                        )}
+	                                        {tokenLabel && (
+	                                          <Badge variant="outline" className="text-[11px]">
+	                                            {tokenLabel}
+	                                          </Badge>
+	                                        )}
+	                                        {output && (
+	                                          <span className="text-[11px] text-muted-foreground">
+	                                            Show reasoning
+	                                          </span>
+	                                        )}
+	                                      </span>
+	                                    </summary>
 		                                    {formatted && (
 		                                      <div className="mt-2 space-y-2">
 		                                        {formatted.answerXml && (
