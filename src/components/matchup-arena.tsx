@@ -329,6 +329,7 @@ export default function MatchupArena({
   const [replayEnabled, setReplayEnabled] = useState(false);
   const [replayHop, setReplayHop] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
+  const [mapPreviewArticle, setMapPreviewArticle] = useState<string | null>(null);
   const lastIframeNavigateRef = useRef<{ title: string; at: number } | null>(null);
   const wikiIframeRef = useRef<HTMLIFrameElement | null>(null);
   const prevSessionIdRef = useRef<string | null>(null);
@@ -513,6 +514,7 @@ export default function MatchupArena({
       session.start_article
     );
   }, [session, selectedRun, replayEnabled, selectedCurrentArticle, selectedReplayStepIndex]);
+  const wikiArticle = mapPreviewArticle ?? displayedArticle;
 
   const isSelectedHuman = selectedRun?.kind === "human";
   const isSelectedRunning = selectedRun?.status === "running";
@@ -526,6 +528,7 @@ export default function MatchupArena({
   const selectedRunElapsedSeconds = selectedRun
     ? Math.max(0, Math.floor(runElapsedMs(selectedRun, nowTick) / 1000))
     : 0;
+  const selectedRunFinished = selectedRunStatus !== null && selectedRunStatus !== "running";
 
   const selectedRunTokenTotals = useMemo(() => {
     if (!selectedRun || selectedRun.kind !== "llm") return null;
@@ -605,6 +608,16 @@ export default function MatchupArena({
     selectedRunStatus,
     sessionId,
   ]);
+
+  useEffect(() => {
+    if (!selectedRunFinished) return;
+    if (arenaViewMode !== "results") setArenaViewMode("results");
+  }, [selectedRunFinished, arenaViewMode]);
+
+  useEffect(() => {
+    if (!mapPreviewArticle) return;
+    setMapPreviewArticle(null);
+  }, [selectedRunId]);
 
   // When a human run is finished/abandoned, hide the (now irrelevant) links panel by default.
   useEffect(() => {
@@ -730,6 +743,39 @@ export default function MatchupArena({
     }
     return map;
   }, [compareRunIndices]);
+
+  const handleMapNodeSelect = useCallback(
+    (node: { id: string }) => {
+      if (!selectedRun) return;
+      const nodeTitle = node.id;
+      if (!nodeTitle) return;
+
+      let matchedIdx = -1;
+      for (let i = 0; i < selectedRun.steps.length; i++) {
+        const article = selectedRun.steps[i]?.article;
+        if (!article) continue;
+        if (wikiTitlesMatch(article, nodeTitle)) matchedIdx = i;
+      }
+
+      if (matchedIdx >= 0) {
+        setMapPreviewArticle(null);
+        setReplayEnabled(true);
+        setReplayPlaying(false);
+        setReplayHop(matchedIdx);
+      } else if (selectedRun.status !== "running") {
+        setMapPreviewArticle(nodeTitle);
+        setReplayEnabled(false);
+        setReplayPlaying(false);
+      } else {
+        return;
+      }
+
+      if (selectedRun.status === "running" && arenaViewMode !== "article") {
+        setArenaViewMode("article");
+      }
+    },
+    [arenaViewMode, selectedRun]
+  );
 
   const [links, setLinks] = useState<string[]>([]);
   const [linksLoading, setLinksLoading] = useState(false);
@@ -909,11 +955,11 @@ export default function MatchupArena({
   };
 
   const wikiSrc = useMemo(() => {
-    if (!displayedArticle) return "";
+    if (!wikiArticle) return "";
     return `${API_BASE}/wiki/${encodeURIComponent(
-      displayedArticle.replaceAll(" ", "_")
+      wikiArticle.replaceAll(" ", "_")
     )}`;
-  }, [displayedArticle]);
+  }, [wikiArticle]);
 
   const wikiZoomValue = normalizeWikiZoom(layout.wikiZoom);
   const wikiScale = wikiZoomValue / 100;
@@ -1635,7 +1681,11 @@ export default function MatchupArena({
                           <TabsTrigger value="results" className="text-xs px-2">
                             Results
                           </TabsTrigger>
-                          <TabsTrigger value="article" className="text-xs px-2">
+                          <TabsTrigger
+                            value="article"
+                            className="text-xs px-2"
+                            disabled={selectedRunFinished}
+                          >
                             Article
                           </TabsTrigger>
                         </TabsList>
@@ -1700,7 +1750,7 @@ export default function MatchupArena({
                 </div>
               </Card>
 
-	            {arenaViewMode === "article" && (
+	            {arenaViewMode === "article" && !selectedRunFinished && (
 	              <>
 		                <div
 		                  className="min-h-0 overflow-hidden"
@@ -1963,7 +2013,7 @@ export default function MatchupArena({
                             </Badge>
                           )}
                           <div className="text-xs text-muted-foreground truncate max-w-[70%]">
-                            {displayedArticle}
+                            {wikiArticle}
                           </div>
                         </div>
                       </div>
@@ -2126,10 +2176,12 @@ export default function MatchupArena({
                             className="h-7 text-xs"
                             onClick={() => {
                               if (replayEnabled) {
+                                setMapPreviewArticle(null);
                                 setReplayEnabled(false);
                                 setReplayPlaying(false);
                                 return;
                               }
+                              setMapPreviewArticle(null);
                               setReplayEnabled(true);
                               setReplayPlaying(false);
                               setReplayHop(runHops(selectedRun));
@@ -2169,6 +2221,7 @@ export default function MatchupArena({
                               size="sm"
                               className="h-7 px-2"
                               onClick={() => {
+                                setMapPreviewArticle(null);
                                 setReplayPlaying(false);
                                 setReplayHop((prev) =>
                                   clampNumber(prev - 1, 0, selectedReplayMaxHop)
@@ -2185,6 +2238,7 @@ export default function MatchupArena({
                               max={selectedReplayMaxHop}
                               value={Math.max(0, Math.min(selectedReplayMaxHop, replayHop))}
                               onChange={(e) => {
+                                setMapPreviewArticle(null);
                                 setReplayPlaying(false);
                                 setReplayHop(Number.parseInt(e.target.value, 10));
                               }}
@@ -2197,6 +2251,7 @@ export default function MatchupArena({
                               size="sm"
                               className="h-7 px-2"
                               onClick={() => {
+                                setMapPreviewArticle(null);
                                 setReplayPlaying(false);
                                 setReplayHop((prev) =>
                                   clampNumber(prev + 1, 0, selectedReplayMaxHop)
@@ -2233,6 +2288,7 @@ export default function MatchupArena({
                               key={`${selectedRun.id}-step-${idx}`}
                               type="button"
                               onClick={() => {
+                                setMapPreviewArticle(null);
                                 setReplayEnabled(true);
                                 setReplayPlaying(false);
                                 setReplayHop(idx);
@@ -2518,6 +2574,7 @@ export default function MatchupArena({
                         ? selectedReplayStepIndex
                         : undefined
                     }
+                    onNodeSelect={handleMapNodeSelect}
                     includeGraphLinks
                   />
                 </div>
@@ -2550,6 +2607,94 @@ export default function MatchupArena({
 	              }
 	              className={cn("h-2", mapOnTopInResults ? "order-2" : null)}
 	            />
+
+              {selectedRunFinished && (
+                <div className="mt-3 min-h-0 order-last" style={{ height: layout.wikiHeight }}>
+                  <Card className="p-3 overflow-hidden h-full flex flex-col min-h-0">
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm font-medium">Wikipedia view</div>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Select
+                            value={String(wikiZoomValue)}
+                            onValueChange={(v) =>
+                              setLayout((prev) => ({
+                                ...prev,
+                                wikiZoom: normalizeWikiZoom(Number.parseInt(v, 10)),
+                              }))
+                            }
+                          >
+                            <SelectTrigger className="h-8 w-[110px] text-xs">
+                              <SelectValue placeholder="Zoom" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="60">60%</SelectItem>
+                              <SelectItem value="75">75%</SelectItem>
+                              <SelectItem value="90">90%</SelectItem>
+                              <SelectItem value="100">100%</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          {replayEnabled && (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              className="h-8 text-xs"
+                              onClick={() => {
+                                setReplayEnabled(false);
+                                setReplayPlaying(false);
+                              }}
+                            >
+                              Back to live
+                            </Button>
+                          )}
+                          {replayEnabled && (
+                            <Badge variant="outline" className="text-[11px]">
+                              Replay
+                            </Badge>
+                          )}
+                          <div className="text-xs text-muted-foreground truncate max-w-[70%]">
+                            {wikiArticle}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {mapPreviewArticle
+                          ? "Map preview."
+                          : replayEnabled
+                          ? "Replay mode: exit replay to return to the final page."
+                          : "Final page from this run."}
+                      </div>
+                    </div>
+                    <Separator className="my-3" />
+                    <div className="relative w-full flex-1 min-h-[320px] overflow-hidden rounded-md border bg-muted/10">
+                      {wikiLoading && (
+                        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+                          Loading article…
+                        </div>
+                      )}
+                      <iframe
+                        key={wikiSrc}
+                        ref={wikiIframeRef}
+                        style={{
+                          transform: `scale(${wikiScale}, ${wikiScale})`,
+                          width: `calc(100% * ${wikiZoomMultiplier})`,
+                          height: `calc(100% * ${wikiZoomMultiplier})`,
+                          transformOrigin: "top left",
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                        }}
+                        src={wikiSrc}
+                        className="border-0"
+                        onLoad={() => {
+                          setWikiLoading(false);
+                          postWikiReplayMode(replayEnabled);
+                        }}
+                      />
+                    </div>
+                  </Card>
+                </div>
+              )}
           </div>
         </div>
       </div>

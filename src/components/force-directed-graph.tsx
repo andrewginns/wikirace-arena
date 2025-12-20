@@ -31,6 +31,7 @@ interface ForceDirectedGraphProps {
   compareRunIds?: number[];
   compareHighlightStep?: number | null;
   compareColorByRunId?: Record<number, string>;
+  onNodeSelect?: (node: GraphNode) => void;
 }
 
 // Extended node and link types that include run metadata
@@ -61,6 +62,7 @@ export default function ForceDirectedGraph({
   compareRunIds,
   compareHighlightStep,
   compareColorByRunId,
+  onNodeSelect,
 }: ForceDirectedGraphProps) {
   const isCompareMode = (compareRunIds?.length ?? 0) > 0;
   const compareRunSet = useMemo(() => new Set(compareRunIds ?? []), [compareRunIds]);
@@ -587,6 +589,15 @@ export default function ForceDirectedGraph({
             return link.kind === "wiki" ? 0.6 : 1;
           }}
           nodeRelSize={5}
+          onNodeHover={(node) => {
+            if (!containerRef.current) return;
+            containerRef.current.style.cursor =
+              node && onNodeSelect ? "pointer" : "default";
+          }}
+          onNodeClick={(node) => {
+            if (!onNodeSelect) return;
+            onNodeSelect(node as GraphNode);
+          }}
           nodeCanvasObject={(node, ctx, globalScale) => {
             const label = node.id;
             const fontSize = 12 / globalScale;
