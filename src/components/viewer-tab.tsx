@@ -18,6 +18,7 @@ import {
 import { Run as ForceGraphRun } from "@/components/reasoning-trace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Trash2, UploadIcon } from "lucide-react";
 import {
   Dialog,
@@ -61,8 +62,12 @@ interface ModelStats {
 
 export default function ViewerTab({
   handleTryRun,
+  onGoToPlayTab,
+  showPlayCta,
 }: {
   handleTryRun: (startArticle: string, destinationArticle: string) => void;
+  onGoToPlayTab?: () => void;
+  showPlayCta?: boolean;
 }) {
   const { datasets } = useViewerDatasetsStore();
   const [selectedRun, setSelectedRun] = useState<number | null>(null);
@@ -297,10 +302,46 @@ export default function ViewerTab({
     }
   };
 
+  const handleStartNewRace = () => {
+    onGoToPlayTab?.();
+  };
+
+  const handleTryRandomMatchup = () => {
+    const pool = winRuns.length > 0 ? winRuns : runs;
+    if (pool.length === 0) {
+      handleStartNewRace();
+      return;
+    }
+
+    const randomRun = pool[Math.floor(Math.random() * pool.length)];
+    handleTryRun(randomRun.start_article, randomRun.destination_article);
+  };
+
   return (
     <div className="grid grid-cols-1 md:grid-cols-12 gap-4 h-[calc(100vh_-_200px)] max-h-[calc(100vh_-_200px)] overflow-hidden p-2">
      <Card className="p-3 col-span-12 row-start-1">
        <div className="space-y-3">
+         {showPlayCta && (
+           <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-3 sm:flex-row sm:items-center sm:justify-between">
+             <div className="space-y-1">
+               <div className="text-sm font-semibold text-foreground">
+                 Want to race an AI?
+               </div>
+               <div className="text-xs text-muted-foreground">
+                 Start a new game from scratch, or jump into a random matchup.
+               </div>
+             </div>
+             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+               <Button size="sm" onClick={handleStartNewRace}>
+                 Start a race
+               </Button>
+               <Button size="sm" variant="outline" onClick={handleTryRandomMatchup}>
+                 Random matchup
+               </Button>
+             </div>
+           </div>
+         )}
+
          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
              <div className="flex-shrink-0">
@@ -418,14 +459,21 @@ export default function ViewerTab({
            </div>
 
            <div className="flex items-center gap-2 text-xs sm:flex-shrink-0">
-             <Button
-               size="sm"
-               variant={showWinsOnly ? "secondary" : "outline"}
-               className="h-8 px-3"
-               onClick={() => setShowWinsOnly((prev) => !prev)}
-             >
-               {showWinsOnly ? "Wins only: On" : "Wins only: Off"}
-             </Button>
+             <Tooltip>
+               <TooltipTrigger asChild>
+                 <Button
+                   size="sm"
+                   variant={showWinsOnly ? "secondary" : "outline"}
+                   className="h-8 px-3"
+                   onClick={() => setShowWinsOnly((prev) => !prev)}
+                 >
+                   {showWinsOnly ? "Wins only: On" : "Wins only: Off"}
+                 </Button>
+               </TooltipTrigger>
+               <TooltipContent side="top" align="end">
+                 Show only successful runs. Turn off to include losses and near misses.
+               </TooltipContent>
+             </Tooltip>
            </div>
          </div>
 
@@ -439,11 +487,18 @@ export default function ViewerTab({
                    <span className="text-xs text-muted-foreground">({modelStats.wins}/{modelStats.totalRuns})</span>
                  </Badge>
 
-                 <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
-                   <span className="text-xs font-medium">Mean hops:</span>
-                   <span className="text-xs font-semibold">{modelStats.avgHops.toFixed(1)}</span>
-                   <span className="text-xs text-muted-foreground">+/-{modelStats.stdDevHops.toFixed(1)}</span>
-                 </Badge>
+                 <Tooltip>
+                   <TooltipTrigger asChild>
+                     <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
+                       <span className="text-xs font-medium">Mean hops:</span>
+                       <span className="text-xs font-semibold">{modelStats.avgHops.toFixed(1)}</span>
+                       <span className="text-xs text-muted-foreground">+/-{modelStats.stdDevHops.toFixed(1)}</span>
+                     </Badge>
+                   </TooltipTrigger>
+                   <TooltipContent side="top" align="start">
+                     A hop is one link-click between articles (moves, not nodes).
+                   </TooltipContent>
+                 </Tooltip>
 
                  <Badge variant="outline" className="px-2 py-0.5 flex gap-1 items-center">
                    <span className="text-xs font-medium">Median hops:</span>
