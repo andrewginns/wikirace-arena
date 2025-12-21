@@ -8,6 +8,8 @@
   - `src/lib/`: shared helpers, state, and types.
 - `public/`: static assets served by Vite.
 - `dist/`: production build output (generated).
+- `docs/ux-audit/`: UX audit notes + Playwright screenshots.
+- `scripts/`: developer scripts (e.g. `generate-ux-audit.mjs`).
 - `api.py`: FastAPI backend (serves API and mounts `dist/` in production).
 - `get_wikihop.py`: build `parallel_eval/wikihop.db` from Wikimedia SQL dumps (no scraping; can auto-download dumps).
 - `parallel_eval/`: Python tooling for running agents/evals.
@@ -30,6 +32,13 @@ Frontend (prefer Yarn; repo includes both `yarn.lock` and `package-lock.json`):
 - `yarn lint`: run ESLint.
 - `yarn build`: production build to `dist/`.
 - `yarn preview`: serve `dist/` locally.
+- `yarn ux:audit`: generate UX audit screenshots under `docs/ux-audit/` (requires Playwright).
+
+Playwright (for `yarn ux:audit`):
+
+- `yarn add -D playwright`
+- `npx playwright install chromium`
+- Run the Vite dev server (`yarn dev`) before generating screenshots.
 
 Backend + DB (local API):
 

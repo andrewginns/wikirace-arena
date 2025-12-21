@@ -123,7 +123,6 @@ export default function RaceSetup({
     () => PRESETS.find((p) => rulesEqual(p.rules, rules)) || null,
     [rules]
   );
-  const presetDescription = matchedPreset ? matchedPreset.description : "Custom (edited)";
 
   useEffect(() => {
     if (initialStartPage) setStartPage(initialStartPage);
@@ -303,6 +302,13 @@ export default function RaceSetup({
     setTargetPage(target);
   };
 
+  const applyRecommendedPlayers = (
+    presetId: "you_vs_fast" | "you_vs_two" | "model_showdown" | "hotseat"
+  ) => {
+    applyParticipantPreset(presetId);
+    setHighlightSection("participants");
+  };
+
   const swapPages = () => {
     setStartPage(targetPage);
     setTargetPage(startPage);
@@ -437,7 +443,10 @@ export default function RaceSetup({
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Badge variant="outline" className="text-[11px]">
+              Limit: {rules.maxHops} hops
+            </Badge>
             <Dialog>
               <DialogTrigger asChild>
                 <Button variant="outline" size="sm" className="gap-2">
@@ -498,6 +507,43 @@ export default function RaceSetup({
                       }
                     />
                   </div>
+
+                  <details className="md:col-span-2 rounded-lg border bg-muted/20 p-3">
+                    <summary className="cursor-pointer text-sm font-medium text-muted-foreground">
+                      Race length presets
+                      <span className="ml-2 text-xs font-normal text-muted-foreground/80">
+                        ({matchedPreset ? matchedPreset.name : "Custom"})
+                      </span>
+                    </summary>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {matchedPreset ? matchedPreset.description : "Sets hop limits and LLM budgets quickly."}
+                    </div>
+                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                      {PRESETS.map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => setRules(p.rules)}
+                          className={cn(
+                            "rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40",
+                            matchedPreset?.id === p.id &&
+                              "border-primary/60 bg-primary/10"
+                          )}
+                        >
+                          <div className="text-sm font-medium">{p.name}</div>
+                          <div className="mt-1 text-[11px] text-muted-foreground">
+                            {p.rules.maxHops} hops
+                          </div>
+                          <div className="text-[11px] text-muted-foreground/80">
+                            LLM: {p.rules.maxLinks ?? "∞"} links • {p.rules.maxTokens ?? "∞"} tokens
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-2 text-[11px] text-muted-foreground">
+                      Fine-tune limits below.
+                    </div>
+                  </details>
 
 	                  <div className="space-y-2">
 	                    <div className="flex items-center gap-2">
@@ -753,105 +799,107 @@ export default function RaceSetup({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-4">
-                <div>
-                  <Label className="text-sm">Start</Label>
-                  <div className="flex items-center mt-2">
-                    <VirtualizedCombobox
-                      options={allArticles}
-                      value={startPage}
-                      onValueChange={setStartPage}
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-9 ml-2 whitespace-nowrap"
-                      onClick={() => selectRandomArticle(setStartPage)}
-                    >
-                      <Shuffle className="h-3.5 w-3.5 mr-1" />
-                      Random
-                    </Button>
-                    <div className="flex-1" />
-                  </div>
-                </div>
+	          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+	            <div>
+	              <Label className="text-sm">Start</Label>
+	              <div className="mt-2 flex items-center gap-2">
+	                <div className="min-w-0 flex-1">
+	                  <VirtualizedCombobox
+	                    options={allArticles}
+	                    width="100%"
+	                    value={startPage}
+	                    onValueChange={setStartPage}
+	                  />
+	                </div>
+	                <Button
+	                  variant="outline"
+	                  size="sm"
+	                  className="h-9 whitespace-nowrap"
+	                  onClick={() => selectRandomArticle(setStartPage)}
+	                >
+	                  <Shuffle className="h-3.5 w-3.5 mr-1" />
+	                  Random
+	                </Button>
+	              </div>
+	            </div>
 
-                <div>
-                  <Label className="text-sm">Target</Label>
-                  <div className="flex items-center mt-2">
-                    <VirtualizedCombobox
-                      options={allArticles}
-                      value={targetPage}
-                      onValueChange={setTargetPage}
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-9 ml-2 whitespace-nowrap"
-                      onClick={() => selectRandomArticle(setTargetPage)}
-                    >
-                      <Shuffle className="h-3.5 w-3.5 mr-1" />
-                      Random
-                    </Button>
-                    <div className="flex-1" />
-                  </div>
-                </div>
-              </div>
+	            <div>
+	              <Label className="text-sm">Target</Label>
+	              <div className="mt-2 flex items-center gap-2">
+	                <div className="min-w-0 flex-1">
+	                  <VirtualizedCombobox
+	                    options={allArticles}
+	                    width="100%"
+	                    value={targetPage}
+	                    onValueChange={setTargetPage}
+	                  />
+	                </div>
+	                <Button
+	                  variant="outline"
+	                  size="sm"
+	                  className="h-9 whitespace-nowrap"
+	                  onClick={() => selectRandomArticle(setTargetPage)}
+	                >
+	                  <Shuffle className="h-3.5 w-3.5 mr-1" />
+	                  Random
+	                </Button>
+	              </div>
+	            </div>
+	          </div>
             </div>
 
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <h4 className="text-sm font-medium">Max race length</h4>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className="inline-flex items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
-                          aria-label="What is a hop?"
-                        >
-                          <HelpCircle className="h-4 w-4" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" align="start">
-                        A hop is one link-click between articles. The race ends if you hit the hop limit.
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {presetDescription}
+            <div className="rounded-lg border bg-muted/20 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="text-sm font-medium">Quick start</div>
+                  <div className="text-xs text-muted-foreground">
+                    Pick a recommended player setup (start/target stay as selected).
+                  </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {PRESETS.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => setRules(p.rules)}
-                    className={cn(
-                      "text-left rounded-lg border p-3 transition-colors",
-                      matchedPreset?.id === p.id
-                        ? "border-primary/70 bg-primary/10"
-                        : "hover:bg-muted/50 border-border"
-                    )}
-                  >
-                    <div className="font-medium">{p.name}</div>
-                    <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
-	                      <div>{p.rules.maxHops} hops</div>
-	                      <div className="text-[11px] text-muted-foreground/80">
-	                        LLM: {p.rules.maxLinks ?? "∞"} links • {p.rules.maxTokens ?? "∞"} tokens
-	                      </div>
-	                    </div>
-	                  </button>
-	                ))}
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
+                  onClick={() => applyRecommendedPlayers("you_vs_fast")}
+                >
+                  <div className="text-sm font-medium">You vs AI (fast)</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    One human + one model
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
+                  onClick={() => applyRecommendedPlayers("you_vs_two")}
+                >
+                  <div className="text-sm font-medium">You vs 2 AIs</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    A quick multi-player race
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
+                  onClick={() => applyRecommendedPlayers("model_showdown")}
+                >
+                  <div className="text-sm font-medium">Model showdown</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Two AIs race head-to-head
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
+                  onClick={() => applyRecommendedPlayers("hotseat")}
+                >
+                  <div className="text-sm font-medium">Hotseat (2 humans)</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Take turns on one device
+                  </div>
+                </button>
               </div>
-              {matchedPreset === null && (
-                <div className="text-xs text-muted-foreground">
-                  Race length presets adjust hop limits (LLM budgets are under Advanced).
-                </div>
-              )}
             </div>
           </div>
 
@@ -953,53 +1001,7 @@ export default function RaceSetup({
 	                </div>
 	              </div>
 
-	              <div className="border-b bg-background/20 px-4 pb-3">
-	                <div className="text-xs text-muted-foreground">Recommended</div>
-	                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-	                  <button
-	                    type="button"
-	                    className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
-	                    onClick={() => applyParticipantPreset("you_vs_fast")}
-	                  >
-	                    <div className="text-sm font-medium">You vs AI (fast)</div>
-	                    <div className="text-[11px] text-muted-foreground">
-	                      One human + one model
-	                    </div>
-	                  </button>
-	                  <button
-	                    type="button"
-	                    className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
-	                    onClick={() => applyParticipantPreset("you_vs_two")}
-	                  >
-	                    <div className="text-sm font-medium">You vs 2 AIs</div>
-	                    <div className="text-[11px] text-muted-foreground">
-	                      A quick multi-player race
-	                    </div>
-	                  </button>
-	                  <button
-	                    type="button"
-	                    className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
-	                    onClick={() => applyParticipantPreset("model_showdown")}
-	                  >
-	                    <div className="text-sm font-medium">Model showdown</div>
-	                    <div className="text-[11px] text-muted-foreground">
-	                      Two AIs race head-to-head
-	                    </div>
-	                  </button>
-	                  <button
-	                    type="button"
-	                    className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
-	                    onClick={() => applyParticipantPreset("hotseat")}
-	                  >
-	                    <div className="text-sm font-medium">Hotseat (2 humans)</div>
-	                    <div className="text-[11px] text-muted-foreground">
-	                      Take turns on one device
-	                    </div>
-	                  </button>
-	                </div>
-	              </div>
-
-	              <div className="p-4 pt-3 md:flex-1 md:min-h-0 md:overflow-y-auto md:pr-1">
+	              <div className="p-4 md:flex-1 md:min-h-0 md:overflow-y-auto md:pr-1">
 	                {participants.length === 0 ? (
 	                  <div className="rounded-lg border bg-background/60 p-4 text-sm text-muted-foreground">
 	                    No participants yet. Add a Human or Model to race.
