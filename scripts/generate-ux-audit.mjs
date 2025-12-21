@@ -22,6 +22,8 @@ import { chromium } from "playwright";
 
 const LAST_TAB_STORAGE_KEY = "wikirace:last-tab:v1";
 const SEEN_PLAY_TAB_STORAGE_KEY = "wikirace:seen-play-tab:v1";
+const SESSIONS_STORAGE_KEY = "wikirace:sessions:v1";
+const ACTIVE_SESSION_STORAGE_KEY = "wikirace:active-session-id";
 
 function getArgValue(flag) {
   const idx = process.argv.indexOf(flag);
@@ -69,6 +71,32 @@ async function setLocalStorageAndReload(page, entries) {
   await page.getByRole("heading", { name: "WikiRacing Arena" }).waitFor();
 }
 
+async function seedActiveSession(page, { startArticle, destinationArticle }) {
+  const id = "session_ux_audit";
+  const created_at = new Date().toISOString();
+
+  const session = {
+    id,
+    title: "",
+    start_article: startArticle,
+    destination_article: destinationArticle,
+    created_at,
+    rules: {
+      max_hops: 20,
+      max_links: null,
+      max_tokens: null,
+    },
+    runs: [],
+  };
+
+  await setLocalStorageAndReload(page, {
+    [SESSIONS_STORAGE_KEY]: JSON.stringify({ sessions: { [id]: session } }),
+    [ACTIVE_SESSION_STORAGE_KEY]: id,
+    [LAST_TAB_STORAGE_KEY]: "play",
+    [SEEN_PLAY_TAB_STORAGE_KEY]: "true",
+  });
+}
+
 async function openViewRuns(page, { showCta }) {
   await setLocalStorageAndReload(page, {
     [LAST_TAB_STORAGE_KEY]: "view",
@@ -94,14 +122,64 @@ async function openPlaySetup(page) {
 }
 
 async function selectComboboxValue(page, comboboxLocator, value) {
+  const current = (await comboboxLocator.textContent())?.trim();
+  if (current === value) return;
+
   await comboboxLocator.click();
-  const search = page.getByPlaceholder("Search items...");
+
+  const popover = page
+    .locator('[data-slot="popover-content"][data-state="open"]')
+    .filter({ has: page.locator('[data-slot="command-input"]') })
+    .last();
+
+  const search = popover.locator('[data-slot="command-input"]');
   await search.waitFor();
   await search.fill(value);
+  await sleep(100);
 
-  const option = page.getByRole("option", { name: value, exact: true }).first();
-  await option.waitFor();
-  await option.click();
+  const list = popover.locator('[data-slot="command-list"]');
+  await list.waitFor();
+  await list.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+
+  const initialOptionCount = await popover.locator('[role="option"]').count();
+  if (initialOptionCount === 0) {
+    throw new Error(
+      `No options matched combobox search "${value}". Is the backend running (so the full article list loads)?`
+    );
+  }
+
+  const option = popover.getByRole("option", { name: value, exact: true }).first();
+
+  const maxScrollAttempts = 300;
+  for (let attempt = 0; attempt < maxScrollAttempts; attempt += 1) {
+    if (await option.isVisible().catch(() => false)) {
+      await option.click();
+      await popover.waitFor({ state: "hidden" });
+      return;
+    }
+
+    const reachedBottom = await list.evaluate((el) => {
+      const maxScrollTop = el.scrollHeight - el.clientHeight;
+      return el.scrollTop >= maxScrollTop - 2;
+    });
+
+    if (reachedBottom) break;
+
+    await list.evaluate((el) => {
+      el.scrollBy(0, Math.max(120, el.clientHeight - 20));
+    });
+    await sleep(75);
+  }
+
+  const visibleOptions = await popover
+    .locator('[role="option"]')
+    .evaluateAll((nodes) => nodes.map((n) => n.textContent?.trim()).filter(Boolean));
+
+  throw new Error(
+    `Failed to select combobox value "${value}". Visible options: ${visibleOptions.join(", ")}`
+  );
 }
 
 async function setStartAndTarget(page, { start, target }) {
@@ -238,12 +316,19 @@ async function main() {
     await page.getByRole("button", { name: "About hops" }).hover();
     await sleep(250);
     await saveScreenshot(page, "screenshots/validation/p1-play-setup-hop-tooltip.png");
-    await closeAdvancedModal(page);
+	    await closeAdvancedModal(page);
 
-    // Start an arena race (deterministic win path)
-    await openPlaySetup(page);
-    await setStartAndTarget(page, { start: "Capybara", target: "Rodent" });
-    await clickQuickPreset(page, "you_vs_two");
+	    // Start an arena race (deterministic win path)
+	    await seedActiveSession(page, { startArticle: "Capybara", destinationArticle: "Rodent" });
+	    await openPlaySetup(page);
+	    const serverWarning = page.getByText(/Server connection issue/i);
+	    await serverWarning.waitFor({ state: "hidden", timeout: 20_000 }).catch(() => null);
+	    if (await serverWarning.isVisible().catch(() => false)) {
+	      throw new Error(
+	        "Backend appears unavailable. Start it with `make server` (or `WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db uv run uvicorn api:app --reload --port 8000`)."
+	      );
+	    }
+	    await clickQuickPreset(page, "you_vs_two");
 
     // Sanity: ensure the Target combobox doesn't overlap the Participants column.
     const targetCombo = page.locator("#pages-section").getByRole("combobox").nth(1);
@@ -312,7 +397,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  // eslint-disable-next-line no-console
   console.error(err);
   process.exitCode = 1;
 });

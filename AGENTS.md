@@ -36,9 +36,8 @@ Frontend (prefer Yarn; repo includes both `yarn.lock` and `package-lock.json`):
 
 Playwright (for `yarn ux:audit`):
 
-- `yarn add -D playwright`
 - `npx playwright install chromium`
-- Run the Vite dev server (`yarn dev`) before generating screenshots.
+- Run the API server (`make server`) and the Vite dev server (`yarn dev`) before generating screenshots.
 
 Backend + DB (local API):
 

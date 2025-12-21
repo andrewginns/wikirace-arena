@@ -35,4 +35,3 @@ wikihop.db
 parallel_eval/wikihop.db-shm
 parallel_eval/wikihop.db-wal
 ui-review/*
-docs/ux-audit/*
