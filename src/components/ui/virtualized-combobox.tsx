@@ -210,16 +210,20 @@ export function VirtualizedCombobox({
           variant="outline"
           role="combobox"
           aria-expanded={open}
-          className="justify-between"
+          className="justify-between w-full gap-2 min-w-0"
           style={{
             width: width,
           }}
         >
-          {value}
+          <span className="min-w-0 flex-1 truncate text-left">{value}</span>
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="p-0" style={{ width: width }} container={portalContainer}>
+      <PopoverContent
+        className="p-0 w-[--radix-popover-trigger-width]"
+        align="start"
+        container={portalContainer}
+      >
         <VirtualizedCommand
           height={height}
           options={options.map((option) => ({ value: option, label: option }))}
