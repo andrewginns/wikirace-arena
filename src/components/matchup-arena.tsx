@@ -37,8 +37,10 @@ import {
   Hourglass,
   PanelLeftClose,
   PanelLeftOpen,
+  Trophy,
   Trash2,
   User,
+  X,
 } from "lucide-react";
 import ForceDirectedGraph from "@/components/force-directed-graph";
 import ConfettiCanvas from "@/components/confetti-canvas";
@@ -72,6 +74,15 @@ const HUMAN_PANE_MODE_STORAGE_KEY = "wikirace:arena-human-pane:v1";
 type HumanPaneMode = "wiki" | "split" | "links";
 
 type ArenaViewMode = "article" | "results";
+
+type ArenaEventKind = "move" | "win" | "lose" | "info";
+
+type ArenaEvent = {
+  id: string;
+  kind: ArenaEventKind;
+  message: string;
+  at: number;
+};
 
 type ArenaCssVars = CSSProperties & {
   ["--links-pane-width"]?: string;
@@ -326,16 +337,32 @@ export default function MatchupArena({
   const [linkDisplayLimit, setLinkDisplayLimit] = useState<number>(DEFAULT_MAX_LINKS);
   const [wikiLoading, setWikiLoading] = useState(false);
   const [winCelebrationRunId, setWinCelebrationRunId] = useState<string | null>(null);
+  const [winToast, setWinToast] = useState<{ runId: string; message: string } | null>(null);
   const [replayEnabled, setReplayEnabled] = useState(false);
   const [replayHop, setReplayHop] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [mapPreviewArticle, setMapPreviewArticle] = useState<string | null>(null);
   const lastIframeNavigateRef = useRef<{ title: string; at: number } | null>(null);
   const wikiIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const winToastTimeoutRef = useRef<number | null>(null);
   const prevSessionIdRef = useRef<string | null>(null);
   const prevRunStateRef = useRef<Map<string, string>>(new Map());
   const [recentlyChangedRuns, setRecentlyChangedRuns] = useState<Set<string>>(new Set());
   const [linkActiveIndex, setLinkActiveIndex] = useState<number>(0);
+  const [activityEvents, setActivityEvents] = useState<ArenaEvent[]>([]);
+  const [activityVisible, setActivityVisible] = useState(true);
+  const activitySessionIdRef = useRef<string | null>(null);
+  const activityRunStepsRef = useRef<Map<string, number>>(new Map());
+  const activityRunLastArticleRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    return () => {
+      if (winToastTimeoutRef.current) {
+        window.clearTimeout(winToastTimeoutRef.current);
+        winToastTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -352,10 +379,29 @@ export default function MatchupArena({
     return () => window.clearInterval(timer);
   }, []);
 
+  const triggerWinToast = useCallback(
+    (run: RunV1) => {
+      const hops = runHops(run);
+      const message = `${runDisplayName(run)} won in ${hops} hop${hops === 1 ? "" : "s"}`;
+      setWinToast({ runId: run.id, message });
+
+      if (winToastTimeoutRef.current) {
+        window.clearTimeout(winToastTimeoutRef.current);
+      }
+      winToastTimeoutRef.current = window.setTimeout(() => setWinToast(null), 4500);
+    },
+    []
+  );
+
   useEffect(() => {
     if (!session) {
       prevSessionIdRef.current = null;
       prevRunStateRef.current = new Map();
+      setWinToast(null);
+      if (winToastTimeoutRef.current) {
+        window.clearTimeout(winToastTimeoutRef.current);
+        winToastTimeoutRef.current = null;
+      }
       return;
     }
 
@@ -396,12 +442,137 @@ export default function MatchupArena({
       if (run.status !== "finished" || run.result !== "win") continue;
 
       addWinRunSummary({ session, run });
+      triggerWinToast(run);
       if (run.kind === "human") {
         setWinCelebrationRunId(run.id);
       }
     }
 
     prevRunStateRef.current = next;
+  }, [session, triggerWinToast]);
+
+  useEffect(() => {
+    if (!session) {
+      activitySessionIdRef.current = null;
+      activityRunStepsRef.current = new Map();
+      activityRunLastArticleRef.current = new Map();
+      setActivityEvents([]);
+      return;
+    }
+
+    if (activitySessionIdRef.current !== session.id) {
+      activitySessionIdRef.current = session.id;
+      activityRunStepsRef.current = new Map(
+        session.runs.map((r) => [r.id, r.steps.length])
+      );
+      activityRunLastArticleRef.current = new Map(
+        session.runs.map((r) => [
+          r.id,
+          r.steps[r.steps.length - 1]?.article || session.start_article,
+        ])
+      );
+      setActivityVisible(true);
+      setActivityEvents([
+        {
+          id: `session-${session.id}`,
+          kind: "info",
+          message: `Race started: ${session.start_article} → ${session.destination_article}`,
+          at: Date.now(),
+        },
+      ]);
+      return;
+    }
+
+    const prevSteps = activityRunStepsRef.current;
+    const prevLast = activityRunLastArticleRef.current;
+    const knownIds = new Set(session.runs.map((r) => r.id));
+    for (const id of Array.from(prevSteps.keys())) {
+      if (!knownIds.has(id)) {
+        prevSteps.delete(id);
+        prevLast.delete(id);
+      }
+    }
+
+    const now = Date.now();
+    let serial = 0;
+    const newEvents: ArenaEvent[] = [];
+
+    for (const run of session.runs) {
+      const prevLen = prevSteps.get(run.id);
+      const prevArticle = prevLast.get(run.id) || session.start_article;
+
+      if (typeof prevLen !== "number") {
+        newEvents.push({
+          id: `join-${run.id}-${now}-${serial++}`,
+          kind: "info",
+          message: `${runDisplayName(run)} joined the race`,
+          at: now + serial,
+        });
+        prevSteps.set(run.id, run.steps.length);
+        prevLast.set(
+          run.id,
+          run.steps[run.steps.length - 1]?.article || prevArticle
+        );
+        continue;
+      }
+
+      if (run.steps.length <= prevLen) continue;
+
+      let from = prevArticle;
+      const addedSteps = run.steps.slice(prevLen);
+      for (const step of addedSteps) {
+        if (step.type === "start") {
+          from = step.article;
+          continue;
+        }
+        if (step.type === "move") {
+          newEvents.push({
+            id: `move-${run.id}-${now}-${serial++}`,
+            kind: "move",
+            message: `${runDisplayName(run)} moved: ${from} → ${step.article}`,
+            at: now + serial,
+          });
+          from = step.article;
+          continue;
+        }
+        if (step.type === "win") {
+          const hops = runHops(run);
+          newEvents.push({
+            id: `win-${run.id}-${now}-${serial++}`,
+            kind: "win",
+            message: `${runDisplayName(run)} won in ${hops} hop${hops === 1 ? "" : "s"}`,
+            at: now + serial,
+          });
+          from = step.article;
+          continue;
+        }
+        if (step.type === "lose") {
+          const reasonRaw = step.metadata?.reason;
+          const reason =
+            typeof reasonRaw === "string" && reasonRaw.trim().length > 0
+              ? reasonRaw
+              : null;
+          newEvents.push({
+            id: `lose-${run.id}-${now}-${serial++}`,
+            kind: "lose",
+            message: `${runDisplayName(run)} lost${reason ? ` (${reason})` : ""}`,
+            at: now + serial,
+          });
+          from = step.article;
+        }
+      }
+
+      prevSteps.set(run.id, run.steps.length);
+      prevLast.set(
+        run.id,
+        run.steps[run.steps.length - 1]?.article || from
+      );
+    }
+
+    if (newEvents.length > 0) {
+      newEvents.sort((a, b) => b.at - a.at);
+      setActivityEvents((prev) => [...newEvents, ...prev].slice(0, 14));
+    }
   }, [session]);
 
   const runsById = useMemo(() => {
@@ -615,7 +786,6 @@ export default function MatchupArena({
   }, [selectedRunFinished, arenaViewMode]);
 
   useEffect(() => {
-    if (!mapPreviewArticle) return;
     setMapPreviewArticle(null);
   }, [selectedRunId]);
 
@@ -1152,6 +1322,29 @@ export default function MatchupArena({
         onDone={() => setWinCelebrationRunId(null)}
       />
 
+      {winToast && (
+        <div className="fixed top-4 right-4 z-40">
+          <div className="flex items-center gap-2 rounded-md border bg-background/95 px-3 py-2 shadow-lg backdrop-blur animate-in fade-in-0 slide-in-from-top-2">
+            <Trophy className="h-4 w-4 text-primary" />
+            <div className="text-sm font-medium">{winToast.message}</div>
+            <button
+              type="button"
+              className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                setWinToast(null);
+                if (winToastTimeoutRef.current) {
+                  window.clearTimeout(winToastTimeoutRef.current);
+                  winToastTimeoutRef.current = null;
+                }
+              }}
+              aria-label="Dismiss win message"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
 	      <div id="matchup-arena" className="space-y-4">
 	      <Card className="p-3">
 	        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1606,6 +1799,63 @@ export default function MatchupArena({
                 );
               })}
 	            </div>
+
+              <Separator className="my-3" />
+
+              {activityVisible ? (
+                <div className="rounded-lg border bg-muted/20 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[11px] font-semibold text-muted-foreground">
+                      Activity
+                    </div>
+                    <button
+                      type="button"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground"
+                      onClick={() => setActivityVisible(false)}
+                      aria-label="Hide activity"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {activityEvents.length === 0 ? (
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      No events yet.
+                    </div>
+                  ) : (
+                    <div className="mt-2 max-h-28 overflow-y-auto space-y-1 pr-1">
+                      {activityEvents.slice(0, 6).map((event) => (
+                        <div key={event.id} className="flex items-start gap-2 text-[11px]">
+                          <span
+                            className={cn(
+                              "mt-1 h-2 w-2 rounded-full flex-shrink-0",
+                              event.kind === "win"
+                                ? "bg-green-500"
+                                : event.kind === "lose"
+                                ? "bg-red-500"
+                                : event.kind === "move"
+                                ? "bg-blue-500"
+                                : "bg-muted-foreground"
+                            )}
+                            aria-hidden="true"
+                          />
+                          <div className="min-w-0 break-words">{event.message}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs text-muted-foreground justify-start"
+                  onClick={() => setActivityVisible(true)}
+                >
+                  Show activity
+                </Button>
+              )}
 	          </Card>
             </div>
 
@@ -1701,7 +1951,11 @@ export default function MatchupArena({
                           End turn
                         </Button>
                       ) : (
-                        <Button variant="default" size="sm" onClick={startSelectedTurn}>
+                        <Button
+                          variant="default"
+                          size="sm"
+                          onClick={startSelectedTurn}
+                        >
                           Start turn
                         </Button>
                       ))}

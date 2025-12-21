@@ -6,6 +6,7 @@ import { useState, useEffect, useRef } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatHops, viewerRunHops } from "@/lib/hops";
 
 interface Run {
@@ -172,29 +173,36 @@ export default function RunsList({
             onChange={(e) => setFilter(e.target.value)}
             className="h-9"
           />
-          <Button 
-            size="sm" 
-            variant={isPlaying ? "secondary" : "outline"} 
-            onClick={togglePlayPause}
-            className="flex-shrink-0 h-9 px-3 gap-1"
-          >
-            {isPlaying ? (
-              <>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="6" y="4" width="4" height="16" />
-                  <rect x="14" y="4" width="4" height="16" />
-                </svg>
-                Pause
-              </>
-            ) : (
-              <>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polygon points="5 3 19 12 5 21 5 3" />
-                </svg>
-                Play
-              </>
-            )}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button 
+                size="sm" 
+                variant={isPlaying ? "secondary" : "outline"} 
+                onClick={togglePlayPause}
+                className="flex-shrink-0 h-9 px-3 gap-1"
+              >
+                {isPlaying ? (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="6" y="4" width="4" height="16" />
+                      <rect x="14" y="4" width="4" height="16" />
+                    </svg>
+                    Pause
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    Play
+                  </>
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" align="end">
+              Autoplay cycles through runs and updates the highlighted path.
+            </TooltipContent>
+          </Tooltip>
         </div>
       </div>
 
@@ -258,9 +266,16 @@ export default function RunsList({
                       <span className="text-primary">{run.destination_article}</span>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="text-xs px-2 py-0 h-5">
-                        {formatHops(hops)}
-                      </Badge>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Badge variant="outline" className="text-xs px-2 py-0 h-5">
+                            {formatHops(hops)}
+                          </Badge>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" align="start">
+                          A hop is one link-click between articles.
+                        </TooltipContent>
+                      </Tooltip>
                       {run.result && !isWin && (
                         <Badge variant="secondary" className="text-[11px] h-5 px-2 py-0">
                           {run.result}

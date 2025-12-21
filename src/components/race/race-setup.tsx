@@ -143,6 +143,15 @@ export default function RaceSetup({
   ]);
 
   const [participantPresetsOpen, setParticipantPresetsOpen] = useState(false);
+  const [highlightSection, setHighlightSection] = useState<
+    "pages" | "participants" | "start" | null
+  >(null);
+
+  useEffect(() => {
+    if (!highlightSection) return;
+    const timeout = window.setTimeout(() => setHighlightSection(null), 1600);
+    return () => window.clearTimeout(timeout);
+  }, [highlightSection]);
 
   useEffect(() => {
     setParticipants((prev) =>
@@ -205,6 +214,71 @@ export default function RaceSetup({
   if (participants.length === 0) errors.push("Add at least one participant.");
 
   const canStart = pagesValid && participants.length > 0 && duplicateSummary === null;
+  const participantsValid = participants.length > 0 && duplicateSummary === null;
+  const activeSetupStep: "pages" | "participants" | null = !pagesValid
+    ? "pages"
+    : !participantsValid
+    ? "participants"
+    : null;
+
+  const scrollToSetupSection = (section: "pages" | "participants" | "start") => {
+    const id =
+      section === "pages"
+        ? "pages-section"
+        : section === "participants"
+        ? "participants-section"
+        : "start-race-section";
+    const el = document.getElementById(id);
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setHighlightSection(section);
+  };
+
+  const pickModel = (...candidates: Array<string | undefined>) => {
+    for (const candidate of candidates) {
+      if (candidate && modelList.includes(candidate)) return candidate;
+    }
+    return modelList[0] || "llm";
+  };
+
+  const applyParticipantPreset = (
+    presetId: "you_vs_fast" | "you_vs_two" | "model_showdown" | "hotseat"
+  ) => {
+    const fastModel = pickModel("gpt-5-mini", "gpt-5-nano", modelList[0]);
+    const secondModel = pickModel("gpt-5-nano", "gpt-5.2", modelList[1], modelList[0]);
+    const bigModel = pickModel("gpt-5.2", "gpt-5.1", modelList[0]);
+
+    if (presetId === "you_vs_fast") {
+      setParticipants([
+        { id: makeId("p"), kind: "human", name: "You" },
+        { id: makeId("p"), kind: "llm", name: "", model: fastModel },
+      ]);
+      return;
+    }
+
+    if (presetId === "you_vs_two") {
+      setParticipants([
+        { id: makeId("p"), kind: "human", name: "You" },
+        { id: makeId("p"), kind: "llm", name: "", model: fastModel },
+        { id: makeId("p"), kind: "llm", name: "", model: secondModel },
+      ]);
+      return;
+    }
+
+    if (presetId === "model_showdown") {
+      setParticipants([
+        { id: makeId("p"), kind: "llm", name: "", model: bigModel },
+        { id: makeId("p"), kind: "llm", name: "", model: fastModel },
+      ]);
+      return;
+    }
+
+    if (presetId === "hotseat") {
+      setParticipants([
+        { id: makeId("p"), kind: "human", name: "You" },
+        { id: makeId("p"), kind: "human", name: "Player 2" },
+      ]);
+    }
+  };
 
   const selectRandomArticle = (setter: (article: string) => void) => {
     if (popularNodes.length > 0) {
@@ -391,7 +465,25 @@ export default function RaceSetup({
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="max-hops">Max hops</Label>
+                    <div className="flex items-center gap-2">
+                      <Label htmlFor="max-hops">Max hops</Label>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                              aria-label="About hops"
+                            >
+                              <HelpCircle className="h-4 w-4" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" align="start">
+                            A hop is one link-click between articles. The run ends if the hop limit is reached.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
                     <Input
                       id="max-hops"
                       type="number"
@@ -408,7 +500,25 @@ export default function RaceSetup({
                   </div>
 
 	                  <div className="space-y-2">
-	                    <Label htmlFor="max-links">Max links per page (LLMs)</Label>
+	                    <div className="flex items-center gap-2">
+	                      <Label htmlFor="max-links">Max links per page (LLMs)</Label>
+	                      <TooltipProvider>
+	                        <Tooltip>
+	                          <TooltipTrigger asChild>
+	                            <button
+	                              type="button"
+	                              className="inline-flex items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+	                              aria-label="About max links"
+	                            >
+	                              <HelpCircle className="h-4 w-4" />
+	                            </button>
+	                          </TooltipTrigger>
+	                          <TooltipContent side="top" align="start">
+	                            Limits how many outgoing links we show the model per step. Lower can be faster/cheaper.
+	                          </TooltipContent>
+	                        </Tooltip>
+	                      </TooltipProvider>
+	                    </div>
 	                    <Input
 	                      id="max-links"
 	                      type="number"
@@ -433,7 +543,25 @@ export default function RaceSetup({
 	                  </div>
 
 	                  <div className="space-y-2">
-	                    <Label htmlFor="max-tokens">Max tokens (LLMs)</Label>
+	                    <div className="flex items-center gap-2">
+	                      <Label htmlFor="max-tokens">Max tokens (LLMs)</Label>
+	                      <TooltipProvider>
+	                        <Tooltip>
+	                          <TooltipTrigger asChild>
+	                            <button
+	                              type="button"
+	                              className="inline-flex items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+	                              aria-label="About max tokens"
+	                            >
+	                              <HelpCircle className="h-4 w-4" />
+	                            </button>
+	                          </TooltipTrigger>
+	                          <TooltipContent side="top" align="start">
+	                            Caps the model’s token budget. Leave blank for unlimited.
+	                          </TooltipContent>
+	                        </Tooltip>
+	                      </TooltipProvider>
+	                    </div>
 	                    <Input
 	                      id="max-tokens"
 	                      type="number"
@@ -505,11 +633,102 @@ export default function RaceSetup({
           </div>
         </div>
 
-        <Separator className="my-6" />
+	    <Separator className="my-2" />
 
-	        <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-	          <div className="md:col-span-7 lg:col-span-6 space-y-6">
-            <div className="space-y-3">
+        <div className="rounded-lg border bg-muted/20 p-3">
+          <div className="text-xs font-medium text-muted-foreground">Setup steps</div>
+          <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button
+              type="button"
+              onClick={() => scrollToSetupSection("pages")}
+              className={cn(
+                "rounded-md border p-3 text-left transition-colors",
+                activeSetupStep === "pages"
+                  ? "border-primary/60 bg-primary/10"
+                  : "hover:bg-muted/40 border-border"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <div
+                  className={cn(
+                    "h-5 w-5 rounded-full flex items-center justify-center text-[11px] font-semibold",
+                    pagesValid
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  1
+                </div>
+                <div className="text-sm font-medium">Choose pages</div>
+              </div>
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                Start → target matchup
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => scrollToSetupSection("participants")}
+              className={cn(
+                "rounded-md border p-3 text-left transition-colors",
+                activeSetupStep === "participants"
+                  ? "border-primary/60 bg-primary/10"
+                  : "hover:bg-muted/40 border-border"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <div
+                  className={cn(
+                    "h-5 w-5 rounded-full flex items-center justify-center text-[11px] font-semibold",
+                    participantsValid
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  2
+                </div>
+                <div className="text-sm font-medium">Choose players</div>
+              </div>
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                You, AIs, or hotseat
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => scrollToSetupSection("start")}
+              className="rounded-md border border-border p-3 text-left transition-colors hover:bg-muted/40"
+            >
+              <div className="flex items-center gap-2">
+                <div
+                  className={cn(
+                    "h-5 w-5 rounded-full flex items-center justify-center text-[11px] font-semibold",
+                    canStart
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground"
+                  )}
+                >
+                  3
+                </div>
+                <div className="text-sm font-medium">Start race</div>
+              </div>
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                Begin the arena
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+          <div className="md:col-span-7 lg:col-span-6 space-y-6">
+            <div
+              className={cn(
+                "space-y-3",
+                highlightSection === "pages" &&
+                  "rounded-lg ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
+              )}
+              id="pages-section"
+            >
               <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                 <div className="space-y-1">
                   <h4 className="text-sm font-medium">Pages</h4>
@@ -581,7 +800,25 @@ export default function RaceSetup({
 
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h4 className="text-sm font-medium">Max race length</h4>
+                <div className="flex items-center gap-2">
+                  <h4 className="text-sm font-medium">Max race length</h4>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                          aria-label="What is a hop?"
+                        >
+                          <HelpCircle className="h-4 w-4" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" align="start">
+                        A hop is one link-click between articles. The race ends if you hit the hop limit.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
                 <div className="text-xs text-muted-foreground">
                   {presetDescription}
                 </div>
@@ -622,12 +859,36 @@ export default function RaceSetup({
 	            className="md:col-span-5 lg:col-span-6 md:sticky md:top-6 md:self-start"
 	            id="participants-section"
 	          >
-	            <div className="rounded-xl border bg-muted/10 overflow-hidden md:max-h-[calc(100vh-8rem)] md:flex md:flex-col md:min-h-0">
+	            <div
+	              className={cn(
+	                "rounded-xl border bg-muted/10 overflow-hidden md:max-h-[calc(100vh-8rem)] md:flex md:flex-col md:min-h-0",
+	                highlightSection === "participants" &&
+	                  "ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
+	              )}
+	            >
 	              <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between border-b bg-background/40">
 	                <div className="flex items-center gap-2">
 	                  <Users className="h-4 w-4 text-muted-foreground" />
 	                  <div className="space-y-0.5">
-	                    <h4 className="text-sm font-medium">Participants</h4>
+	                    <div className="flex items-center gap-2">
+	                      <h4 className="text-sm font-medium">Participants</h4>
+	                      <TooltipProvider>
+	                        <Tooltip>
+	                          <TooltipTrigger asChild>
+	                            <button
+	                              type="button"
+	                              className="inline-flex items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+	                              aria-label="About hotseat"
+	                            >
+	                              <HelpCircle className="h-4 w-4" />
+	                            </button>
+	                          </TooltipTrigger>
+	                          <TooltipContent side="top" align="start">
+	                            Hotseat means multiple humans share one device. Select the active player, then click links.
+	                          </TooltipContent>
+	                        </Tooltip>
+	                      </TooltipProvider>
+	                    </div>
 	                    <div className="text-xs text-muted-foreground">
 	                      {participants.length} participant
 	                      {participants.length === 1 ? "" : "s"} • hotseat supported
@@ -689,6 +950,52 @@ export default function RaceSetup({
 	                  >
 	                    Clear
 	                  </Button>
+	                </div>
+	              </div>
+
+	              <div className="border-b bg-background/20 px-4 pb-3">
+	                <div className="text-xs text-muted-foreground">Recommended</div>
+	                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+	                  <button
+	                    type="button"
+	                    className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
+	                    onClick={() => applyParticipantPreset("you_vs_fast")}
+	                  >
+	                    <div className="text-sm font-medium">You vs AI (fast)</div>
+	                    <div className="text-[11px] text-muted-foreground">
+	                      One human + one model
+	                    </div>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
+	                    onClick={() => applyParticipantPreset("you_vs_two")}
+	                  >
+	                    <div className="text-sm font-medium">You vs 2 AIs</div>
+	                    <div className="text-[11px] text-muted-foreground">
+	                      A quick multi-player race
+	                    </div>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
+	                    onClick={() => applyParticipantPreset("model_showdown")}
+	                  >
+	                    <div className="text-sm font-medium">Model showdown</div>
+	                    <div className="text-[11px] text-muted-foreground">
+	                      Two AIs race head-to-head
+	                    </div>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    className="rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40"
+	                    onClick={() => applyParticipantPreset("hotseat")}
+	                  >
+	                    <div className="text-sm font-medium">Hotseat (2 humans)</div>
+	                    <div className="text-[11px] text-muted-foreground">
+	                      Take turns on one device
+	                    </div>
+	                  </button>
 	                </div>
 	              </div>
 
@@ -837,7 +1144,14 @@ export default function RaceSetup({
 	                )}
 	              </div>
 
-	              <div className="border-t bg-background/70 backdrop-blur p-4 space-y-3">
+	              <div
+	                className={cn(
+	                  "border-t bg-background/70 backdrop-blur p-4 space-y-3",
+	                  highlightSection === "start" &&
+	                    "ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
+	                )}
+	                id="start-race-section"
+	              >
 	                {!isServerConnected && (
 	                  <div className="text-xs text-yellow-900 bg-yellow-50 border border-yellow-200 rounded-md p-3">
 	                    Server connection issue. The game may be unavailable until the API

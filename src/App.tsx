@@ -6,13 +6,29 @@ import LlmRunManager from "@/components/llm-run-manager";
 import { Github } from "lucide-react";
 import { useState, useEffect } from "react";
 
+type TabValue = "view" | "play" | "about";
+
+const LAST_TAB_STORAGE_KEY = "wikirace:last-tab:v1";
+const SEEN_PLAY_TAB_STORAGE_KEY = "wikirace:seen-play-tab:v1";
+
+function loadStoredTab(): TabValue {
+  if (typeof window === "undefined") return "view";
+  const stored = window.localStorage.getItem(LAST_TAB_STORAGE_KEY);
+  if (stored === "view" || stored === "play" || stored === "about") return stored;
+  return "view";
+}
+
+function loadHasSeenPlayTab(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(SEEN_PLAY_TAB_STORAGE_KEY) === "true";
+}
+
 export default function Home() {
-  const [selectedTab, setSelectedTab] = useState<"view" | "play" | "about">(
-    "view"
-  );
+  const [selectedTab, setSelectedTab] = useState<TabValue>(loadStoredTab);
   const [startArticle, setStartArticle] = useState<string>("");
   const [destinationArticle, setDestinationArticle] = useState<string>("");
   const [isSmallScreen, setIsSmallScreen] = useState<boolean>(false);
+  const [hasSeenPlayTab, setHasSeenPlayTab] = useState<boolean>(loadHasSeenPlayTab);
   
   useEffect(() => {
     const checkScreenSize = () => {
@@ -23,14 +39,23 @@ export default function Home() {
     checkScreenSize();
     
     // Add resize listener
-    window.addEventListener('resize', checkScreenSize);
+    window.addEventListener("resize", checkScreenSize);
     
     // Clean up
-    return () => window.removeEventListener('resize', checkScreenSize);
+    return () => window.removeEventListener("resize", checkScreenSize);
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(LAST_TAB_STORAGE_KEY, selectedTab);
+
+    if (selectedTab === "play") {
+      window.localStorage.setItem(SEEN_PLAY_TAB_STORAGE_KEY, "true");
+      setHasSeenPlayTab(true);
+    }
+  }, [selectedTab]);
+
   const handleTryRun = (startArticle: string, destinationArticle: string) => {
-    console.log("Trying run from", startArticle, "to", destinationArticle);
     setSelectedTab("play");
     setStartArticle(startArticle);
     setDestinationArticle(destinationArticle);
@@ -69,17 +94,23 @@ export default function Home() {
       <Tabs
         defaultValue="view"
         className="w-full"
-        onValueChange={(value) => setSelectedTab(value as "view" | "play" | "about")}
+        onValueChange={(value) => setSelectedTab(value as TabValue)}
         value={selectedTab}
       >
         <TabsList className="mb-4 mt-6">
           <TabsTrigger value="view">View Runs</TabsTrigger>
-          <TabsTrigger value="play">Play Game</TabsTrigger>
+          <TabsTrigger value="play">
+            Play Game
+          </TabsTrigger>
           <TabsTrigger value="about">About</TabsTrigger>
         </TabsList>
 
         <TabsContent value="view">
-          <ViewerTab handleTryRun={handleTryRun} />
+          <ViewerTab
+            handleTryRun={handleTryRun}
+            onGoToPlayTab={() => setSelectedTab("play")}
+            showPlayCta={!hasSeenPlayTab}
+          />
         </TabsContent>
 
         <TabsContent value="play">
