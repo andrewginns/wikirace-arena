@@ -5,6 +5,8 @@ import { API_BASE } from "@/lib/constants";
 import RaceSetup from "@/components/race/race-setup";
 import type { RaceConfig } from "@/components/race/race-types";
 import MatchupArena from "@/components/matchup-arena";
+import MultiplayerPlay from "@/components/multiplayer/multiplayer-play";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   createSession,
   getOrCreateSession,
@@ -12,6 +14,17 @@ import {
   startLlmRun,
   useSessionsStore,
 } from "@/lib/session-store";
+
+type PlayMode = "local" | "multiplayer";
+
+const PLAY_MODE_STORAGE_KEY = "wikirace:play-mode:v1";
+
+function loadStoredPlayMode(): PlayMode {
+  if (typeof window === "undefined") return "local";
+  const stored = window.localStorage.getItem(PLAY_MODE_STORAGE_KEY);
+  if (stored === "multiplayer") return "multiplayer";
+  return "local";
+}
 
 export default function PlayTab({
   startArticle,
@@ -22,6 +35,7 @@ export default function PlayTab({
   destinationArticle?: string;
   onGoToViewerTab?: () => void;
 }) {
+  const [playMode, setPlayMode] = useState<PlayMode>(loadStoredPlayMode);
   const [isServerConnected, setIsServerConnected] = useState<boolean>(false);
   const [modelList] = useState<string[]>([
     "gpt-5.1",
@@ -53,6 +67,11 @@ export default function PlayTab({
 
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(PLAY_MODE_STORAGE_KEY, playMode);
+  }, [playMode]);
 
   useEffect(() => {
     const fetchAllArticles = async () => {
@@ -138,28 +157,53 @@ export default function PlayTab({
 
   return (
     <div className="space-y-6">
-      <div id="play-setup" className="space-y-6">
-        {!setupCollapsed && (
-          <RaceSetup
-            initialStartPage={initialStartPage}
-            initialTargetPage={initialTargetPage}
-            allArticles={effectiveArticles}
-            modelList={modelList}
-            isServerConnected={isServerConnected}
-            onStartRace={launchRaceRuns}
-          />
-        )}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-medium">Play mode</div>
+          <div className="text-xs text-muted-foreground">
+            Local uses one device; Multiplayer syncs across devices.
+          </div>
+        </div>
+        <Tabs value={playMode} onValueChange={(v) => setPlayMode(v as PlayMode)}>
+          <TabsList className="h-9">
+            <TabsTrigger value="local" className="text-xs px-3">
+              Local
+            </TabsTrigger>
+            <TabsTrigger value="multiplayer" className="text-xs px-3">
+              Multiplayer
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
 
-      <MatchupArena
-        onGoToViewerTab={onGoToViewerTab}
-        onNewRace={() => {
-          setSetupCollapsed(false);
-          setScrollTarget("setup");
-        }}
-        modelList={modelList}
-        isServerConnected={isServerConnected}
-      />
+      {playMode === "multiplayer" ? (
+        <MultiplayerPlay allArticles={effectiveArticles} isServerConnected={isServerConnected} />
+      ) : (
+        <>
+          <div id="play-setup" className="space-y-6">
+            {!setupCollapsed && (
+              <RaceSetup
+                initialStartPage={initialStartPage}
+                initialTargetPage={initialTargetPage}
+                allArticles={effectiveArticles}
+                modelList={modelList}
+                isServerConnected={isServerConnected}
+                onStartRace={launchRaceRuns}
+              />
+            )}
+          </div>
+
+          <MatchupArena
+            onGoToViewerTab={onGoToViewerTab}
+            onNewRace={() => {
+              setSetupCollapsed(false);
+              setScrollTarget("setup");
+            }}
+            modelList={modelList}
+            isServerConnected={isServerConnected}
+          />
+        </>
+      )}
     </div>
   );
 }

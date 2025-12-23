@@ -1198,7 +1198,61 @@ export default function MatchupArena({
       if (!allowedOrigins.has(event.origin)) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
-      const msg = data as { type?: unknown; title?: unknown; links?: unknown };
+      const msg = data as {
+        type?: unknown;
+        title?: unknown;
+        links?: unknown;
+        requestId?: unknown;
+      };
+
+      if (msg.type === "wikirace:navigate_request") {
+        const requestId = msg.requestId;
+        if (typeof requestId !== "string" || requestId.length === 0) return;
+
+        const respond = (allow: boolean) => {
+          try {
+            (event.source as WindowProxy | null)?.postMessage(
+              { type: "wikirace:navigate_response", requestId, allow },
+              event.origin
+            );
+          } catch {
+            // ignore
+          }
+        };
+
+        const title = msg.title;
+        if (typeof title !== "string" || title.length === 0) {
+          respond(false);
+          return;
+        }
+
+        // During an active run, replay mode locks the iframe (no navigation).
+        // After a run finishes, we allow navigation for "explore" mode even if replay is enabled.
+        if (lockWikiNavigation) {
+          respond(false);
+          return;
+        }
+
+        const now = Date.now();
+        const last = lastIframeNavigateRef.current;
+        if (last && last.title === title && now - last.at < 1000) {
+          respond(true);
+          return;
+        }
+        lastIframeNavigateRef.current = { title, at: now };
+
+        const isSelectedHumanRunning =
+          selectedRunKind === "human" && selectedRunStatus === "running";
+        if (isSelectedHumanRunning) {
+          recordHumanMoveRef.current(title);
+          respond(true);
+          return;
+        }
+
+        setMapPreviewArticle(title);
+        respond(true);
+        return;
+      }
 
       if (msg.type === "wikirace:pageLinks") {
         const title = msg.title;

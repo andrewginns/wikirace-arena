@@ -157,6 +157,34 @@ In the Arena:
 - For human runs, use **Start turn / End turn** to take hotseat turns.
 - Use **Save to viewer** to copy selected runs into View Runs.
 
+### Multiplayer (LAN rooms)
+
+Multiplayer rooms let multiple humans on different devices join the **same** race and see a shared leaderboard update live (WebSocket).
+
+Recommended (single-server / production-like):
+
+```bash
+make build
+WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db uv run uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Or use the convenience target:
+
+```bash
+make multiplayer
+```
+
+Then:
+
+1) Find the host machine’s LAN IP (e.g. `192.168.1.23`).
+2) On other devices, open: `http://<LAN-IP>:8000/`.
+3) In **Play Game**, switch to **Multiplayer**, create a room, and share the invite link.
+
+Notes:
+
+- Rooms are stored **in memory** (server restart clears rooms).
+- Run with a single uvicorn worker (`--workers 1`) for consistent room state.
+
 ### LiteLLM provider cheat sheet
 
 These env vars must be set in the shell where you run the API server.
