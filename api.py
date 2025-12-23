@@ -2,10 +2,18 @@ import sqlite3
 import json
 import os
 import re
+import asyncio
+import secrets
+import string
+import socket
+import subprocess
+import sys
+import ipaddress
 from urllib.parse import quote
 from typing import Tuple, List, Optional, Any
 from functools import lru_cache
-from fastapi import FastAPI, HTTPException
+from datetime import datetime, timezone
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -69,6 +77,93 @@ class CanonicalTitleResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     article_count: int
+
+
+class RoomRulesV1(BaseModel):
+    max_hops: int
+    max_links: Optional[int] = None
+    max_tokens: Optional[int] = None
+
+
+class RoomPlayerV1(BaseModel):
+    id: str
+    name: str
+    connected: bool
+    joined_at: str
+
+
+class RoomStepV1(BaseModel):
+    type: str
+    article: str
+    at: str
+    metadata: Optional[dict[str, Any]] = None
+
+
+class RoomRunV1(BaseModel):
+    id: str
+    kind: str
+    player_id: Optional[str] = None
+    player_name: Optional[str] = None
+    model: Optional[str] = None
+    api_base: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    max_steps: Optional[int] = None
+    max_links: Optional[int] = None
+    max_tokens: Optional[int] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    status: str
+    result: Optional[str] = None
+    steps: List[RoomStepV1]
+
+
+class RoomStateV1(BaseModel):
+    id: str
+    created_at: str
+    updated_at: str
+    owner_player_id: str
+    title: Optional[str] = None
+    start_article: str
+    destination_article: str
+    rules: RoomRulesV1
+    status: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    players: List[RoomPlayerV1]
+    runs: List[RoomRunV1]
+
+
+class CreateRoomRequest(BaseModel):
+    start_article: str
+    destination_article: str
+    title: Optional[str] = None
+    owner_name: Optional[str] = None
+    rules: Optional[RoomRulesV1] = None
+
+
+class CreateRoomResponse(BaseModel):
+    room_id: str
+    owner_player_id: str
+    join_url: str
+    room: RoomStateV1
+
+
+class JoinRoomRequest(BaseModel):
+    name: str
+
+
+class JoinRoomResponse(BaseModel):
+    player_id: str
+    room: RoomStateV1
+
+
+class StartRoomRequest(BaseModel):
+    player_id: str
+
+
+class MoveRoomRequest(BaseModel):
+    player_id: str
+    to_article: str
 
 
 class SQLiteDB:
@@ -187,6 +282,266 @@ if not os.path.exists(db_path):
 db = SQLiteDB(db_path)
 
 
+ROOMS: dict[str, dict[str, Any]] = {}
+ROOM_LOCKS: dict[str, asyncio.Lock] = {}
+ROOM_CONNECTIONS: dict[str, set[WebSocket]] = {}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _titles_match(a: str, b: str) -> bool:
+    return a.replace("_", " ").strip().lower() == b.replace("_", " ").strip().lower()
+
+
+def _normalize_room_id(room_id: str) -> str:
+    raw = (room_id or "").strip()
+    if not raw:
+        return raw
+
+    if "_" in raw:
+        prefix, rest = raw.split("_", 1)
+        if prefix.lower() == "room":
+            return f"room_{rest.upper()}"
+
+    return f"room_{raw.upper()}"
+
+
+def _make_code(prefix: str, length: int = 10) -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    alphabet = alphabet.replace("0", "").replace("1", "").replace("O", "").replace("I", "")
+    token = "".join(secrets.choice(alphabet) for _ in range(length))
+    return f"{prefix}_{token}"
+
+
+def _detect_lan_ip() -> Optional[str]:
+    override = (os.getenv("WIKIRACE_PUBLIC_HOST") or "").strip()
+    if override:
+        return override
+
+    def is_usable(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if addr.version != 4:
+            return False
+        if addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified:
+            return False
+        return True
+
+    # macOS: ask the OS directly.
+    if sys.platform == "darwin":
+        iface_candidates = ["en0", "en1"]
+        try:
+            iface_candidates.extend([name for _, name in socket.if_nameindex()])
+        except Exception:
+            pass
+
+        seen = set()
+        for iface in iface_candidates:
+            if iface in seen:
+                continue
+            seen.add(iface)
+            try:
+                result = subprocess.run(
+                    ["ipconfig", "getifaddr", iface],
+                    capture_output=True,
+                    text=True,
+                )
+            except FileNotFoundError:
+                break
+            except Exception:
+                continue
+            if result.returncode != 0:
+                continue
+            ip = (result.stdout or "").strip()
+            if ip and is_usable(ip):
+                return ip
+
+    # Linux: prefer `hostname -I`.
+    if sys.platform.startswith("linux"):
+        try:
+            result = subprocess.run(
+                ["hostname", "-I"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                for token in (result.stdout or "").split():
+                    if is_usable(token):
+                        return token
+        except Exception:
+            pass
+
+    # Generic heuristic: infer the chosen outbound interface without sending packets.
+    candidates = [("1.1.1.1", 80), ("8.8.8.8", 80), ("10.255.255.255", 1)]
+    for host, port in candidates:
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.connect((host, port))
+            ip = sock.getsockname()[0]
+            if ip and is_usable(ip):
+                return ip
+        except Exception:
+            continue
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    # Last resort: hostname resolution.
+    try:
+        _, _, ips = socket.gethostbyname_ex(socket.gethostname())
+    except Exception:
+        ips = []
+
+    for ip in ips:
+        if is_usable(ip):
+            return ip
+
+    return None
+
+
+def _normalize_room_rules(raw: Optional[RoomRulesV1]) -> dict[str, Any]:
+    default = {"max_hops": 20, "max_links": None, "max_tokens": None}
+    if raw is None:
+        return default
+
+    max_hops = raw.max_hops if isinstance(raw.max_hops, int) and raw.max_hops > 0 else default["max_hops"]
+
+    max_links: Optional[int]
+    if raw.max_links is None:
+        max_links = None
+    else:
+        max_links = raw.max_links if isinstance(raw.max_links, int) and raw.max_links > 0 else None
+
+    max_tokens: Optional[int]
+    if raw.max_tokens is None:
+        max_tokens = None
+    else:
+        max_tokens = raw.max_tokens if isinstance(raw.max_tokens, int) and raw.max_tokens > 0 else None
+
+    return {"max_hops": max_hops, "max_links": max_links, "max_tokens": max_tokens}
+
+
+def _room_state(room_id: str) -> dict[str, Any]:
+    room_id = _normalize_room_id(room_id)
+    room = ROOMS.get(room_id)
+    if not room:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Room not found ({room_id}). Rooms are stored in memory; "
+                "if the server restarted/reloaded, create a new room."
+            ),
+        )
+    return room
+
+
+def _room_run_for_player(room: dict[str, Any], player_id: str) -> Optional[dict[str, Any]]:
+    for run in room.get("runs", []):
+        if run.get("player_id") == player_id:
+            return run
+    return None
+
+
+async def _broadcast_room(room_id: str) -> None:
+    room_id = _normalize_room_id(room_id)
+    room = ROOMS.get(room_id)
+    if not room:
+        return
+
+    conns = ROOM_CONNECTIONS.get(room_id)
+    if not conns:
+        return
+
+    payload = json.dumps({"type": "room_state", "room": room}, ensure_ascii=False)
+    dead: list[WebSocket] = []
+
+    for ws in list(conns):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.append(ws)
+
+    for ws in dead:
+        try:
+            conns.remove(ws)
+        except KeyError:
+            pass
+
+
+async def _set_player_connected(room_id: str, player_id: str, connected: bool) -> None:
+    room_id = _normalize_room_id(room_id)
+    lock = ROOM_LOCKS.get(room_id)
+    room = ROOMS.get(room_id)
+    if not lock or not room:
+        return
+
+    async with lock:
+        changed = False
+        for player in room.get("players", []):
+            if player.get("id") != player_id:
+                continue
+            if bool(player.get("connected")) == connected:
+                break
+            player["connected"] = connected
+            changed = True
+            break
+
+        if changed:
+            room["updated_at"] = _now_iso()
+
+    if changed:
+        await _broadcast_room(room_id)
+
+
+ROOM_IDLE_TTL_SECONDS = int(os.getenv("WIKIRACE_ROOM_TTL_SECONDS", "21600"))
+ROOM_CLEANUP_INTERVAL_SECONDS = int(os.getenv("WIKIRACE_ROOM_CLEANUP_INTERVAL_SECONDS", "300"))
+
+
+@app.on_event("startup")
+async def _start_room_cleanup_task():
+    async def _cleanup_loop():
+        while True:
+            await asyncio.sleep(ROOM_CLEANUP_INTERVAL_SECONDS)
+            now = datetime.now(timezone.utc)
+            expired: list[str] = []
+
+            for room_id, room in list(ROOMS.items()):
+                updated_at = room.get("updated_at")
+                if not isinstance(updated_at, str):
+                    continue
+
+                try:
+                    updated = _parse_iso(updated_at)
+                except Exception:
+                    continue
+
+                age = (now - updated).total_seconds()
+                if age <= ROOM_IDLE_TTL_SECONDS:
+                    continue
+
+                expired.append(room_id)
+
+            for room_id in expired:
+                ROOMS.pop(room_id, None)
+                ROOM_LOCKS.pop(room_id, None)
+                ROOM_CONNECTIONS.pop(room_id, None)
+
+    asyncio.create_task(_cleanup_loop())
+
+
 def _inject_base_href(html: str) -> str:
     base_tag = f'<base href="{SIMPLEWIKI_ORIGIN}/" />'
     head_match = re.search(r"<head[^>]*>", html, flags=re.IGNORECASE)
@@ -208,6 +563,8 @@ def _inject_wiki_bridge(html: str) -> str:
 (function () {
   var replayMode = false
   var resolvedTitleCache = Object.create(null)
+  var navRequestSeq = 0
+  var pendingNavigate = Object.create(null)
 
   function setReplayMode(enabled) {
     replayMode = !!enabled
@@ -219,7 +576,44 @@ def _inject_wiki_bridge(html: str) -> str:
     if (data.type === "wikirace:setReplayMode") {
       setReplayMode(!!data.enabled)
     }
+    if (data.type === "wikirace:navigate_response") {
+      var requestId = data.requestId
+      if (typeof requestId !== "string" || !requestId) return
+      var cb = pendingNavigate[requestId]
+      if (typeof cb !== "function") return
+      delete pendingNavigate[requestId]
+      cb(!!data.allow)
+    }
   })
+
+  function requestParentNavigate(title) {
+    return new Promise(function (resolve) {
+      var requestId = "nav_" + (++navRequestSeq) + "_" + Date.now()
+      var settled = false
+
+      pendingNavigate[requestId] = function (allow) {
+        if (settled) return
+        settled = true
+        resolve({ handled: true, allow: !!allow })
+      }
+
+      try {
+        window.parent.postMessage(
+          { type: "wikirace:navigate_request", requestId: requestId, title: title },
+          "*"
+        )
+      } catch {
+        // ignore
+      }
+
+      window.setTimeout(function () {
+        if (settled) return
+        settled = true
+        delete pendingNavigate[requestId]
+        resolve({ handled: false, allow: true })
+      }, 700)
+    })
+  }
 
   function decodePart(raw) {
     try {
@@ -428,13 +822,20 @@ def _inject_wiki_bridge(html: str) -> str:
       resolveArticleTitle(title).then(function (resolved) {
         if (!resolved) return
 
-        try {
-          window.parent.postMessage({ type: "wikirace:navigate", title: resolved }, "*")
-        } catch {
-          // ignore
-        }
+        requestParentNavigate(resolved).then(function (result) {
+          if (!result || !result.allow) return
 
-        window.location.href = toProxyPath(resolved)
+          // Back-compat: older parents only understand the legacy event.
+          if (!result.handled) {
+            try {
+              window.parent.postMessage({ type: "wikirace:navigate", title: resolved }, "*")
+            } catch {
+              // ignore
+            }
+          }
+
+          window.location.href = toProxyPath(resolved)
+        })
       })
     },
     true
@@ -504,6 +905,361 @@ async def canonical_title(article_title: str):
 
     fallback = article_title.replace("_", " ").strip()
     return CanonicalTitleResponse(title=fallback)
+
+
+@app.post("/rooms", response_model=CreateRoomResponse)
+async def create_room(request: Request, body: CreateRoomRequest):
+    start_raw = body.start_article.replace("_", " ").strip()
+    destination_raw = body.destination_article.replace("_", " ").strip()
+    if not start_raw or not destination_raw:
+        raise HTTPException(status_code=400, detail="Start and target are required")
+
+    start_resolved = db.canonical_title(start_raw)
+    destination_resolved = db.canonical_title(destination_raw)
+    if not start_resolved:
+        raise HTTPException(status_code=404, detail="Start article not found")
+    if not destination_resolved:
+        raise HTTPException(status_code=404, detail="Target article not found")
+    if _titles_match(start_resolved, destination_resolved):
+        raise HTTPException(status_code=400, detail="Start and target must be different")
+
+    created_at = _now_iso()
+    rules = _normalize_room_rules(body.rules)
+    title = body.title.strip() if body.title else None
+    owner_name = body.owner_name.strip() if body.owner_name else "Host"
+
+    room_id = _make_code("room", 8)
+    while room_id in ROOMS:
+        room_id = _make_code("room", 8)
+
+    owner_player_id = _make_code("player", 10)
+    owner_run_id = _make_code("run", 10)
+
+    room: dict[str, Any] = {
+        "id": room_id,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "owner_player_id": owner_player_id,
+        "title": title,
+        "start_article": start_resolved,
+        "destination_article": destination_resolved,
+        "rules": rules,
+        "status": "lobby",
+        "started_at": None,
+        "finished_at": None,
+        "players": [
+            {
+                "id": owner_player_id,
+                "name": owner_name,
+                "connected": False,
+                "joined_at": created_at,
+            }
+        ],
+        "runs": [
+            {
+                "id": owner_run_id,
+                "kind": "human",
+                "player_id": owner_player_id,
+                "player_name": owner_name,
+                "max_steps": rules["max_hops"],
+                "status": "not_started",
+                "started_at": None,
+                "finished_at": None,
+                "result": None,
+                "steps": [],
+            }
+        ],
+    }
+
+    ROOMS[room_id] = room
+    ROOM_LOCKS[room_id] = asyncio.Lock()
+    ROOM_CONNECTIONS[room_id] = set()
+
+    print(
+        "Created room "
+        + room_id
+        + " (code "
+        + room_id.split("_", 1)[1]
+        + ") "
+        + start_resolved
+        + " -> "
+        + destination_resolved
+    )
+
+    origin = str(request.base_url).rstrip("/")
+
+    join_host = request.url.hostname
+    join_port = request.url.port
+    join_scheme = request.url.scheme
+
+    join_url = f"{origin}/?room={room_id}"
+    if join_host in ("localhost", "127.0.0.1", "0.0.0.0"):
+        lan_ip = _detect_lan_ip()
+        if lan_ip:
+            netloc = f"{lan_ip}:{join_port}" if join_port else lan_ip
+            join_url = f"{join_scheme}://{netloc}/?room={room_id}"
+    return {
+        "room_id": room_id,
+        "owner_player_id": owner_player_id,
+        "join_url": join_url,
+        "room": room,
+    }
+
+
+@app.get("/rooms/{room_id}", response_model=RoomStateV1)
+async def get_room(room_id: str):
+    return _room_state(room_id)
+
+
+@app.post("/rooms/{room_id}/join", response_model=JoinRoomResponse)
+async def join_room(room_id: str, body: JoinRoomRequest):
+    room_id = _normalize_room_id(room_id)
+    lock = ROOM_LOCKS.get(room_id)
+    room = ROOMS.get(room_id)
+    if not lock or not room:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Room not found ({room_id}). Rooms are stored in memory; "
+                "if the server restarted/reloaded, create a new room."
+            ),
+        )
+
+    player_name = body.name.strip()
+    if not player_name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    joined_at = _now_iso()
+    player_id = _make_code("player", 10)
+
+    async with lock:
+        status = room.get("status")
+        if status == "finished":
+            raise HTTPException(status_code=409, detail="Room already finished")
+
+        is_running = status == "running"
+
+        existing_ids = {p.get("id") for p in room.get("players", []) if isinstance(p, dict)}
+        while player_id in existing_ids:
+            player_id = _make_code("player", 10)
+
+        run_id = _make_code("run", 10)
+        room.setdefault("players", []).append(
+            {
+                "id": player_id,
+                "name": player_name,
+                "connected": False,
+                "joined_at": joined_at,
+            }
+        )
+        room.setdefault("runs", []).append(
+            {
+                "id": run_id,
+                "kind": "human",
+                "player_id": player_id,
+                "player_name": player_name,
+                "max_steps": room.get("rules", {}).get("max_hops", 20),
+                "status": "running" if is_running else "not_started",
+                "started_at": joined_at if is_running else None,
+                "finished_at": None,
+                "result": None,
+                "steps": [
+                    {
+                        "type": "start",
+                        "article": room.get("start_article"),
+                        "at": joined_at,
+                    }
+                ]
+                if is_running
+                else [],
+            }
+        )
+        room["updated_at"] = joined_at
+
+    await _broadcast_room(room_id)
+    return {"player_id": player_id, "room": room}
+
+
+@app.post("/rooms/{room_id}/start", response_model=RoomStateV1)
+async def start_room(room_id: str, body: StartRoomRequest):
+    room_id = _normalize_room_id(room_id)
+    lock = ROOM_LOCKS.get(room_id)
+    room = ROOMS.get(room_id)
+    if not lock or not room:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Room not found ({room_id}). Rooms are stored in memory; "
+                "if the server restarted/reloaded, create a new room."
+            ),
+        )
+
+    async with lock:
+        if body.player_id != room.get("owner_player_id"):
+            raise HTTPException(status_code=403, detail="Only the host can start the race")
+        if room.get("status") != "lobby":
+            return room
+
+        started_at = _now_iso()
+        room["status"] = "running"
+        room["started_at"] = started_at
+        room["updated_at"] = started_at
+
+        for run in room.get("runs", []):
+            if run.get("status") != "not_started":
+                continue
+            run["status"] = "running"
+            run["started_at"] = started_at
+            run["steps"] = [
+                {
+                    "type": "start",
+                    "article": room.get("start_article"),
+                    "at": started_at,
+                }
+            ]
+
+    await _broadcast_room(room_id)
+    return room
+
+
+@app.post("/rooms/{room_id}/move", response_model=RoomStateV1)
+async def room_move(room_id: str, body: MoveRoomRequest):
+    room_id = _normalize_room_id(room_id)
+    lock = ROOM_LOCKS.get(room_id)
+    room = ROOMS.get(room_id)
+    if not lock or not room:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Room not found ({room_id}). Rooms are stored in memory; "
+                "if the server restarted/reloaded, create a new room."
+            ),
+        )
+
+    to_raw = body.to_article.replace("_", " ").strip()
+    if not to_raw:
+        raise HTTPException(status_code=400, detail="to_article is required")
+
+    resolved = db.resolve_title(to_raw)
+    if not resolved:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    updated_at = _now_iso()
+    changed = False
+
+    async with lock:
+        if room.get("status") != "running":
+            raise HTTPException(status_code=409, detail="Room is not running")
+
+        run = _room_run_for_player(room, body.player_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Player not in room")
+        if run.get("status") != "running":
+            raise HTTPException(status_code=409, detail="Run is not running")
+
+        steps: list[dict[str, Any]] = run.get("steps") or []
+        current_article = (
+            steps[-1].get("article") if steps and isinstance(steps[-1], dict) else None
+        )
+        if not isinstance(current_article, str) or not current_article:
+            current_article = room.get("start_article")
+
+        if isinstance(current_article, str) and _titles_match(current_article, resolved):
+            return room
+
+        current_hops = max(0, len(steps) - 1)
+        next_hops = current_hops + 1
+        max_hops = room.get("rules", {}).get("max_hops")
+        max_hops = max_hops if isinstance(max_hops, int) and max_hops > 0 else 20
+
+        step_metadata: Optional[dict[str, Any]] = None
+        destination_article = room.get("destination_article")
+        if not isinstance(destination_article, str) or not destination_article:
+            raise HTTPException(status_code=500, detail="Room missing destination article")
+
+        try:
+            title, links = db.get_article_with_links(current_article)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+        if not title:
+            raise HTTPException(status_code=400, detail=f"Current article not found ({current_article})")
+
+        if resolved not in links:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid move: '{resolved}' is not a link from '{title}'",
+            )
+
+        canonical_next = db.canonical_title(resolved)
+        canonical_target = db.canonical_title(destination_article)
+
+        if canonical_next and canonical_target and _titles_match(canonical_next, canonical_target):
+            step_type = "win"
+            run["status"] = "finished"
+            run["result"] = "win"
+            run["finished_at"] = updated_at
+            step_article = destination_article
+        elif next_hops >= max_hops:
+            step_type = "lose"
+            run["status"] = "finished"
+            run["result"] = "lose"
+            run["finished_at"] = updated_at
+            step_article = resolved
+            step_metadata = {"reason": "max_hops", "max_hops": max_hops}
+        else:
+            step_type = "move"
+            step_article = resolved
+
+        step: dict[str, Any] = {"type": step_type, "article": step_article, "at": updated_at}
+        if step_metadata:
+            step["metadata"] = step_metadata
+
+        run["steps"] = [*steps, step]
+        room["updated_at"] = updated_at
+        changed = True
+
+        if run.get("status") == "finished":
+            if all(r.get("status") == "finished" for r in room.get("runs", [])):
+                room["status"] = "finished"
+                room["finished_at"] = updated_at
+
+    if changed:
+        await _broadcast_room(room_id)
+    return room
+
+
+@app.websocket("/rooms/{room_id}/ws")
+async def room_ws(websocket: WebSocket, room_id: str, player_id: Optional[str] = None):
+    room_id = _normalize_room_id(room_id)
+    room = ROOMS.get(room_id)
+    if not room:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    ROOM_CONNECTIONS.setdefault(room_id, set()).add(websocket)
+
+    if player_id:
+        await _set_player_connected(room_id, player_id, True)
+
+    await websocket.send_text(
+        json.dumps({"type": "room_state", "room": room}, ensure_ascii=False)
+    )
+
+    try:
+        while True:
+            _ = await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        conns = ROOM_CONNECTIONS.get(room_id)
+        if conns:
+            conns.discard(websocket)
+        if player_id:
+            await _set_player_connected(room_id, player_id, False)
 
 
 @app.get("/wiki/{article_title:path}", response_class=HTMLResponse)
