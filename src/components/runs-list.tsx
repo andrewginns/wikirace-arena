@@ -3,10 +3,17 @@
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useState, useEffect, useRef } from "react";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Pause, Play } from "lucide-react";
 import { formatHops, viewerRunHops } from "@/lib/hops";
 
 interface Run {
@@ -23,6 +30,8 @@ interface RunsListProps {
   selectedRunId: number | null;
   onTryRun?: (startArticle: string, destinationArticle: string) => void;
   pauseToken?: number | null;
+  selectedRunIds?: Set<number>;
+  onToggleRunSelected?: (runId: number) => void;
 }
 
 export default function RunsList({
@@ -31,9 +40,13 @@ export default function RunsList({
   selectedRunId,
   onTryRun,
   pauseToken,
+  selectedRunIds,
+  onToggleRunSelected,
 }: RunsListProps) {
   const [isPlaying, setIsPlaying] = useState(true);
-  const [filter, setFilter] = useState("");
+  const [autoplaySpeed, setAutoplaySpeed] = useState<"slow" | "normal" | "fast">(
+    "normal"
+  );
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const runItemsRef = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -45,14 +58,6 @@ export default function RunsList({
     if (pauseToken === null || typeof pauseToken === "undefined") return;
     setIsPlaying(false);
   }, [pauseToken]);
-
-  // Filter runs based on start and end filters
-  const filteredRuns = runs.filter((run) => {
-    const matches = filter === "" || 
-      run.start_article.toLowerCase().includes(filter.toLowerCase()) ||
-      run.destination_article.toLowerCase().includes(filter.toLowerCase());
-    return matches;
-  });
 
   const _onSelectRun = (runId: number) => {
     onSelectRun(runId);
@@ -87,29 +92,28 @@ export default function RunsList({
 
   // Auto-play functionality
   useEffect(() => {
+    const intervalMs =
+      autoplaySpeed === "fast" ? 850 : autoplaySpeed === "slow" ? 2500 : 1500;
+
     if (isPlaying) {
       timerRef.current = setInterval(() => {
-        if (filteredRuns.length === 0) return;
+        if (runs.length === 0) return;
         
         const nextIndex = selectedRunId === null 
           ? 0 
-          : (selectedRunId + 1) % filteredRuns.length;
-        
-        const originalIndex = runs.findIndex(
-          run => run === filteredRuns[nextIndex]
-        );
+          : (selectedRunId + 1) % runs.length;
         
         if (userScrollLockRef.current) {
           // Avoid changing scroll position while the user is scrolling.
           // If the next item isn't already visible, pause instead.
-          if (!isRunVisible(originalIndex)) {
+          if (!isRunVisible(nextIndex)) {
             setIsPlaying(false);
             return;
           }
         }
 
-        onSelectRun(originalIndex);
-      }, 1500);
+        onSelectRun(nextIndex);
+      }, intervalMs);
     } else if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
@@ -120,7 +124,7 @@ export default function RunsList({
         clearInterval(timerRef.current);
       }
     };
-  }, [isPlaying, selectedRunId, filteredRuns, runs, onSelectRun]);
+  }, [autoplaySpeed, isPlaying, selectedRunId, runs, onSelectRun]);
 
   useEffect(() => {
     return () => {
@@ -166,43 +170,52 @@ export default function RunsList({
   return (
     <div className="h-full w-full flex flex-col">
       <div className="space-y-2 mb-4">
-        <div className="flex gap-2 items-center">
-          <Input
-            placeholder="Filter by article"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            className="h-9"
-          />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button 
-                size="sm" 
-                variant={isPlaying ? "secondary" : "outline"} 
-                onClick={togglePlayPause}
-                className="flex-shrink-0 h-9 px-3 gap-1"
-              >
-                {isPlaying ? (
-                  <>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="6" y="4" width="4" height="16" />
-                      <rect x="14" y="4" width="4" height="16" />
-                    </svg>
-                    Pause
-                  </>
-                ) : (
-                  <>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polygon points="5 3 19 12 5 21 5 3" />
-                    </svg>
-                    Play
-                  </>
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" align="end">
-              Autoplay cycles through runs and updates the highlighted path.
-            </TooltipContent>
-          </Tooltip>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button 
+                  size="sm" 
+                  variant={isPlaying ? "secondary" : "outline"} 
+                  onClick={togglePlayPause}
+                  className="flex-shrink-0 h-9 px-3 gap-1"
+                >
+                  {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                  <span className="hidden sm:inline">
+                    Autoplay: {isPlaying ? "On" : "Off"}
+                  </span>
+                  <span className="sm:hidden">Autoplay</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" align="end">
+                Autoplay cycles through runs and updates the highlighted path.
+              </TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div>
+                  <Select value={autoplaySpeed} onValueChange={setAutoplaySpeed}>
+                    <SelectTrigger className="h-9 w-[110px]">
+                      <SelectValue placeholder="Speed" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="slow">Slow</SelectItem>
+                      <SelectItem value="normal">Normal</SelectItem>
+                      <SelectItem value="fast">Fast</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="top" align="end">
+                Autoplay speed
+              </TooltipContent>
+            </Tooltip>
+          </div>
+
+          <div className="text-xs text-muted-foreground">
+            {runs.length} run{runs.length === 1 ? "" : "s"}
+          </div>
         </div>
       </div>
 
@@ -218,11 +231,18 @@ export default function RunsList({
           markUserScrolling();
         }}
       >
-        {filteredRuns.map((run) => {
-          const originalIndex = runs.indexOf(run);
+        {runs.map((run, originalIndex) => {
           const isNearMiss = run.near_miss;
           const isWin = run.result === "win";
           const hops = viewerRunHops(run);
+          const isSelected = selectedRunIds?.has(originalIndex) ?? false;
+          const stripeClass = isWin
+            ? "border-l-green-500"
+            : isNearMiss
+              ? "border-l-amber-500"
+              : run.result
+                ? "border-l-red-500"
+                : "border-l-transparent";
           return (
             <Card
               key={originalIndex}
@@ -234,7 +254,8 @@ export default function RunsList({
                 }
               }}
               className={cn(
-                "p-0 cursor-pointer transition-all border overflow-hidden",
+                "p-0 cursor-pointer transition-all border border-l-4 overflow-hidden",
+                stripeClass,
                 selectedRunId === originalIndex
                   ? "bg-primary/5 border-primary/50 shadow-md"
                   : "hover:bg-muted/50 border-border"
@@ -247,6 +268,16 @@ export default function RunsList({
                 <div className="flex items-start justify-between">
                   <div className="space-y-1">
                     <div className="font-medium flex items-center flex-wrap gap-1">
+                      {onToggleRunSelected ? (
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 mr-1"
+                          checked={isSelected}
+                          onChange={() => onToggleRunSelected(originalIndex)}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label="Select run"
+                        />
+                      ) : null}
                       <span className="text-primary">{run.start_article}</span>
                       <svg
                         xmlns="http://www.w3.org/2000/svg"
@@ -277,7 +308,15 @@ export default function RunsList({
                         </TooltipContent>
                       </Tooltip>
                       {run.result && !isWin && (
-                        <Badge variant="secondary" className="text-[11px] h-5 px-2 py-0">
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            "text-[11px] h-5 px-2 py-0",
+                            run.result === "abandoned"
+                              ? "border-slate-200 bg-slate-50 text-slate-700"
+                              : "border-red-200 bg-red-50 text-red-800"
+                          )}
+                        >
                           {run.result}
                         </Badge>
                       )}
@@ -322,9 +361,9 @@ export default function RunsList({
           );
         })}
 
-        {filteredRuns.length === 0 && (
+        {runs.length === 0 && (
           <div className="flex items-center justify-center h-32 text-muted-foreground">
-            No runs available
+            No runs available.
           </div>
         )}
       </div>

@@ -23,11 +23,21 @@ const STYLES = {
   minLinkOpacity: 0.15,
 };
 
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 interface ForceDirectedGraphProps {
   runId: number | null;
   runs: Run[];
   includeGraphLinks?: boolean;
   highlightStep?: number | null;
+  focusColor?: string;
   compareRunIds?: number[];
   compareHighlightStep?: number | null;
   compareColorByRunId?: Record<number, string>;
@@ -59,6 +69,7 @@ export default function ForceDirectedGraph({
   runId,
   includeGraphLinks,
   highlightStep,
+  focusColor,
   compareRunIds,
   compareHighlightStep,
   compareColorByRunId,
@@ -87,10 +98,12 @@ export default function ForceDirectedGraph({
 
   const effectiveCompareColors = compareColorByRunId ?? internalCompareColorByRunId;
 
+  const effectiveFocusColor = focusColor ?? STYLES.highlightColor;
+
   const focusRunColor = useMemo(() => {
-    if (!isCompareMode || runId === null) return STYLES.highlightColor;
-    return effectiveCompareColors[runId] ?? STYLES.highlightColor;
-  }, [effectiveCompareColors, isCompareMode, runId]);
+    if (!isCompareMode || runId === null) return effectiveFocusColor;
+    return effectiveCompareColors[runId] ?? effectiveFocusColor;
+  }, [effectiveCompareColors, effectiveFocusColor, isCompareMode, runId]);
   const zoomNodeFilter = useCallback(
     (node: GraphNode) => {
       if (node.type === "fixed") return true;
@@ -522,7 +535,7 @@ export default function ForceDirectedGraph({
   // Helper function to determine node color based on current runId
   const getNodeColor = (node: GraphNode) => {
     if (!isCompareMode && runId !== null && selectedReachedArticles?.has(node.id)) {
-      return STYLES.highlightColor;
+      return focusRunColor;
     }
 
     // Nodes not in the selected run get their default colors
@@ -546,12 +559,17 @@ export default function ForceDirectedGraph({
       return effectiveCompareColors[link.runId] ?? STYLES.linkColor;
     }
     if (isLinkInCurrentRun(link)) {
-      return STYLES.highlightColor;
+      return focusRunColor;
     }
     if (link.kind === "wiki") {
       return `rgba(173, 181, 189, ${STYLES.minLinkOpacity})`;
     }
     return STYLES.linkColor;
+  };
+
+  const shouldAnimateLink = (link: GraphLink) => {
+    if (isCompareMode) return isLinkInCompareRuns(link);
+    return isLinkInCurrentRun(link);
   };
 
 
@@ -569,14 +587,33 @@ export default function ForceDirectedGraph({
         <ForceGraph2D
           ref={graphRef}
           graphData={graphData}
-          nodeLabel="id"
+          nodeLabel={(node) => {
+            const graphNode = node as GraphNode;
+            const runCount = graphNode.runIds?.length ?? 0;
+            const title = escapeHtml(graphNode.id);
+            const metaParts: string[] = [];
+            if (graphNode.isMainNode) metaParts.push("Start/Target");
+            metaParts.push(`${runCount} run${runCount === 1 ? "" : "s"}`);
+            const meta = escapeHtml(metaParts.join(" • "));
+            return `<div style="display:flex;flex-direction:column;gap:2px;">
+              <div style="font-weight:600;">${title}</div>
+              <div style="font-size:12px;opacity:0.85;">${meta}</div>
+            </div>`;
+          }}
           nodeColor={getNodeColor}
           linkColor={getLinkColor}
           linkDirectionalArrowLength={(link) => (isLinkInCurrentRun(link) ? 7 : 0)}
           linkDirectionalArrowRelPos={1}
-          linkDirectionalArrowColor={(link) =>
-            isCompareMode && isLinkInCurrentRun(link) ? focusRunColor : STYLES.highlightColor
-          }
+          linkDirectionalArrowColor={() => focusRunColor}
+          linkDirectionalParticles={(link) => (shouldAnimateLink(link) ? 2 : 0)}
+          linkDirectionalParticleWidth={2}
+          linkDirectionalParticleSpeed={(link) => (shouldAnimateLink(link) ? 0.008 : 0)}
+          linkDirectionalParticleColor={(link) => {
+            if (isCompareMode && link.kind === "path") {
+              return effectiveCompareColors[link.runId] ?? focusRunColor;
+            }
+            return focusRunColor;
+          }}
           linkWidth={(link) => {
             if (isCompareMode) {
               if (isLinkInCompareRuns(link)) {
@@ -630,7 +667,7 @@ export default function ForceDirectedGraph({
             ctx.fill();
 
             // Add white stroke around nodes
-            ctx.strokeStyle = isReached ? STYLES.highlightColor : "transparent";
+            ctx.strokeStyle = isReached ? focusRunColor : "transparent";
             ctx.globalAlpha = opacity;
             ctx.lineWidth = 3;
             ctx.stroke();

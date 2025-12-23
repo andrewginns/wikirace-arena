@@ -1,6 +1,6 @@
 import { API_BASE } from '@/lib/constants'
 import type { StepV1 } from '@/lib/session-types'
-import { wikiTitlesMatch } from '@/lib/wiki-title'
+import { normalizeWikiTitle, wikiTitlesMatch } from '@/lib/wiki-title'
 
 type RunLlmRaceArgs = {
   startArticle: string
@@ -20,6 +20,45 @@ type LlmUsage = {
   promptTokens?: number
   completionTokens?: number
   totalTokens?: number
+}
+
+const canonicalTitleCache = new Map<string, string>()
+const canonicalTitleInFlight = new Map<string, Promise<string>>()
+
+async function canonicalizeTitle(title: string) {
+  const key = normalizeWikiTitle(title)
+  const cached = canonicalTitleCache.get(key)
+  if (cached) return cached
+
+  const inFlight = canonicalTitleInFlight.get(key)
+  if (inFlight) return inFlight
+
+  const promise = (async () => {
+    try {
+      const response = await fetch(
+        `${API_BASE}/canonical_title/${encodeURIComponent(title)}`
+      )
+      if (response.ok) {
+        const data = (await response.json()) as { title?: unknown }
+        if (typeof data.title === 'string' && data.title.trim().length > 0) {
+          canonicalTitleCache.set(key, data.title)
+          return data.title
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    canonicalTitleCache.set(key, title)
+    return title
+  })()
+
+  canonicalTitleInFlight.set(key, promise)
+  try {
+    return await promise
+  } finally {
+    canonicalTitleInFlight.delete(key)
+  }
 }
 
 const buildPrompt = (
@@ -201,6 +240,7 @@ export async function runLlmRace({
 
   let current = pathSoFar[pathSoFar.length - 1]
   const movesTaken = Math.max(0, pathSoFar.length - 1)
+  const canonicalDestination = await canonicalizeTitle(destinationArticle)
 
   for (let step = movesTaken; step < maxSteps; step++) {
     if (signal?.aborted) {
@@ -213,6 +253,11 @@ export async function runLlmRace({
     }
 
     if (wikiTitlesMatch(current, destinationArticle)) {
+      return { result: 'win' as const }
+    }
+
+    const canonicalCurrent = await canonicalizeTitle(current)
+    if (wikiTitlesMatch(canonicalCurrent, canonicalDestination)) {
       return { result: 'win' as const }
     }
 
@@ -338,7 +383,13 @@ export async function runLlmRace({
     }
 
     const selected = links[chosenIndex - 1]
-    if (wikiTitlesMatch(selected, destinationArticle)) {
+    let reachedTarget = wikiTitlesMatch(selected, destinationArticle)
+    if (!reachedTarget) {
+      const canonicalSelected = await canonicalizeTitle(selected)
+      reachedTarget = wikiTitlesMatch(canonicalSelected, canonicalDestination)
+    }
+
+    if (reachedTarget) {
       onStep({
         type: 'win',
         article: destinationArticle,

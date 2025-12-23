@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
+import { API_BASE } from "@/lib/constants";
 import { runLlmRace } from "@/lib/llm-runner";
 import {
   appendRunStep,
@@ -9,7 +10,7 @@ import {
   useSessionsStore,
 } from "@/lib/session-store";
 import type { RunV1, SessionV1 } from "@/lib/session-types";
-import { wikiTitlesMatch } from "@/lib/wiki-title";
+import { normalizeWikiTitle, wikiTitlesMatch } from "@/lib/wiki-title";
 
 const DEFAULT_MAX_STEPS = 20;
 const DEFAULT_MAX_LINKS: number | null = null;
@@ -47,6 +48,45 @@ export default function LlmRunManager() {
   const { sessions } = useSessionsStore();
   const controllersRef = useRef<Map<string, AbortController>>(new Map());
 
+  const canonicalTitleCacheRef = useRef<Map<string, string>>(new Map());
+  const canonicalTitleInFlightRef = useRef<Map<string, Promise<string>>>(new Map());
+
+  const canonicalizeTitle = useCallback(async (title: string) => {
+    const key = normalizeWikiTitle(title);
+    const cached = canonicalTitleCacheRef.current.get(key);
+    if (cached) return cached;
+
+    const inFlight = canonicalTitleInFlightRef.current.get(key);
+    if (inFlight) return inFlight;
+
+    const promise = (async () => {
+      try {
+        const response = await fetch(
+          `${API_BASE}/canonical_title/${encodeURIComponent(title)}`
+        );
+        if (response.ok) {
+          const data = (await response.json()) as { title?: unknown };
+          if (typeof data.title === "string" && data.title.trim().length > 0) {
+            canonicalTitleCacheRef.current.set(key, data.title);
+            return data.title;
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      canonicalTitleCacheRef.current.set(key, title);
+      return title;
+    })();
+
+    canonicalTitleInFlightRef.current.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      canonicalTitleInFlightRef.current.delete(key);
+    }
+  }, []);
+
   useEffect(() => {
     const controllers = controllersRef.current;
     const activeRunIds = new Set<string>();
@@ -58,14 +98,6 @@ export default function LlmRunManager() {
         if (!run.model || run.model.trim().length === 0) continue;
 
         const controllerAlreadyRunning = controllers.has(run.id);
-        if (!controllerAlreadyRunning) {
-          const lastArticle = run.steps[run.steps.length - 1]?.article || session.start_article;
-          if (wikiTitlesMatch(lastArticle, session.destination_article)) {
-            forceWinRun({ sessionId, runId: run.id });
-            continue;
-          }
-        }
-
         activeRunIds.add(run.id);
         if (controllerAlreadyRunning) continue;
 
@@ -77,6 +109,18 @@ export default function LlmRunManager() {
 
         void (async () => {
           try {
+            const [canonicalLast, canonicalTarget] = await Promise.all([
+              canonicalizeTitle(lastArticle),
+              canonicalizeTitle(session.destination_article),
+            ]);
+
+            if (controller.signal.aborted) return;
+
+            if (wikiTitlesMatch(canonicalLast, canonicalTarget)) {
+              forceWinRun({ sessionId, runId: run.id });
+              return;
+            }
+
             const { result } = await runLlmRace({
               startArticle: session.start_article,
               destinationArticle: session.destination_article,
@@ -124,7 +168,7 @@ export default function LlmRunManager() {
       controller.abort();
       controllers.delete(runId);
     }
-  }, [sessions]);
+  }, [canonicalizeTitle, sessions]);
 
   return null;
 }
