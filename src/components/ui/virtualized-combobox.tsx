@@ -47,7 +47,7 @@ const VirtualizedCommand = ({
   const virtualizer = useVirtualizer({
     count: filteredOptions.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 35,
+    estimateSize: () => 56,
   });
 
   const virtualOptions = virtualizer.getVirtualItems();
@@ -146,6 +146,7 @@ const VirtualizedCommand = ({
                 disabled={isKeyboardNavActive}
                 className={cn(
                   "absolute left-0 top-0 w-full bg-transparent",
+                  "items-start py-2 whitespace-normal",
                   focusedIndex === virtualOption.index &&
                     "bg-accent text-accent-foreground",
                   isKeyboardNavActive &&
@@ -165,14 +166,16 @@ const VirtualizedCommand = ({
               >
                 <Check
                   className={cn(
-                    "mr-2 h-4 w-4",
+                    "mr-2 h-4 w-4 mt-0.5",
                     selectedOption ===
                       filteredOptions[virtualOption.index].value
                       ? "opacity-100"
                       : "opacity-0"
                   )}
                 />
-                {filteredOptions[virtualOption.index].label}
+                <span className="leading-snug break-words line-clamp-2">
+                  {filteredOptions[virtualOption.index].label}
+                </span>
               </CommandItem>
             ))}
           </div>
@@ -188,6 +191,7 @@ interface VirtualizedComboboxProps {
   width?: string;
   height?: string;
   portalContainer?: HTMLElement | null;
+  wrapValue?: boolean;
   value: string;
   onValueChange: (value: string) => void;
 }
@@ -200,6 +204,7 @@ export function VirtualizedCombobox({
   width = "400px",
   height = "400px",
   portalContainer,
+  wrapValue = false,
 }: VirtualizedComboboxProps) {
   const [open, setOpen] = React.useState(false);
 
@@ -210,13 +215,28 @@ export function VirtualizedCombobox({
           variant="outline"
           role="combobox"
           aria-expanded={open}
-          className="justify-between w-full gap-2 min-w-0"
+          className={cn(
+            "justify-between w-full gap-2 min-w-0",
+            wrapValue ? "h-auto items-start py-2" : null
+          )}
           style={{
             width: width,
           }}
         >
-          <span className="min-w-0 flex-1 truncate text-left">{value}</span>
-          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          <span
+            className={cn(
+              "min-w-0 flex-1 text-left",
+              wrapValue ? "whitespace-normal break-words line-clamp-2" : "truncate"
+            )}
+          >
+            {value}
+          </span>
+          <ChevronsUpDown
+            className={cn(
+              "ml-2 h-4 w-4 shrink-0 opacity-50",
+              wrapValue ? "mt-0.5" : null
+            )}
+          />
         </Button>
       </PopoverTrigger>
       <PopoverContent

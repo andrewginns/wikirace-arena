@@ -26,6 +26,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { VirtualizedCombobox } from "@/components/ui/virtualized-combobox";
 import ModelPicker from "@/components/model-picker";
+import WikiArticlePreview from "@/components/wiki-article-preview";
 import { cn } from "@/lib/utils";
 import { ArrowLeftRight, Bot, HelpCircle, Plus, Settings2, Shuffle, Trash2, Trophy, Users } from "lucide-react";
 import popularNodes from "../../../results/popular_nodes.json";
@@ -802,47 +803,51 @@ export default function RaceSetup({
 	          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
 	            <div>
 	              <Label className="text-sm">Start</Label>
-	              <div className="mt-2 flex items-center gap-2">
-	                <div className="min-w-0 flex-1">
-	                  <VirtualizedCombobox
-	                    options={allArticles}
-	                    width="100%"
-	                    value={startPage}
-	                    onValueChange={setStartPage}
-	                  />
+	              <div className="mt-2 space-y-2">
+	                <VirtualizedCombobox
+	                  options={allArticles}
+	                  width="100%"
+	                  value={startPage}
+	                  onValueChange={setStartPage}
+	                  wrapValue
+	                />
+	                <div className="flex items-center justify-between gap-2">
+	                  <WikiArticlePreview title={startPage} size={44} />
+	                  <Button
+	                    variant="outline"
+	                    size="sm"
+	                    className="h-9 whitespace-nowrap"
+	                    onClick={() => selectRandomArticle(setStartPage)}
+	                  >
+	                    <Shuffle className="h-3.5 w-3.5 mr-1" />
+	                    Random
+	                  </Button>
 	                </div>
-	                <Button
-	                  variant="outline"
-	                  size="sm"
-	                  className="h-9 whitespace-nowrap"
-	                  onClick={() => selectRandomArticle(setStartPage)}
-	                >
-	                  <Shuffle className="h-3.5 w-3.5 mr-1" />
-	                  Random
-	                </Button>
 	              </div>
 	            </div>
 
 	            <div>
 	              <Label className="text-sm">Target</Label>
-	              <div className="mt-2 flex items-center gap-2">
-	                <div className="min-w-0 flex-1">
-	                  <VirtualizedCombobox
-	                    options={allArticles}
-	                    width="100%"
-	                    value={targetPage}
-	                    onValueChange={setTargetPage}
-	                  />
+	              <div className="mt-2 space-y-2">
+	                <VirtualizedCombobox
+	                  options={allArticles}
+	                  width="100%"
+	                  value={targetPage}
+	                  onValueChange={setTargetPage}
+	                  wrapValue
+	                />
+	                <div className="flex items-center justify-between gap-2">
+	                  <WikiArticlePreview title={targetPage} size={44} />
+	                  <Button
+	                    variant="outline"
+	                    size="sm"
+	                    className="h-9 whitespace-nowrap"
+	                    onClick={() => selectRandomArticle(setTargetPage)}
+	                  >
+	                    <Shuffle className="h-3.5 w-3.5 mr-1" />
+	                    Random
+	                  </Button>
 	                </div>
-	                <Button
-	                  variant="outline"
-	                  size="sm"
-	                  className="h-9 whitespace-nowrap"
-	                  onClick={() => selectRandomArticle(setTargetPage)}
-	                >
-	                  <Shuffle className="h-3.5 w-3.5 mr-1" />
-	                  Random
-	                </Button>
 	              </div>
 	            </div>
 	          </div>

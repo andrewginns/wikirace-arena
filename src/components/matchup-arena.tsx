@@ -31,8 +31,11 @@ import {
 } from "@/components/ui/dialog";
 import {
   Bot,
+  Check,
   ChevronDown,
+  Copy,
   Download,
+  Footprints,
   Flag,
   Hourglass,
   PanelLeftClose,
@@ -62,11 +65,19 @@ import { runDisplayName, sessionDisplayName } from "@/lib/session-utils";
 import { buildViewerDatasetFromSession } from "@/lib/session-to-viewer";
 import { addViewerDataset } from "@/lib/viewer-datasets";
 import { addWinRunSummary, listWinRunSummaries } from "@/lib/win-summaries";
-import { wikiTitlesMatch } from "@/lib/wiki-title";
+import { normalizeWikiTitle, wikiTitlesMatch } from "@/lib/wiki-title";
 
 
 const DEFAULT_MAX_STEPS = 20;
-const DEFAULT_MAX_LINKS = 200;
+
+const RUN_COLOR_PALETTE = [
+  "#e63946", // red
+  "#457b9d", // blue
+  "#2a9d8f", // teal
+  "#fca311", // orange
+  "#a855f7", // purple
+  "#22c55e", // green
+];
 
 const LAYOUT_STORAGE_KEY = "wikirace:arena-layout:v1";
 const HUMAN_PANE_MODE_STORAGE_KEY = "wikirace:arena-human-pane:v1";
@@ -209,10 +220,6 @@ function runMaxSteps(run: RunV1) {
   return typeof run.max_steps === "number" ? run.max_steps : DEFAULT_MAX_STEPS;
 }
 
-function runMaxLinks(run: RunV1) {
-  return typeof run.max_links === "number" ? run.max_links : DEFAULT_MAX_LINKS;
-}
-
 function runDurationMs(run: RunV1) {
   if (typeof run.duration_ms === "number") return run.duration_ms;
   if (run.finished_at) {
@@ -267,6 +274,12 @@ function stepOutput(step: StepV1) {
   if (!step.metadata) return null;
   const output = (step.metadata as Record<string, unknown>).llm_output;
   return typeof output === "string" ? output : null;
+}
+
+function stepError(step: StepV1) {
+  if (!step.metadata) return null;
+  const error = (step.metadata as Record<string, unknown>).error;
+  return typeof error === "string" && error.trim().length > 0 ? error : null;
 }
 
 function stepMetrics(step: StepV1) {
@@ -331,10 +344,10 @@ export default function MatchupArena({
   const [compareHop, setCompareHop] = useState(0);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [finishExportMenuOpen, setFinishExportMenuOpen] = useState(false);
   const [humanPaneMode, setHumanPaneMode] = useState<HumanPaneMode>(() => loadHumanPaneMode());
   const [arenaViewMode, setArenaViewMode] = useState<ArenaViewMode>("article");
   const [linkQuery, setLinkQuery] = useState<string>("");
-  const [linkDisplayLimit, setLinkDisplayLimit] = useState<number>(DEFAULT_MAX_LINKS);
   const [wikiLoading, setWikiLoading] = useState(false);
   const [winCelebrationRunId, setWinCelebrationRunId] = useState<string | null>(null);
   const [winToast, setWinToast] = useState<{ runId: string; message: string } | null>(null);
@@ -351,9 +364,74 @@ export default function MatchupArena({
   const [linkActiveIndex, setLinkActiveIndex] = useState<number>(0);
   const [activityEvents, setActivityEvents] = useState<ArenaEvent[]>([]);
   const [activityVisible, setActivityVisible] = useState(true);
+  const [finishCopyStatus, setFinishCopyStatus] = useState<"idle" | "copied" | "error">(
+    "idle"
+  );
   const activitySessionIdRef = useRef<string | null>(null);
   const activityRunStepsRef = useRef<Map<string, number>>(new Map());
   const activityRunLastArticleRef = useRef<Map<string, string>>(new Map());
+  const runColorMapRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    runColorMapRef.current = new Map();
+  }, [session?.id]);
+
+  const runColorById = useMemo(() => {
+    const map = runColorMapRef.current;
+    if (!session) return new Map<string, string>();
+
+    for (const run of session.runs) {
+      if (!map.has(run.id)) {
+        map.set(run.id, RUN_COLOR_PALETTE[map.size % RUN_COLOR_PALETTE.length]!);
+      }
+    }
+
+    return new Map(map);
+  }, [session]);
+
+  const getRunColor = useCallback(
+    (runId: string) => runColorById.get(runId) ?? "#a1a1aa",
+    [runColorById]
+  );
+
+  const canonicalTitleCacheRef = useRef<Map<string, string>>(new Map());
+  const canonicalTitleInFlightRef = useRef<Map<string, Promise<string>>>(new Map());
+
+  const canonicalizeTitle = useCallback(async (title: string) => {
+    const key = normalizeWikiTitle(title);
+    const cached = canonicalTitleCacheRef.current.get(key);
+    if (cached) return cached;
+
+    const inFlight = canonicalTitleInFlightRef.current.get(key);
+    if (inFlight) return inFlight;
+
+    const promise = (async () => {
+      try {
+        const response = await fetch(
+          `${API_BASE}/canonical_title/${encodeURIComponent(title)}`
+        );
+        if (response.ok) {
+          const data = (await response.json()) as { title?: unknown };
+          if (typeof data.title === "string" && data.title.trim().length > 0) {
+            canonicalTitleCacheRef.current.set(key, data.title);
+            return data.title;
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      canonicalTitleCacheRef.current.set(key, title);
+      return title;
+    })();
+
+    canonicalTitleInFlightRef.current.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      canonicalTitleInFlightRef.current.delete(key);
+    }
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -583,6 +661,7 @@ export default function MatchupArena({
   }, [session]);
 
   const selectedRun = selectedRunId ? runsById.get(selectedRunId) : null;
+  const selectedRunColor = selectedRun ? getRunColor(selectedRun.id) : null;
 
   const selectedRunKindForView = selectedRun?.kind;
   const selectedRunStatusForView = selectedRun?.status;
@@ -700,6 +779,7 @@ export default function MatchupArena({
     ? Math.max(0, Math.floor(runElapsedMs(selectedRun, nowTick) / 1000))
     : 0;
   const selectedRunFinished = selectedRunStatus !== null && selectedRunStatus !== "running";
+  const lockWikiNavigation = replayEnabled && !selectedRunFinished;
 
   const selectedRunTokenTotals = useMemo(() => {
     if (!selectedRun || selectedRun.kind !== "llm") return null;
@@ -900,19 +980,15 @@ export default function MatchupArena({
 
   const compareColorByRunId = useMemo(() => {
     const map: Record<number, string> = {};
-    for (let i = 0; i < compareRunIndices.length; i++) {
-      const runIndex = compareRunIndices[i]!;
-      map[runIndex] = [
-        "#e63946", // red
-        "#457b9d", // blue
-        "#2a9d8f", // teal
-        "#fca311", // orange
-        "#a855f7", // purple
-        "#22c55e", // green
-      ][i % 6]!;
+    if (!session) return map;
+
+    for (const runIndex of compareRunIndices) {
+      const run = session.runs[runIndex];
+      if (!run) continue;
+      map[runIndex] = getRunColor(run.id);
     }
     return map;
-  }, [compareRunIndices]);
+  }, [compareRunIndices, getRunColor, session]);
 
   const handleMapNodeSelect = useCallback(
     (node: { id: string }) => {
@@ -950,17 +1026,29 @@ export default function MatchupArena({
   const [links, setLinks] = useState<string[]>([]);
   const [linksLoading, setLinksLoading] = useState(false);
   const [linksError, setLinksError] = useState<string | null>(null);
+  const [wikiPageLinks, setWikiPageLinks] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    setWikiPageLinks(null);
+  }, [displayedArticle, selectedRunIdValue]);
+
+  const sortedLinks = useMemo(() => {
+    return [...links].sort((a, b) => a.localeCompare(b));
+  }, [links]);
+
+  const availableLinks = useMemo(() => {
+    if (!wikiPageLinks) return [];
+    const pageSet = new Set(wikiPageLinks.map((link) => normalizeWikiTitle(link)));
+    return sortedLinks.filter((link) => pageSet.has(normalizeWikiTitle(link)));
+  }, [sortedLinks, wikiPageLinks]);
 
   const filteredLinks = useMemo(() => {
     const q = linkQuery.trim().toLowerCase();
-    const sorted = [...links].sort((a, b) => a.localeCompare(b));
-    if (q.length === 0) return sorted;
-    return sorted.filter((link) => link.toLowerCase().includes(q));
-  }, [links, linkQuery]);
+    if (q.length === 0) return availableLinks;
+    return availableLinks.filter((link) => link.toLowerCase().includes(q));
+  }, [availableLinks, linkQuery]);
 
-  const visibleLinks = useMemo(() => {
-    return filteredLinks.slice(0, linkDisplayLimit);
-  }, [filteredLinks, linkDisplayLimit]);
+  const visibleLinks = filteredLinks;
 
   useEffect(() => {
     setLinkActiveIndex((prev) =>
@@ -970,7 +1058,7 @@ export default function MatchupArena({
 
 
   const fetchLinks = useCallback(
-    async (articleTitle: string, maxLinks: number) => {
+    async (articleTitle: string) => {
       setLinksLoading(true);
       setLinksError(null);
       try {
@@ -985,7 +1073,7 @@ export default function MatchupArena({
         if (!data || !Array.isArray(data.links)) {
           throw new Error("Unexpected API response from get_article_with_links");
         }
-        setLinks((data.links as string[]).slice(0, maxLinks));
+        setLinks(data.links as string[]);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setLinks([]);
@@ -1001,7 +1089,7 @@ export default function MatchupArena({
     if (!isSelectedHuman) return;
     if (!isSelectedRunning) return;
     if (!selectedRun) return;
-    fetchLinks(displayedArticle, runMaxLinks(selectedRun));
+    fetchLinks(displayedArticle);
   }, [isSelectedHuman, isSelectedRunning, displayedArticle, selectedRun, fetchLinks]);
 
   const recordHumanMove = useCallback(
@@ -1019,48 +1107,55 @@ export default function MatchupArena({
       // Prevent double-counting when the iframe navigates to a section anchor.
       if (wikiTitlesMatch(nextArticle, currentArticle)) return;
 
-      const autoStartTimer = session.human_timer?.auto_start_on_first_action !== false;
-      if (
-        autoStartTimer &&
-        selectedRun.timer_state &&
-        selectedRun.timer_state !== "running"
-      ) {
-        pauseHumanTimers({ sessionId, exceptRunId: selectedRun.id });
-        resumeHumanTimerForRun({ sessionId, runId: selectedRun.id });
-      }
+      void (async () => {
+        const autoStartTimer = session.human_timer?.auto_start_on_first_action !== false;
+        if (
+          autoStartTimer &&
+          selectedRun.timer_state &&
+          selectedRun.timer_state !== "running"
+        ) {
+          pauseHumanTimers({ sessionId, exceptRunId: selectedRun.id });
+          resumeHumanTimerForRun({ sessionId, runId: selectedRun.id });
+        }
 
-      if (wikiTitlesMatch(nextArticle, session.destination_article)) {
+        const [canonicalNext, canonicalTarget] = await Promise.all([
+          canonicalizeTitle(nextArticle),
+          canonicalizeTitle(session.destination_article),
+        ]);
+
+        if (wikiTitlesMatch(canonicalNext, canonicalTarget)) {
+          appendRunStep({
+            sessionId,
+            runId: selectedRun.id,
+            step: { type: "win", article: session.destination_article },
+          });
+          finishRun({ sessionId, runId: selectedRun.id, result: "win" });
+          return;
+        }
+
+        const maxSteps = runMaxSteps(selectedRun);
+        if (nextHops >= maxSteps) {
+          appendRunStep({
+            sessionId,
+            runId: selectedRun.id,
+            step: {
+              type: "lose",
+              article: nextArticle,
+              metadata: { reason: "max_hops", max_hops: maxSteps },
+            },
+          });
+          finishRun({ sessionId, runId: selectedRun.id, result: "lose" });
+          return;
+        }
+
         appendRunStep({
           sessionId,
           runId: selectedRun.id,
-          step: { type: "win", article: session.destination_article },
+          step: { type: "move", article: nextArticle },
         });
-        finishRun({ sessionId, runId: selectedRun.id, result: "win" });
-        return;
-      }
-
-      const maxSteps = runMaxSteps(selectedRun);
-      if (nextHops >= maxSteps) {
-        appendRunStep({
-          sessionId,
-          runId: selectedRun.id,
-          step: {
-            type: "lose",
-            article: nextArticle,
-            metadata: { reason: "max_hops", max_hops: maxSteps },
-          },
-        });
-        finishRun({ sessionId, runId: selectedRun.id, result: "lose" });
-        return;
-      }
-
-      appendRunStep({
-        sessionId,
-        runId: selectedRun.id,
-        step: { type: "move", article: nextArticle },
-      });
+      })();
     },
-    [replayEnabled, sessionId, session, selectedRun]
+    [canonicalizeTitle, replayEnabled, sessionId, session, selectedRun]
   );
 
   useEffect(() => {
@@ -1077,10 +1172,20 @@ export default function MatchupArena({
     }
   }, [sessionId, session]);
 
-  // Allow navigation by clicking links inside the Wikipedia iframe (human only).
+  const displayedArticleRef = useRef(displayedArticle);
   useEffect(() => {
-    if (!isSelectedHuman) return;
-    if (!isSelectedRunning) return;
+    displayedArticleRef.current = displayedArticle;
+  }, [displayedArticle]);
+
+  const recordHumanMoveRef = useRef(recordHumanMove);
+  useEffect(() => {
+    recordHumanMoveRef.current = recordHumanMove;
+  }, [recordHumanMove]);
+
+  // Allow navigation by clicking links inside the Wikipedia iframe.
+  // When the selected run is finished we treat this as "explore" mode (no hops recorded).
+  useEffect(() => {
+    if (!selectedRunIdValue) return;
 
     const allowedOrigins = new Set<string>([window.location.origin]);
     try {
@@ -1093,22 +1198,46 @@ export default function MatchupArena({
       if (!allowedOrigins.has(event.origin)) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
-      const msg = data as { type?: unknown; title?: unknown };
+      const msg = data as { type?: unknown; title?: unknown; links?: unknown };
+
+      if (msg.type === "wikirace:pageLinks") {
+        const title = msg.title;
+        if (typeof title !== "string" || title.length === 0) return;
+        if (!wikiTitlesMatch(title, displayedArticleRef.current)) return;
+        const links = msg.links;
+        if (!Array.isArray(links)) return;
+        if (links.some((link) => typeof link !== "string")) return;
+        setWikiPageLinks(links as string[]);
+        return;
+      }
+
       if (msg.type !== "wikirace:navigate") return;
       const title = msg.title;
       if (typeof title !== "string" || title.length === 0) return;
+
+      // During an active run, replay mode locks the iframe (no navigation).
+      // After a run finishes, we allow navigation for "explore" mode even if replay is enabled.
+      if (lockWikiNavigation) return;
 
       const now = Date.now();
       const last = lastIframeNavigateRef.current;
       if (last && last.title === title && now - last.at < 1000) return;
       lastIframeNavigateRef.current = { title, at: now };
 
-      recordHumanMove(title);
+      const isSelectedHumanRunning =
+        selectedRunKind === "human" && selectedRunStatus === "running";
+      if (isSelectedHumanRunning) {
+        recordHumanMoveRef.current(title);
+        return;
+      }
+
+      // Exploration mode: update the UI without affecting run steps.
+      setMapPreviewArticle(title);
     };
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [isSelectedHuman, isSelectedRunning, recordHumanMove]);
+  }, [lockWikiNavigation, replayEnabled, selectedRunIdValue, selectedRunKind, selectedRunStatus]);
 
   const exportSessionJson = () => {
     if (!session) return;
@@ -1150,8 +1279,8 @@ export default function MatchupArena({
 
   useEffect(() => {
     if (!wikiSrc) return;
-    postWikiReplayMode(replayEnabled);
-  }, [postWikiReplayMode, replayEnabled, wikiSrc]);
+    postWikiReplayMode(lockWikiNavigation);
+  }, [lockWikiNavigation, postWikiReplayMode, wikiSrc]);
 
   const exportViewerJson = () => {
     if (!session) return;
@@ -1181,6 +1310,42 @@ export default function MatchupArena({
     });
     addViewerDataset({ name: dataset.name, data: dataset });
     onGoToViewerTab?.();
+  };
+
+  const copyRaceSummary = async () => {
+    if (!session) return;
+
+    const lines: string[] = [];
+    lines.push(`Race: ${sessionDisplayName(session)}`);
+    lines.push(`${session.start_article} → ${session.destination_article}`);
+    lines.push("");
+
+    const finishedRuns = [...leaderboardSections.ranked, ...leaderboardSections.unranked];
+    if (finishedRuns.length === 0) {
+      lines.push("No finished runs.");
+    } else {
+      lines.push("Results:");
+      for (let i = 0; i < finishedRuns.length; i++) {
+        const run = finishedRuns[i]!;
+        const hops = runHops(run);
+        const durationSeconds = Math.max(0, Math.floor(runDurationMs(run) / 1000));
+        const result = run.result || run.status;
+        lines.push(
+          `- ${runDisplayName(run)}: ${result} • ${hops} hop${hops === 1 ? "" : "s"} • ${formatTime(durationSeconds)}`
+        );
+      }
+    }
+
+    const text = lines.join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setFinishCopyStatus("copied");
+      window.setTimeout(() => setFinishCopyStatus("idle"), 1800);
+    } catch {
+      setFinishCopyStatus("error");
+      window.setTimeout(() => setFinishCopyStatus("idle"), 1800);
+    }
   };
 
   const startSelectedTurn = () => {
@@ -1444,8 +1609,129 @@ export default function MatchupArena({
               Save to viewer
             </Button>
           </div>
-        </div>
-      </Card>
+	        </div>
+	      </Card>
+
+        {sessionAllRunsFinished && session.runs.length > 0 && (
+          <Card className="p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Trophy className="h-4 w-4 text-amber-600" />
+                  <div className="text-sm font-semibold">Race finished</div>
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {leaderboardSections.ranked.length > 0
+                    ? `${leaderboardSections.ranked.length} win${leaderboardSections.ranked.length === 1 ? "" : "s"} • ${leaderboardSections.unranked.length} other`
+                    : `No wins • ${leaderboardSections.unranked.length} finished run${leaderboardSections.unranked.length === 1 ? "" : "s"}`}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" onClick={saveToViewer} disabled={session.runs.length === 0}>
+                  Save to viewer
+                </Button>
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-2"
+                  onClick={copyRaceSummary}
+                >
+                  {finishCopyStatus === "copied" ? (
+                    <Check className="h-4 w-4" />
+                  ) : (
+                    <Copy className="h-4 w-4" />
+                  )}
+                  {finishCopyStatus === "copied"
+                    ? "Copied"
+                    : finishCopyStatus === "error"
+                      ? "Copy failed"
+                      : "Copy summary"}
+                </Button>
+
+                <Popover open={finishExportMenuOpen} onOpenChange={setFinishExportMenuOpen}>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" size="sm" className="gap-2">
+                      <Download className="h-4 w-4" />
+                      Export
+                      <ChevronDown className="h-4 w-4 opacity-60" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="p-1 w-56" align="end">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="w-full justify-start"
+                      onClick={() => {
+                        exportSessionJson();
+                        setFinishExportMenuOpen(false);
+                      }}
+                    >
+                      Session JSON
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="w-full justify-start"
+                      onClick={() => {
+                        exportViewerJson();
+                        setFinishExportMenuOpen(false);
+                      }}
+                    >
+                      Viewer JSON
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="w-full justify-start"
+                      onClick={() => {
+                        exportWinsJson();
+                        setFinishExportMenuOpen(false);
+                      }}
+                    >
+                      Wins JSON
+                    </Button>
+                  </PopoverContent>
+                </Popover>
+              </div>
+            </div>
+
+            {leaderboardSections.ranked.length > 0 ? (
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {leaderboardSections.ranked.slice(0, 3).map((run, idx) => {
+                  const hops = runHops(run);
+                  const durationSeconds = Math.max(0, Math.floor(runDurationMs(run) / 1000));
+                  const color = getRunColor(run.id);
+                  return (
+                    <div key={run.id} className="rounded-md border bg-muted/10 p-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="text-[11px] font-semibold text-muted-foreground w-6">
+                          #{idx + 1}
+                        </div>
+                        <span
+                          className="h-2 w-2 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: color }}
+                          aria-hidden="true"
+                        />
+                        <div className="text-sm font-medium truncate">
+                          {runDisplayName(run)}
+                        </div>
+                      </div>
+                      <div className="mt-1 text-[11px] text-muted-foreground">
+                        {hops} hop{hops === 1 ? "" : "s"} • {formatTime(durationSeconds)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="mt-3 text-xs text-muted-foreground">
+                No wins recorded for this race.
+              </div>
+            )}
+          </Card>
+        )}
 
       <div className="flex items-stretch">
         {layout.leaderboardCollapsed ? null : (
@@ -1506,6 +1792,18 @@ export default function MatchupArena({
                     }}
                   >
                     {compareEnabled ? "Exit compare" : "Compare"}
+                  </Button>
+                )}
+
+                {selectedRunIds.size > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-2"
+                    onClick={clearSelectedRuns}
+                  >
+                    <X className="h-4 w-4" />
+                    Clear
                   </Button>
                 )}
 
@@ -1571,6 +1869,7 @@ export default function MatchupArena({
                   const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
                   const isTimerRunning = r.kind === "human" && r.timer_state === "running";
                   const isRecentlyChanged = recentlyChangedRuns.has(r.id);
+                  const runColor = getRunColor(r.id);
                   const statusLabel =
                     r.kind === "human" && r.timer_state
                       ? r.timer_state === "running"
@@ -1582,19 +1881,23 @@ export default function MatchupArena({
                   const statusBadgeClass =
                     statusLabel === "Running"
                       ? "border-blue-200 bg-blue-50 text-blue-800"
-                      : "border-zinc-200 bg-zinc-50 text-zinc-700";
+                      : statusLabel === "Paused"
+                        ? "border-amber-200 bg-amber-50 text-amber-800"
+                        : "border-slate-200 bg-slate-50 text-slate-700";
 
                 return (
                     <button
                       key={r.id}
                       type="button"
                       onClick={() => setSelectedRunId(r.id)}
+                      style={{ borderLeftColor: runColor }}
                       className={cn(
-                        "w-full text-left rounded-lg border p-2 transition-colors",
+                        "w-full text-left rounded-lg border border-l-4 p-2 transition-colors",
                         isActive
-                          ? "border-primary/50 bg-primary/5"
-                          : "hover:bg-muted/50 border-border",
-                        isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                          ? "border-primary/60 bg-primary/5 shadow-sm border-l-primary"
+                          : "hover:bg-muted/50 border-border border-l-transparent",
+                        isTimerRunning &&
+                          "ring-2 ring-blue-200 ring-offset-1 ring-offset-background",
                         isRecentlyChanged && "animate-pulse"
                       )}
                     >
@@ -1611,6 +1914,11 @@ export default function MatchupArena({
 
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
+                            <span
+                              className="h-2 w-2 rounded-full flex-shrink-0"
+                              style={{ backgroundColor: runColor }}
+                              aria-hidden="true"
+                            />
                             {r.kind === "human" ? (
                               <User className="h-4 w-4 text-muted-foreground" />
                             ) : (
@@ -1659,18 +1967,21 @@ export default function MatchupArena({
                   const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
                   const isTimerRunning = r.kind === "human" && r.timer_state === "running";
                   const isRecentlyChanged = recentlyChangedRuns.has(r.id);
+                  const runColor = getRunColor(r.id);
 
                 return (
                     <button
                       key={r.id}
                       type="button"
                       onClick={() => setSelectedRunId(r.id)}
+                      style={{ borderLeftColor: runColor }}
                       className={cn(
-                        "w-full text-left rounded-lg border p-2 transition-colors",
+                        "w-full text-left rounded-lg border border-l-4 p-2 transition-colors",
                         isActive
-                          ? "border-primary/50 bg-primary/5"
-                          : "hover:bg-muted/50 border-border",
-                        isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                          ? "border-primary/60 bg-primary/5 shadow-sm border-l-primary"
+                          : "hover:bg-muted/50 border-border border-l-transparent",
+                        isTimerRunning &&
+                          "ring-2 ring-blue-200 ring-offset-1 ring-offset-background",
                         isRecentlyChanged && "animate-pulse"
                       )}
                     >
@@ -1690,6 +2001,11 @@ export default function MatchupArena({
                             <div className="text-[11px] font-semibold text-muted-foreground w-7">
                               #{idx + 1}
                             </div>
+                            <span
+                              className="h-2 w-2 rounded-full flex-shrink-0"
+                              style={{ backgroundColor: runColor }}
+                              aria-hidden="true"
+                            />
                             {r.kind === "human" ? (
                               <User className="h-4 w-4 text-muted-foreground" />
                             ) : (
@@ -1739,19 +2055,22 @@ export default function MatchupArena({
                   const badgeLabel = r.result === "abandoned" ? "Abandoned" : "Fail";
                   const isTimerRunning = r.kind === "human" && r.timer_state === "running";
                   const isRecentlyChanged = recentlyChangedRuns.has(r.id);
+                  const runColor = getRunColor(r.id);
 
                 return (
                     <button
                       key={r.id}
                       type="button"
                       onClick={() => setSelectedRunId(r.id)}
+                      style={{ borderLeftColor: runColor }}
                       className={cn(
-                        "w-full text-left rounded-lg border p-2 transition-colors",
+                        "w-full text-left rounded-lg border border-l-4 p-2 transition-colors",
                         "opacity-80 bg-muted/20",
                         isActive
-                          ? "border-primary/50 bg-primary/5 opacity-100"
-                          : "hover:bg-muted/40 border-border",
-                        isTimerRunning && "ring-2 ring-blue-200 ring-offset-1",
+                          ? "border-primary/60 bg-primary/5 opacity-100 shadow-sm border-l-primary"
+                          : "hover:bg-muted/40 border-border border-l-transparent",
+                        isTimerRunning &&
+                          "ring-2 ring-blue-200 ring-offset-1 ring-offset-background",
                         isRecentlyChanged && "animate-pulse"
                       )}
                     >
@@ -1768,6 +2087,11 @@ export default function MatchupArena({
 
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
+                            <span
+                              className="h-2 w-2 rounded-full flex-shrink-0"
+                              style={{ backgroundColor: runColor }}
+                              aria-hidden="true"
+                            />
                             {r.kind === "human" ? (
                               <User className="h-4 w-4 text-muted-foreground" />
                             ) : (
@@ -1786,7 +2110,12 @@ export default function MatchupArena({
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
                         <Badge
                           variant="outline"
-                          className="text-[11px] border-zinc-200 bg-zinc-50 text-zinc-700"
+                          className={cn(
+                            "text-[11px]",
+                            badgeLabel === "Fail"
+                              ? "border-red-200 bg-red-50 text-red-800"
+                              : "border-slate-200 bg-slate-50 text-slate-700"
+                          )}
                         >
                           {badgeLabel}
                         </Badge>
@@ -1891,10 +2220,19 @@ export default function MatchupArena({
                       </Button>
                     ) : null}
 
-                    <div className="space-y-1 min-w-0">
-                      <div className="text-sm font-medium">
-                        {selectedRun ? runDisplayName(selectedRun) : "Select a run"}
-                      </div>
+	                  <div className="space-y-1 min-w-0">
+	                    <div className="flex items-center gap-2 min-w-0">
+	                      {selectedRun ? (
+	                        <span
+	                          className="h-2.5 w-2.5 rounded-full flex-shrink-0"
+	                          style={{ backgroundColor: getRunColor(selectedRun.id) }}
+	                          aria-hidden="true"
+	                        />
+	                      ) : null}
+	                      <div className="text-sm font-medium truncate">
+	                        {selectedRun ? runDisplayName(selectedRun) : "Select a run"}
+	                      </div>
+	                    </div>
 	                        <div className="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
                         <div className="inline-flex items-center gap-2 min-w-0">
                           <Flag className="h-3.5 w-3.5 flex-shrink-0" />
@@ -1903,20 +2241,32 @@ export default function MatchupArena({
                             {session.destination_article}
                           </span>
                         </div>
-                        {selectedRun && (
-                          <span className="inline-flex items-center gap-1">
-                            <Hourglass className="h-3.5 w-3.5" />
-                            Limit:{" "}
-                            <span className="font-medium">
-                              {runMaxSteps(selectedRun)} hops
-                            </span>
-                          </span>
-                        )}
-                        {selectedHumanTimerRunning && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5">
-                            Active player • {formatTime(selectedRunElapsedSeconds)}
-                          </span>
-                        )}
+	                        {selectedRun && (
+	                          <span className="inline-flex items-center gap-1">
+	                            <Hourglass className="h-3.5 w-3.5" />
+	                            Limit:{" "}
+	                            <span className="font-medium">
+	                              {runMaxSteps(selectedRun)} hops
+	                            </span>
+	                          </span>
+	                        )}
+	                        {selectedRun && (
+	                          <span className="inline-flex items-center gap-1">
+	                            <Footprints className="h-3.5 w-3.5" />
+	                            Hops:{" "}
+	                            <span className="font-medium">
+	                              {replayEnabled
+	                                ? selectedReplayStepIndex
+	                                : runHops(selectedRun)}{" "}
+	                              / {runMaxSteps(selectedRun)}
+	                            </span>
+	                          </span>
+	                        )}
+	                        {selectedHumanTimerRunning && (
+	                          <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5">
+	                            Active player • {formatTime(selectedRunElapsedSeconds)}
+	                          </span>
+	                        )}
                       </div>
                     </div>
                   </div>
@@ -1927,20 +2277,19 @@ export default function MatchupArena({
                         value={arenaViewMode}
                         onValueChange={(v) => setArenaViewMode(v as ArenaViewMode)}
                       >
-                        <TabsList className="h-8">
-                          <TabsTrigger value="results" className="text-xs px-2">
-                            Results
-                          </TabsTrigger>
-                          <TabsTrigger
-                            value="article"
-                            className="text-xs px-2"
-                            disabled={selectedRunFinished}
-                          >
-                            Article
-                          </TabsTrigger>
-                        </TabsList>
-                      </Tabs>
-                    )}
+	                          <TabsList className="h-8">
+	                            <TabsTrigger value="results" className="text-xs px-2">
+	                              Results
+	                            </TabsTrigger>
+	                            <TabsTrigger
+	                              value="article"
+	                              className="text-xs px-2"
+	                            >
+	                              Article
+	                            </TabsTrigger>
+	                          </TabsList>
+	                        </Tabs>
+	                      )}
 
                     {selectedRun &&
                       selectedRun.kind === "human" &&
@@ -2054,29 +2403,22 @@ export default function MatchupArena({
                               </TabsList>
                             </Tabs>
                           )}
-                          <Select
-                            value={String(linkDisplayLimit)}
-                            onValueChange={(v) => setLinkDisplayLimit(Number.parseInt(v, 10))}
-                          >
-                            <SelectTrigger className="h-8 w-[110px]">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="50">Show 50</SelectItem>
-                              <SelectItem value="100">Show 100</SelectItem>
-                              <SelectItem value="200">Show 200</SelectItem>
-                            </SelectContent>
-                          </Select>
                         </div>
                       </div>
                       <Separator className="my-3" />
 
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <span>
-                          {visibleLinks.length} of {filteredLinks.length} shown
-                        </span>
-                        {linkQuery.trim().length > 0 && (
-                          <span className="text-muted-foreground/70">Filtered</span>
+                        {linksLoading || wikiPageLinks === null ? (
+                          <span>Loading…</span>
+                        ) : linkQuery.trim().length > 0 ? (
+                          <span>
+                            {filteredLinks.length} match
+                            {filteredLinks.length === 1 ? "" : "es"} of {availableLinks.length}
+                          </span>
+                        ) : (
+                          <span>
+                            {availableLinks.length} link{availableLinks.length === 1 ? "" : "s"}
+                          </span>
                         )}
                       </div>
                       <div className="flex items-center gap-2">
@@ -2127,7 +2469,12 @@ export default function MatchupArena({
                           }}
                           placeholder="Search links…"
                           className="h-9"
-                          disabled={replayEnabled || selectedRun.status !== "running" || linksLoading}
+                          disabled={
+                            replayEnabled ||
+                            selectedRun.status !== "running" ||
+                            linksLoading ||
+                            wikiPageLinks === null
+                          }
                         />
                         <Button
                           variant="outline"
@@ -2142,14 +2489,14 @@ export default function MatchupArena({
 
                       {selectedRun.status !== "running" ? (
                         <div className="mt-3 text-sm text-muted-foreground">Run finished.</div>
-                      ) : linksLoading ? (
+                      ) : linksLoading || wikiPageLinks === null ? (
                         <div className="mt-3 text-sm text-muted-foreground">Loading links…</div>
                       ) : linksError ? (
                         <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-md p-3">
                           <div className="font-medium">Couldn’t load links</div>
                           <div className="mt-1 break-words">{linksError}</div>
                         </div>
-                      ) : links.length === 0 ? (
+                      ) : availableLinks.length === 0 ? (
                         <div className="mt-3 text-sm text-muted-foreground">
                           No links found for{" "}
                           <span className="font-medium">{displayedArticle}</span>.
@@ -2271,13 +2618,15 @@ export default function MatchupArena({
                           </div>
                         </div>
                       </div>
-                      {selectedRun?.kind === "human" && (
-                        <div className="text-xs text-muted-foreground">
-                          {replayEnabled
-                            ? "Replay mode: exit replay to make moves."
-                            : "Tip: click links in the page to move (or use the searchable list)."}
-                        </div>
-                      )}
+	                      {selectedRun?.kind === "human" && (
+	                        <div className="text-xs text-muted-foreground">
+	                          {replayEnabled
+	                            ? "Replay mode: exit replay to make moves."
+	                            : selectedRun.status === "running"
+	                              ? "Tip: click links in the page to move (or use the searchable list)."
+	                              : "Explore mode: click links to browse (won't affect hops)."}
+	                        </div>
+	                      )}
                     </div>
                     <Separator className="my-3" />
                     <div className="relative w-full flex-1 min-h-[320px] overflow-hidden rounded-md border bg-muted/10">
@@ -2302,7 +2651,7 @@ export default function MatchupArena({
                         className="border-0"
                         onLoad={() => {
                           setWikiLoading(false);
-                          postWikiReplayMode(replayEnabled);
+                          postWikiReplayMode(lockWikiNavigation);
                         }}
                       />
                     </div>
@@ -2496,7 +2845,12 @@ export default function MatchupArena({
                                 setReplayPlaying(false);
                                 setReplayHop(Number.parseInt(e.target.value, 10));
                               }}
-                              className="flex-1 accent-primary"
+                              className="flex-1"
+                              style={
+                                selectedRunColor
+                                  ? ({ accentColor: selectedRunColor } as CSSProperties)
+                                  : undefined
+                              }
                               aria-label="Replay hop"
                             />
 
@@ -2548,10 +2902,15 @@ export default function MatchupArena({
                                 setReplayHop(idx);
                               }}
                               aria-current={isActive ? "step" : undefined}
+                              style={
+                                isActive && selectedRunColor
+                                  ? ({ "--tw-ring-color": selectedRunColor } as CSSProperties)
+                                  : undefined
+                              }
                               className={cn(
                                 "text-xs rounded border px-2 py-0.5 transition-colors",
                                 isFuture && "opacity-40",
-                                isActive && "ring-2 ring-primary ring-offset-1",
+                                isActive && "ring-2 ring-offset-1",
                                 s.type === "start" && "border-border bg-muted/40",
                                 s.type === "win" &&
                                   "border-green-200 bg-green-50 text-green-900",
@@ -2564,6 +2923,91 @@ export default function MatchupArena({
                           );
                         })}
                       </div>
+
+                      {selectedRun.steps.length > 1 && (
+                        <div className="rounded-md border bg-muted/10 p-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-xs font-medium text-muted-foreground">
+                              Timeline
+                            </div>
+                            <div className="text-xs text-muted-foreground tabular-nums">
+                              {Math.max(0, selectedRun.steps.length - 1)} hops
+                            </div>
+                          </div>
+
+                          <div className="mt-2 max-h-40 overflow-y-auto space-y-1 pr-1">
+                            {selectedRun.steps.slice(1).map((step, idx) => {
+                              const hop = idx + 1;
+                              const from =
+                                selectedRun.steps[hop - 1]?.article || session.start_article;
+                              const isActiveHop = replayEnabled
+                                ? hop === selectedReplayStepIndex
+                                : hop === selectedRun.steps.length - 1;
+                              const badge =
+                                step.type === "win" ? (
+                                  <Badge
+                                    variant="outline"
+                                    className="text-[11px] border-green-200 bg-green-50 text-green-800"
+                                  >
+                                    Win
+                                  </Badge>
+                                ) : step.type === "lose" ? (
+                                  <Badge
+                                    variant="outline"
+                                    className="text-[11px] border-red-200 bg-red-50 text-red-800"
+                                  >
+                                    Lose
+                                  </Badge>
+                                ) : null;
+
+                              return (
+                                <button
+                                  key={`${selectedRun.id}-timeline-${hop}`}
+                                  type="button"
+                                  onClick={() => {
+                                    setMapPreviewArticle(null);
+                                    setReplayEnabled(true);
+                                    setReplayPlaying(false);
+                                    setReplayHop(hop);
+                                  }}
+                                  aria-current={isActiveHop ? "step" : undefined}
+                                  style={
+                                    isActiveHop && selectedRunColor
+                                      ? ({ "--tw-ring-color": selectedRunColor } as CSSProperties)
+                                      : undefined
+                                  }
+                                  className={cn(
+                                    "w-full rounded-md border px-2 py-1 text-left text-[11px] transition-colors",
+                                    "bg-background/60 hover:bg-muted/40",
+                                    isActiveHop && "bg-background ring-2 ring-offset-1"
+                                  )}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0 flex items-start gap-2">
+                                      <span
+                                        className="mt-1 h-2 w-2 rounded-full flex-shrink-0"
+                                        style={{
+                                          backgroundColor: selectedRunColor ?? "#a1a1aa",
+                                        }}
+                                        aria-hidden="true"
+                                      />
+                                      <div className="text-muted-foreground tabular-nums w-8 flex-shrink-0">
+                                        {hop}
+                                      </div>
+                                      <div className="min-w-0">
+                                        <div className="truncate">
+                                          {from} → {step.article}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    {badge}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
 	                    {selectedRun.kind === "llm" && (
@@ -2581,6 +3025,7 @@ export default function MatchupArena({
 	                              .map((s, idx) => {
 		                                const meta = summarizeStepMeta(s);
 		                                const output = stepOutput(s);
+		                                const errorMessage = stepError(s);
 		                                const metrics = stepMetrics(s);
 		                                const tokenLabel = (() => {
 		                                  const total =
@@ -2664,8 +3109,17 @@ export default function MatchupArena({
 		                                      </div>
 		                                    )}
 		                                    {!output && (
-		                                      <div className="mt-2 text-xs text-muted-foreground">
-		                                        No LLM output captured for this step.
+		                                      <div
+		                                        className={cn(
+		                                          "mt-2 text-xs whitespace-pre-wrap",
+		                                          errorMessage
+		                                            ? "text-red-700"
+		                                            : "text-muted-foreground"
+		                                        )}
+		                                      >
+		                                        {errorMessage
+		                                          ? `Error: ${errorMessage}`
+		                                          : "No LLM output captured for this step."}
 		                                      </div>
 		                                    )}
 	                                  </details>
@@ -2737,7 +3191,12 @@ export default function MatchupArena({
                         max={compareMaxHop}
                         value={compareHopClamped}
                         onChange={(e) => setCompareHop(Number.parseInt(e.target.value, 10))}
-                        className="flex-1 accent-primary"
+                        className="flex-1"
+                        style={
+                          selectedRunColor
+                            ? ({ accentColor: selectedRunColor } as CSSProperties)
+                            : undefined
+                        }
                         aria-label="Compare hop"
                       />
 
@@ -2818,6 +3277,7 @@ export default function MatchupArena({
                   <ForceDirectedGraph
                     runs={forceGraphRuns}
                     runId={selectedForceGraphRunId}
+                    focusColor={selectedRunColor ?? undefined}
                     compareRunIds={compareEnabled ? compareRunIndices : undefined}
                     compareColorByRunId={compareEnabled ? compareColorByRunId : undefined}
                     compareHighlightStep={compareEnabled ? compareHopClamped : undefined}
@@ -2942,7 +3402,7 @@ export default function MatchupArena({
                         className="border-0"
                         onLoad={() => {
                           setWikiLoading(false);
-                          postWikiReplayMode(replayEnabled);
+                          postWikiReplayMode(lockWikiNavigation);
                         }}
                       />
                     </div>
