@@ -140,21 +140,35 @@ export default function RunsList({
     if (isPlaying && userScrollLockRef.current) return;
 
     const selectedElement = runItemsRef.current.get(selectedRunId);
-    if (selectedElement && listContainerRef.current) {
-      programmaticScrollRef.current = true;
-      selectedElement.scrollIntoView({
-        behavior: 'smooth',
-        block: 'nearest'
-      });
+    const container = listContainerRef.current;
+    if (!selectedElement || !container) return;
 
-      if (programmaticScrollTimeoutRef.current) {
-        window.clearTimeout(programmaticScrollTimeoutRef.current);
-      }
-      programmaticScrollTimeoutRef.current = window.setTimeout(() => {
-        programmaticScrollRef.current = false;
-        programmaticScrollTimeoutRef.current = null;
-      }, 1000);
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = selectedElement.getBoundingClientRect();
+    const elementTop = elementRect.top - containerRect.top + container.scrollTop;
+    const elementBottom = elementTop + elementRect.height;
+    const viewTop = container.scrollTop;
+    const viewBottom = viewTop + container.clientHeight;
+
+    let nextScrollTop: number | null = null;
+    if (elementTop < viewTop) {
+      nextScrollTop = elementTop;
+    } else if (elementBottom > viewBottom) {
+      nextScrollTop = elementBottom - container.clientHeight;
     }
+
+    if (nextScrollTop === null) return;
+
+    programmaticScrollRef.current = true;
+    container.scrollTo({ top: nextScrollTop, behavior: "smooth" });
+
+    if (programmaticScrollTimeoutRef.current) {
+      window.clearTimeout(programmaticScrollTimeoutRef.current);
+    }
+    programmaticScrollTimeoutRef.current = window.setTimeout(() => {
+      programmaticScrollRef.current = false;
+      programmaticScrollTimeoutRef.current = null;
+    }, 1000);
   }, [selectedRunId, isPlaying]);
 
   const togglePlayPause = () => {
