@@ -753,7 +753,7 @@ export default function ViewerTab({
          )}
        </div>
       </Card>
-      <div className="md:col-span-3 flex flex-col">
+	  <div className="md:col-span-3 flex flex-col md:sticky md:top-4 md:self-start md:h-[calc(100vh_-_2rem)]">
         <div className="bg-card rounded-lg p-3 border flex-grow overflow-hidden flex flex-col">
           <div className="flex items-center justify-between gap-2 mb-2 flex-shrink-0">
             <h3 className="text-sm font-medium text-muted-foreground">Runs</h3>
@@ -976,7 +976,7 @@ export default function ViewerTab({
             )}
           </div>
 
-          <div className="h-[600px] overflow-hidden">
+          <div className="h-[400px] overflow-hidden">
             <div
               className="w-full h-full"
               onWheelCapture={pauseAutoplay}
@@ -1059,63 +1059,63 @@ export default function ViewerTab({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-                <div className="lg:col-span-7">
-                  <div className="text-xs text-muted-foreground">Path</div>
-                  <div className="mt-2 flex flex-wrap items-center gap-1">
-                    {selectedRunData.steps.map((step, idx) => {
-                      const isActive = previewArticle === step;
-                      return (
-                        <button
-                          key={`${idx}-${step}`}
-                          type="button"
-                          onClick={() => setPreviewArticle(step)}
-                          className={cn(
-                            "max-w-full rounded-md border bg-background px-2 py-0.5 text-[11px] transition-colors",
-                            "hover:bg-muted/40",
-                            isActive && "ring-2 ring-muted-foreground/30 ring-offset-1"
-                          )}
-                          title={step}
-                        >
-                          <span className="tabular-nums text-muted-foreground mr-1">
-                            {idx}
-                          </span>
-                          <span className="truncate">{step}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-                <div className="lg:col-span-5">
-                  <div className="space-y-3">
-                    <div>
-                      <div className="text-xs text-muted-foreground">Start</div>
-                      <div className="mt-2">
-                        <WikiSummaryCard title={selectedRunData.start_article} />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-xs text-muted-foreground">Target</div>
-                      <div className="mt-2">
-                        <WikiSummaryCard title={selectedRunData.destination_article} />
-                      </div>
-                    </div>
-                    {previewArticle &&
-                      previewArticle !== selectedRunData.start_article &&
-                      previewArticle !== selectedRunData.destination_article && (
-                        <div>
-                          <div className="text-xs text-muted-foreground">Preview</div>
-                          <div className="mt-2">
-                            <WikiSummaryCard title={previewArticle} />
-                          </div>
-                        </div>
-                      )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-lg border bg-muted/10 p-3 text-xs text-muted-foreground">
+	              <div className="space-y-3">
+	                <div>
+	                  <div className="text-xs text-muted-foreground">Path</div>
+	                  <div className="mt-2 flex flex-wrap items-center gap-1">
+	                    {selectedRunData.steps.map((step, idx) => {
+	                      const isActive = previewArticle === step;
+	                      return (
+	                        <button
+	                          key={`${idx}-${step}`}
+	                          type="button"
+	                          onClick={() => setPreviewArticle(step)}
+	                          className={cn(
+	                            "max-w-full rounded-md border bg-background px-2 py-0.5 text-[11px] transition-colors",
+	                            "hover:bg-muted/40",
+	                            isActive && "ring-2 ring-muted-foreground/30 ring-offset-1"
+	                          )}
+	                          title={step}
+	                        >
+	                          <span className="tabular-nums text-muted-foreground mr-1">
+	                            {idx}
+	                          </span>
+	                          <span className="truncate">{step}</span>
+	                        </button>
+	                      );
+	                    })}
+	                  </div>
+	                </div>
+
+	                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+	                  <div>
+	                    <div className="text-xs text-muted-foreground">Start</div>
+	                    <div className="mt-2">
+	                      <WikiSummaryCard title={selectedRunData.start_article} />
+	                    </div>
+	                  </div>
+	                  <div>
+	                    <div className="text-xs text-muted-foreground">Target</div>
+	                    <div className="mt-2">
+	                      <WikiSummaryCard title={selectedRunData.destination_article} />
+	                    </div>
+	                  </div>
+	                </div>
+
+	                {previewArticle &&
+	                  previewArticle !== selectedRunData.start_article &&
+	                  previewArticle !== selectedRunData.destination_article && (
+	                    <div>
+	                      <div className="text-xs text-muted-foreground">Preview</div>
+	                      <div className="mt-2">
+	                        <WikiSummaryCard title={previewArticle} />
+	                      </div>
+	                    </div>
+	                  )}
+	              </div>
+	            </div>
+	          ) : (
+	            <div className="rounded-lg border bg-muted/10 p-3 text-xs text-muted-foreground">
               Select a run to see its path details.
             </div>
           )}

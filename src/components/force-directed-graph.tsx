@@ -23,6 +23,44 @@ const STYLES = {
   minLinkOpacity: 0.15,
 };
 
+const COMPARE_PATH_STYLE = {
+  // How much to boost chroma for compare paths (higher = more vivid).
+  chromaFactor: 50,
+  // Upper bound for chroma so colors don't become neon.
+  chromaMax: 90,
+  // Slight darken for better contrast on white backgrounds.
+  lightnessFactor: 0.95,
+  // Final alpha applied to the compare path color.
+  alpha: 1,
+} as const;
+
+function boostChromaHexColor(
+  color: string,
+  { chromaFactor, chromaMax, lightnessFactor }: {
+    chromaFactor: number;
+    chromaMax: number;
+    lightnessFactor: number;
+  }
+) {
+  const parsed = d3.color(color);
+  if (!parsed) return color;
+
+  // Use HCL (perceptual) instead of HSL so “more saturated” doesn’t wash out.
+  const hcl = d3.hcl(parsed);
+  if (Number.isNaN(hcl.h)) return color;
+
+  hcl.c = Math.min(chromaMax, hcl.c * chromaFactor);
+  hcl.l = Math.max(0, Math.min(100, hcl.l * lightnessFactor));
+  return hcl.formatHex();
+}
+
+function withAlpha(color: string, alpha: number) {
+  const parsed = d3.color(color);
+  if (!parsed) return color;
+  parsed.opacity = alpha;
+  return parsed.formatRgb();
+}
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, "&amp;")
@@ -98,12 +136,24 @@ export default function ForceDirectedGraph({
 
   const effectiveCompareColors = compareColorByRunId ?? internalCompareColorByRunId;
 
+  const comparePathColorsByRunId = useMemo(() => {
+    if (!isCompareMode) return effectiveCompareColors;
+    const map: Record<number, string> = {};
+    for (const id of compareRunIds ?? []) {
+      const base = effectiveCompareColors[id];
+      map[id] = base
+        ? boostChromaHexColor(base, COMPARE_PATH_STYLE)
+        : STYLES.linkColor;
+    }
+    return map;
+  }, [compareRunIds, effectiveCompareColors, isCompareMode]);
+
   const effectiveFocusColor = focusColor ?? STYLES.highlightColor;
 
   const focusRunColor = useMemo(() => {
     if (!isCompareMode || runId === null) return effectiveFocusColor;
-    return effectiveCompareColors[runId] ?? effectiveFocusColor;
-  }, [effectiveCompareColors, effectiveFocusColor, isCompareMode, runId]);
+    return comparePathColorsByRunId[runId] ?? effectiveFocusColor;
+  }, [comparePathColorsByRunId, effectiveFocusColor, isCompareMode, runId]);
   const zoomNodeFilter = useCallback(
     (node: GraphNode) => {
       if (node.type === "fixed") return true;
@@ -556,7 +606,8 @@ export default function ForceDirectedGraph({
   // Helper function to determine link color based on current runId
   const getLinkColor = (link: GraphLink) => {
     if (isLinkInCompareRuns(link)) {
-      return effectiveCompareColors[link.runId] ?? STYLES.linkColor;
+      const base = comparePathColorsByRunId[link.runId] ?? STYLES.linkColor;
+      return withAlpha(base, COMPARE_PATH_STYLE.alpha);
     }
     if (isLinkInCurrentRun(link)) {
       return focusRunColor;
@@ -610,15 +661,15 @@ export default function ForceDirectedGraph({
           linkDirectionalParticleSpeed={(link) => (shouldAnimateLink(link) ? 0.008 : 0)}
           linkDirectionalParticleColor={(link) => {
             if (isCompareMode && link.kind === "path") {
-              return effectiveCompareColors[link.runId] ?? focusRunColor;
+              return comparePathColorsByRunId[link.runId] ?? focusRunColor;
             }
             return focusRunColor;
           }}
           linkWidth={(link) => {
             if (isCompareMode) {
               if (isLinkInCompareRuns(link)) {
-                if (runId !== null && link.kind === "path" && link.runId === runId) return 4;
-                return 2.5;
+                if (runId !== null && link.kind === "path" && link.runId === runId) return 5;
+                return 4;
               }
               if (link.kind === "path") return 0;
             }
@@ -635,10 +686,11 @@ export default function ForceDirectedGraph({
             if (!onNodeSelect) return;
             onNodeSelect(node as GraphNode);
           }}
-          nodeCanvasObject={(node, ctx, globalScale) => {
-            const label = node.id;
-            const fontSize = 12 / globalScale;
-            ctx.font = `${fontSize}px Sans-Serif`;
+	          nodeCanvasObject={(node, ctx, globalScale) => {
+	            ctx.save();
+	            const label = node.id;
+	            const fontSize = 12 / globalScale;
+	            ctx.font = `${fontSize}px Sans-Serif`;
             const textWidth = ctx.measureText(label).width;
             const bckgDimensions = [textWidth, fontSize].map((n) => n + fontSize * 0.2);
             const [labelWidth, labelHeight] = bckgDimensions;
@@ -650,10 +702,11 @@ export default function ForceDirectedGraph({
               !isCompareMode && runId !== null && Boolean(selectedReachedArticles?.has(node.id));
 
             // Apply opacity based on node type and properties
+            const highlightOpacity = isCompareMode ? 0.8 : 0.55;
             const opacity = isReached
               ? 1.0
               : isInHighlightedRuns
-              ? 0.55
+              ? highlightOpacity
               : typeof node.baseOpacity === "number"
               ? node.baseOpacity
               : STYLES.minNodeOpacity;
@@ -698,16 +751,18 @@ export default function ForceDirectedGraph({
               ctx.fillText(label, labelX, labelTopY + labelHeight / 2);
             }
 
-            const stepNumber = selectedStepNumberById?.get(node.id);
-            if (isReached && typeof stepNumber === "number") {
-              const numberFontSize = 11 / globalScale;
-              ctx.font = `700 ${numberFontSize}px Sans-Serif`;
-              ctx.textAlign = "center";
-              ctx.textBaseline = "middle";
-              ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
-              ctx.fillText(String(stepNumber), node.x!, node.y!);
-            }
-          }}
+	            const stepNumber = selectedStepNumberById?.get(node.id);
+	            if (isReached && typeof stepNumber === "number") {
+	              const numberFontSize = 11 / globalScale;
+	              ctx.font = `700 ${numberFontSize}px Sans-Serif`;
+	              ctx.textAlign = "center";
+	              ctx.textBaseline = "middle";
+	              ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+	              ctx.fillText(String(stepNumber), node.x!, node.y!);
+	            }
+
+	            ctx.restore();
+	          }}
           width={dimensions.width || containerRef.current?.clientWidth || 800}
           height={dimensions.height || containerRef.current?.clientHeight || 800}
           enableNodeDrag={true}
