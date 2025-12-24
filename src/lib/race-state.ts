@@ -14,6 +14,7 @@ export type RaceRules = {
   max_hops: number;
   max_links: number | null;
   max_tokens: number | null;
+  include_image_links: boolean;
 };
 
 export type RaceStep = {
@@ -79,6 +80,7 @@ const DEFAULT_RULES: SessionRulesV1 = {
   max_hops: 20,
   max_links: null,
   max_tokens: null,
+  include_image_links: false,
 };
 
 function normalizeRules(rules: SessionRulesV1 | null | undefined): RaceRules {
@@ -87,6 +89,7 @@ function normalizeRules(rules: SessionRulesV1 | null | undefined): RaceRules {
     max_hops: typeof raw.max_hops === "number" ? raw.max_hops : DEFAULT_RULES.max_hops,
     max_links: raw.max_links === null ? null : typeof raw.max_links === "number" ? raw.max_links : null,
     max_tokens: raw.max_tokens === null ? null : typeof raw.max_tokens === "number" ? raw.max_tokens : null,
+    include_image_links: Boolean(raw.include_image_links),
   };
 }
 
@@ -145,6 +148,7 @@ export function roomToRaceState(room: MultiplayerRoomV1, youPlayerId: string | n
     max_hops: room.rules.max_hops,
     max_links: room.rules.max_links,
     max_tokens: room.rules.max_tokens,
+    include_image_links: Boolean(room.rules.include_image_links),
   };
 
   const runs = room.runs.map((run) => {

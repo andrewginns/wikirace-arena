@@ -108,6 +108,7 @@ class RoomRulesV1(BaseModel):
     max_hops: int
     max_links: Optional[int] = None
     max_tokens: Optional[int] = None
+    include_image_links: bool = False
 
 
 class RoomPlayerV1(BaseModel):
@@ -475,7 +476,7 @@ def _detect_lan_ip() -> Optional[str]:
 
 
 def _normalize_room_rules(raw: Optional[RoomRulesV1]) -> dict[str, Any]:
-    default = {"max_hops": 20, "max_links": None, "max_tokens": None}
+    default = {"max_hops": 20, "max_links": None, "max_tokens": None, "include_image_links": False}
     if raw is None:
         return default
 
@@ -493,7 +494,14 @@ def _normalize_room_rules(raw: Optional[RoomRulesV1]) -> dict[str, Any]:
     else:
         max_tokens = raw.max_tokens if isinstance(raw.max_tokens, int) and raw.max_tokens > 0 else None
 
-    return {"max_hops": max_hops, "max_links": max_links, "max_tokens": max_tokens}
+    include_image_links = bool(raw.include_image_links)
+
+    return {
+        "max_hops": max_hops,
+        "max_links": max_links,
+        "max_tokens": max_tokens,
+        "include_image_links": include_image_links,
+    }
 
 
 def _room_state(room_id: str) -> dict[str, Any]:
@@ -1276,6 +1284,7 @@ def _inject_wiki_bridge(html: str) -> str:
 <script>
 (function () {
   var replayMode = false
+  var includeImageLinks = false
   var resolvedTitleCache = Object.create(null)
   var navRequestSeq = 0
   var pendingNavigate = Object.create(null)
@@ -1284,11 +1293,19 @@ def _inject_wiki_bridge(html: str) -> str:
     replayMode = !!enabled
   }
 
+  function setIncludeImageLinks(enabled) {
+    includeImageLinks = !!enabled
+    window.setTimeout(notifyParentPageLinks, 0)
+  }
+
   window.addEventListener("message", function (event) {
     var data = event && event.data
     if (!data || typeof data !== "object") return
     if (data.type === "wikirace:setReplayMode") {
       setReplayMode(!!data.enabled)
+    }
+    if (data.type === "wikirace:setIncludeImageLinks") {
+      setIncludeImageLinks(!!data.enabled)
     }
     if (data.type === "wikirace:navigate_response") {
       var requestId = data.requestId
@@ -1456,6 +1473,15 @@ def _inject_wiki_bridge(html: str) -> str:
       var title = titleFromHref(href)
       if (!title) continue
 
+      // Default: only count links with a visible label. Image-only links (e.g. flag
+      // icons) can be clickable but their destination isn't visible as text.
+      try {
+        var label = (anchor.innerText || "").replace(/\s+/g, " ").trim()
+        if (!label && !includeImageLinks) continue
+      } catch {
+        // ignore
+      }
+
       // ignore same-page section links
       try {
         if (title === currentTitle && anchor.hash) {
@@ -1525,6 +1551,18 @@ def _inject_wiki_bridge(html: str) -> str:
       if (replayMode) {
         event.preventDefault()
         return
+      }
+
+      if (!includeImageLinks) {
+        try {
+          var label = (anchor.innerText || "").replace(/\s+/g, " ").trim()
+          if (!label) {
+            event.preventDefault()
+            return
+          }
+        } catch {
+          // ignore
+        }
       }
 
       // Block external / non-wiki navigation inside the iframe.

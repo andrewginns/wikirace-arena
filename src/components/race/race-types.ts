@@ -13,6 +13,7 @@ export type RaceRules = {
   maxHops: number;
   maxLinks: number | null;
   maxTokens: number | null;
+  includeImageLinks: boolean;
 };
 
 export type RaceConfig = {

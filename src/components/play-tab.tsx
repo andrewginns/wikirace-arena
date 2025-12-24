@@ -122,6 +122,7 @@ export default function PlayTab({
         max_hops: config.rules.maxHops,
         max_links: config.rules.maxLinks,
         max_tokens: config.rules.maxTokens,
+        include_image_links: config.rules.includeImageLinks,
       },
       humanTimer: {
         auto_start_on_first_action: config.humanTimer?.autoStartOnFirstAction ?? true,

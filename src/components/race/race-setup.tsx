@@ -80,19 +80,19 @@ const PRESETS: Preset[] = [
     id: "sprint",
     name: "Sprint",
     description: "Fast rounds. Great for humans.",
-    rules: { maxHops: 12, maxLinks: 200, maxTokens: 1500 },
+    rules: { maxHops: 12, maxLinks: 200, maxTokens: 1500, includeImageLinks: false },
   },
   {
     id: "classic",
     name: "Classic",
     description: "Balanced default.",
-    rules: { maxHops: 20, maxLinks: null, maxTokens: null },
+    rules: { maxHops: 20, maxLinks: null, maxTokens: null, includeImageLinks: false },
   },
   {
     id: "marathon",
     name: "Marathon",
     description: "More hops + more thinking time.",
-    rules: { maxHops: 35, maxLinks: null, maxTokens: null },
+    rules: { maxHops: 35, maxLinks: null, maxTokens: null, includeImageLinks: false },
   },
 ];
 
@@ -524,7 +524,9 @@ export default function RaceSetup({
                         <button
                           key={p.id}
                           type="button"
-                          onClick={() => setRules(p.rules)}
+                          onClick={() =>
+                            setRules((r) => ({ ...p.rules, includeImageLinks: r.includeImageLinks }))
+                          }
                           className={cn(
                             "rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40",
                             matchedPreset?.id === p.id &&
@@ -664,6 +666,44 @@ export default function RaceSetup({
                       checked={autoStartOnFirstAction}
                       onChange={(e) => setAutoStartOnFirstAction(e.target.checked)}
                       aria-label="Auto-start human timer on first action"
+                    />
+                  </div>
+
+                  <div className="md:col-span-2 rounded-lg border bg-muted/20 p-3 flex items-start justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        Include image-only links
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                className="inline-flex items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                                aria-label="About image-only links"
+                              >
+                                <HelpCircle className="h-4 w-4" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" align="start">
+                              Some pages include links only via small icons/images (e.g. flags).
+                              Enable this to show and allow those links.
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Disabled by default so the Links list matches visible text.
+                      </div>
+                    </div>
+
+                    <input
+                      type="checkbox"
+                      className="mt-1 h-4 w-4"
+                      checked={rules.includeImageLinks}
+                      onChange={(e) =>
+                        setRules((r) => ({ ...r, includeImageLinks: e.target.checked }))
+                      }
+                      aria-label="Include image-only links"
                     />
                   </div>
                 </div>

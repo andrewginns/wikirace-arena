@@ -20,6 +20,7 @@ export type SessionRulesV1 = {
   max_hops: number
   max_links: number | null
   max_tokens: number | null
+  include_image_links: boolean
 }
 
 export type HumanTimerSettingsV1 = {

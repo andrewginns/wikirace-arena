@@ -344,6 +344,7 @@ export async function createRoom(request: CreateRoomRequest) {
           max_hops: request.rules.max_hops ?? 20,
           max_links: request.rules.max_links ?? null,
           max_tokens: request.rules.max_tokens ?? null,
+          include_image_links: request.rules.include_image_links ?? false,
         }
       : undefined,
   };

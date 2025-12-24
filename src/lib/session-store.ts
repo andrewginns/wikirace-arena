@@ -24,6 +24,7 @@ const DEFAULT_SESSION_RULES: SessionRulesV1 = {
   max_hops: 20,
   max_links: null,
   max_tokens: null,
+  include_image_links: false,
 }
 
 function normalizeSessionRules(rules: unknown): SessionRulesV1 {
@@ -52,7 +53,12 @@ function normalizeSessionRules(rules: unknown): SessionRulesV1 {
         ? raw.max_tokens
         : DEFAULT_SESSION_RULES.max_tokens
 
-  return { max_hops, max_links, max_tokens }
+  const include_image_links =
+    typeof raw?.include_image_links === 'boolean'
+      ? raw.include_image_links
+      : DEFAULT_SESSION_RULES.include_image_links
+
+  return { max_hops, max_links, max_tokens, include_image_links }
 }
 
 function normalizeSession(session: SessionV1): SessionV1 {
@@ -92,7 +98,8 @@ function loadInitialState(): StoreState {
       !a ||
       a.max_hops !== b.max_hops ||
       a.max_links !== b.max_links ||
-      a.max_tokens !== b.max_tokens
+      a.max_tokens !== b.max_tokens ||
+      a.include_image_links !== b.include_image_links
     if (rulesChanged) changed = true
   }
 

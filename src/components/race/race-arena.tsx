@@ -938,6 +938,7 @@ export default function RaceArena({
     : 0;
   const selectedRunFinished = selectedRunStatus !== null && selectedRunStatus !== "running";
   const lockWikiNavigation = replayEnabled && !selectedRunFinished;
+  const includeImageLinks = Boolean(session?.rules.include_image_links);
 
   const wikiHeightMultiplier = session?.mode === "multiplayer" && isSelectedHuman ? 2 : 1;
   const effectiveWikiHeight = layout.wikiHeight * wikiHeightMultiplier;
@@ -1187,7 +1188,7 @@ export default function RaceArena({
   const linksReady =
     hasLinksForArticle &&
     !linksLoading &&
-    (wikiPageLinks !== null || humanPaneMode === "links");
+    wikiPageLinks !== null;
 
   const sortedLinks = useMemo(() => {
     if (!hasLinksForArticle) return [];
@@ -1196,7 +1197,7 @@ export default function RaceArena({
 
   const availableLinks = useMemo(() => {
     if (!linksReady) return [];
-    if (!wikiPageLinks) return sortedLinks;
+    if (!wikiPageLinks) return [];
     const pageSet = new Set(wikiPageLinks.links.map((link) => normalizeWikiTitle(link)));
     return sortedLinks.filter((link) => pageSet.has(normalizeWikiTitle(link)));
   }, [linksReady, sortedLinks, wikiPageLinks]);
@@ -1466,6 +1467,13 @@ export default function RaceArena({
     );
   }, []);
 
+  const postWikiIncludeImageLinks = useCallback((enabled: boolean) => {
+    wikiIframeRef.current?.contentWindow?.postMessage(
+      { type: "wikirace:setIncludeImageLinks", enabled },
+      "*"
+    );
+  }, []);
+
   useEffect(() => {
     if (!session) return;
     if (!wikiSrc) return;
@@ -1476,6 +1484,11 @@ export default function RaceArena({
     if (!wikiSrc) return;
     postWikiReplayMode(lockWikiNavigation);
   }, [lockWikiNavigation, postWikiReplayMode, wikiSrc]);
+
+  useEffect(() => {
+    if (!wikiSrc) return;
+    postWikiIncludeImageLinks(includeImageLinks);
+  }, [includeImageLinks, postWikiIncludeImageLinks, wikiSrc]);
 
   const exportViewerJson = () => {
     if (!session) return;
@@ -3166,10 +3179,23 @@ export default function RaceArena({
                         onLoad={() => {
                           setWikiLoading(false);
                           postWikiReplayMode(lockWikiNavigation);
+                          postWikiIncludeImageLinks(includeImageLinks);
                         }}
                       />
                     </div>
                   </Card>
+	                  ) : wikiSrc ? (
+                    <iframe
+                      key={wikiSrc}
+                      ref={wikiIframeRef}
+                      src={wikiSrc}
+                      className="pointer-events-none absolute left-[-99999px] top-0 h-px w-px opacity-0"
+                      onLoad={() => {
+                        setWikiLoading(false);
+                        postWikiReplayMode(lockWikiNavigation);
+                        postWikiIncludeImageLinks(includeImageLinks);
+                      }}
+                    />
                   ) : null}
 	                    </div>
 	                  </div>
@@ -3951,6 +3977,7 @@ export default function RaceArena({
                         onLoad={() => {
                           setWikiLoading(false);
                           postWikiReplayMode(lockWikiNavigation);
+                          postWikiIncludeImageLinks(includeImageLinks);
                         }}
                       />
                     </div>
