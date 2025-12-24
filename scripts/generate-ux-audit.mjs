@@ -22,6 +22,7 @@ import { chromium } from "playwright";
 
 const LAST_TAB_STORAGE_KEY = "wikirace:last-tab:v1";
 const SEEN_PLAY_TAB_STORAGE_KEY = "wikirace:seen-play-tab:v1";
+const PLAY_MODE_STORAGE_KEY = "wikirace:play-mode:v1";
 const SESSIONS_STORAGE_KEY = "wikirace:sessions:v1";
 const ACTIVE_SESSION_STORAGE_KEY = "wikirace:active-session-id";
 
@@ -119,6 +120,54 @@ async function openPlaySetup(page) {
 
   await page.getByRole("heading", { name: "Start a race" }).waitFor();
   await page.getByText("Setup steps").waitFor();
+}
+
+async function openMultiplayerSetup(page) {
+  await setLocalStorageAndReload(page, {
+    [LAST_TAB_STORAGE_KEY]: "play",
+    [SEEN_PLAY_TAB_STORAGE_KEY]: "true",
+    [PLAY_MODE_STORAGE_KEY]: "multiplayer",
+  });
+
+  await page.getByRole("tab", { name: "Play Game" }).click();
+  await page.getByRole("tab", { name: "Multiplayer", exact: true }).click();
+  await page.getByText("Create a room").waitFor();
+}
+
+async function ensureLeaderboardExpanded(page) {
+  const expand = page.getByRole("button", { name: "Expand leaderboard" });
+  if (await expand.isVisible().catch(() => false)) {
+    await expand.click();
+    await page.getByText("Leaderboard", { exact: true }).waitFor();
+    await sleep(150);
+  }
+}
+
+async function selectLeaderboardRun(page, containsText) {
+  const root = page.locator("#matchup-arena");
+  const checkbox = root.locator('input[type="checkbox"][aria-label="Select run"]');
+
+  const runButton = root
+    .locator("button")
+    .filter({ has: checkbox })
+    .filter({ hasText: containsText })
+    .first();
+
+  try {
+    await runButton.waitFor({ state: "visible", timeout: 6000 });
+  } catch {
+    const fallback = root
+      .locator("button")
+      .filter({ hasText: containsText })
+      .first();
+    await fallback.waitFor({ state: "visible" });
+    await fallback.click();
+    await sleep(200);
+    return;
+  }
+
+  await runButton.click();
+  await sleep(200);
 }
 
 async function selectComboboxValue(page, comboboxLocator, value) {
@@ -222,9 +271,8 @@ async function startRace(page) {
 }
 
 async function selectHumanRun(page) {
-  const runButton = page.getByRole("button", { name: /^Select run You/ }).first();
-  await runButton.click();
-  await sleep(200);
+  await ensureLeaderboardExpanded(page);
+  await selectLeaderboardRun(page, "You");
 }
 
 async function setHumanArticleMode(page, mode) {
@@ -233,13 +281,51 @@ async function setHumanArticleMode(page, mode) {
   await sleep(200);
 }
 
+async function clickWikiLink(page, linkText) {
+  const iframe = page.locator("iframe").first();
+  await iframe.waitFor();
+
+  const frame = page.frameLocator("iframe").first();
+  await frame.locator("body").waitFor({ timeout: 20_000 });
+
+  const safeTitle = linkText.replaceAll(" ", "_");
+  const byHref = frame
+    .locator(
+      `a[href$="/wiki/${safeTitle}"], a[href*="/wiki/${safeTitle}#"], a[href$="/wiki/${encodeURIComponent(safeTitle)}"]`
+    )
+    .first();
+
+  const byTitle = frame.locator(`a[title="${linkText}"]`).first();
+  const byText = frame.getByRole("link", { name: new RegExp(linkText, "i") }).first();
+
+  const candidates = [byHref, byTitle, byText];
+  for (const candidate of candidates) {
+    if ((await candidate.count().catch(() => 0)) === 0) continue;
+    await candidate.scrollIntoViewIfNeeded().catch(() => null);
+    await candidate.click();
+    return;
+  }
+
+  // Last resort: wait for a matching link to appear.
+  await byText.waitFor({ timeout: 30_000 });
+  await byText.scrollIntoViewIfNeeded().catch(() => null);
+  await byText.click();
+}
+
+async function waitForEnabled(locator, { timeoutMs = 20_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await locator.isEnabled().catch(() => false)) return;
+    await sleep(250);
+  }
+}
+
 async function winFromCapybaraToRodent(page) {
   await selectHumanRun(page);
   await page.getByRole("tab", { name: "Article" }).click();
   await sleep(500);
-  await setHumanArticleMode(page, "Links");
-  await page.getByRole("button", { name: "Rodent", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Rodent", exact: true }).click();
+  await setHumanArticleMode(page, "Wiki");
+  await clickWikiLink(page, "Rodent");
   await page.getByRole("button", { name: "Dismiss win message" }).waitFor({ timeout: 10_000 });
 }
 
@@ -267,13 +353,16 @@ async function main() {
     }
     await saveScreenshot(page, "screenshots/playwright-view-runs-wins-only-off.png");
 
-    // Filter by France
-    const filterInput = page.getByPlaceholder("Filter by article");
-    await filterInput.fill("France");
-    await sleep(600);
-    await saveScreenshot(page, "screenshots/playwright-view-runs-filter-france.png");
-    await filterInput.fill("");
-    await sleep(400);
+    // Legacy viewer had an article filter input; newer versions don't.
+    // Keep a stable screenshot for the "default" state.
+    const legacyFilterInput = page.getByPlaceholder("Filter by article");
+    if ((await legacyFilterInput.count()) > 0) {
+      await legacyFilterInput.fill("France");
+      await sleep(600);
+      await saveScreenshot(page, "screenshots/playwright-view-runs-filter-france.png");
+      await legacyFilterInput.fill("");
+      await sleep(400);
+    }
     await saveScreenshot(page, "screenshots/playwright-view-runs-default-again.png");
 
     // View Runs CTA (P0)
@@ -391,6 +480,142 @@ async function main() {
     await saveScreenshot(page, "screenshots/playwright-arena-results-tab-scrolled.png", {
       fullPage: true,
     });
+
+    // --- Multiplayer flow (room/lobby/arena) ---
+    await openMultiplayerSetup(page);
+
+    const multiplayerServerWarning = page.getByText(/Server not connected/i);
+    await multiplayerServerWarning
+      .waitFor({ state: "hidden", timeout: 20_000 })
+      .catch(() => null);
+
+    const createRoomButton = page.getByRole("button", { name: "Create room" });
+    await createRoomButton.waitFor();
+    await waitForEnabled(createRoomButton, { timeoutMs: 20_000 });
+
+    if (await multiplayerServerWarning.isVisible().catch(() => false)) {
+      throw new Error(
+        "Backend appears unavailable. Start it with `make server` before running the multiplayer UX audit."
+      );
+    }
+    if (!(await createRoomButton.isEnabled().catch(() => false))) {
+      throw new Error(
+        "Multiplayer UI never connected to the API server (Create room stayed disabled)."
+      );
+    }
+
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-setup-presets.png"
+    );
+
+    await createRoomButton.click();
+    await page.getByText("Multiplayer lobby").waitFor();
+    await saveScreenshot(page, "screenshots/multiplayer/playwright-multiplayer-lobby.png");
+
+    // Add one AI racer in the lobby.
+    const quickAddModel = page.getByRole("button", { name: /^Add gpt-/ }).first();
+    await quickAddModel.click();
+    await page.getByText("No AI racers yet.").waitFor({ state: "hidden" }).catch(() => null);
+    await sleep(250);
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-lobby-ai-added.png"
+    );
+
+    // Start the shared race.
+    await page.getByRole("button", { name: "Start race" }).click();
+    await page.getByText("Wikipedia view").waitFor({ timeout: 15_000 });
+
+    // Capture the default (collapsed) layout, then expand for the rest.
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-arena-initial-collapsed.png"
+    );
+
+    await ensureLeaderboardExpanded(page);
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-arena-initial.png",
+      { fullPage: true }
+    );
+
+    // Make a human move: Capybara -> Rodent.
+    await selectLeaderboardRun(page, "Host");
+    await page.getByRole("tab", { name: "Wiki", exact: true }).click();
+    await clickWikiLink(page, "Rodent");
+    await sleep(900);
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-after-move.png",
+      { fullPage: true }
+    );
+
+    // Cancel the AI racer so we can finish the room deterministically.
+    await selectLeaderboardRun(page, /gpt-/);
+    const runDetailsHeader = page
+      .getByText("Run details", { exact: true })
+      .locator("..");
+    const cancelButton = runDetailsHeader.getByRole("button", {
+      name: "Cancel",
+      exact: true,
+    });
+    if (await cancelButton.isVisible().catch(() => false)) {
+      await cancelButton.click();
+      await sleep(600);
+    }
+
+    // Give up as the human to finish the race.
+    await selectLeaderboardRun(page, "Host");
+    await page.getByRole("button", { name: "Give up", exact: true }).click();
+    await page.getByText("Race finished").waitFor({ timeout: 10_000 });
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-abandoned-finished.png",
+      { fullPage: true }
+    );
+
+    // Hide/show runs (client-side only).
+    await selectLeaderboardRun(page, /gpt-/);
+    await page.getByRole("button", { name: "Hide", exact: true }).click();
+    await page.getByRole("button", { name: /Show hidden/, exact: false }).waitFor();
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-hide-run.png",
+      { fullPage: true }
+    );
+
+    await page.getByRole("button", { name: /Show hidden/, exact: false }).click();
+    await page.getByRole("button", { name: /Show hidden/, exact: false }).waitFor({
+      state: "hidden",
+    });
+    await sleep(200);
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-show-hidden.png",
+      { fullPage: true }
+    );
+
+    // Add AI dialog (arena).
+    await page.getByRole("button", { name: "Add AI", exact: true }).click();
+    const addAiDialog = page.getByRole("dialog", { name: /Add AI racer/i });
+    await addAiDialog.waitFor();
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-arena-add-ai-dialog.png"
+    );
+
+    // Add another AI after the race is finished.
+    await addAiDialog.getByLabel("Model").fill("gpt-5-mini");
+    await addAiDialog.getByRole("button", { name: "Add AI", exact: true }).click();
+    await addAiDialog.waitFor({ state: "hidden" });
+    await sleep(800);
+    await ensureLeaderboardExpanded(page);
+    await saveScreenshot(
+      page,
+      "screenshots/multiplayer/playwright-multiplayer-add-ai-after-finish.png",
+      { fullPage: true }
+    );
   } finally {
     await browser.close();
   }

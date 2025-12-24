@@ -4,7 +4,7 @@ export type MultiplayerRunKind = "human" | "llm";
 
 export type MultiplayerRunStatus = "not_started" | "running" | "finished";
 
-export type MultiplayerRunResult = "win" | "lose";
+export type MultiplayerRunResult = "win" | "lose" | "abandoned";
 
 export type MultiplayerStepType = "start" | "move" | "win" | "lose";
 
@@ -95,3 +95,17 @@ export type MoveRoomRequest = {
   to_article: string;
 };
 
+export type AddLlmRunRequest = {
+  requested_by_player_id: string;
+  model: string;
+  player_name?: string;
+  api_base?: string;
+  reasoning_effort?: string;
+  max_steps?: number;
+  max_links?: number | null;
+  max_tokens?: number | null;
+};
+
+export type RoomRunControlRequest = {
+  requested_by_player_id: string;
+};

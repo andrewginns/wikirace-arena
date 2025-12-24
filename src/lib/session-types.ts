@@ -37,6 +37,7 @@ export type StepType = 'start' | 'move' | 'win' | 'lose'
 export type StepV1 = {
   type: StepType
   article: string
+  at?: string
   metadata?: Record<string, unknown>
 }
 

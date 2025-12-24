@@ -290,16 +290,17 @@ export function startHumanRun({
   if (!session) throw new Error('Session not found')
 
   const timer_state: RunTimerStateV1 = 'not_started'
+  const started_at = startedAtIso || nowIso()
   const run: RunV1 = {
     id: makeId('run_human'),
     kind: 'human',
     player_name: playerName,
     max_steps: typeof maxSteps === 'number' ? maxSteps : undefined,
-    started_at: startedAtIso || nowIso(),
+    started_at,
     status: 'running',
     timer_state,
     active_ms: 0,
-    steps: [{ type: 'start', article: session.start_article }],
+    steps: [{ type: 'start', article: session.start_article, at: started_at }],
   }
 
   updateSession(sessionId, (s) => ({ ...s, runs: [...s.runs, run] }))
@@ -332,6 +333,8 @@ export function startLlmRun({
   const session = state.sessions[sessionId]
   if (!session) throw new Error('Session not found')
 
+  const started_at = startedAtIso || nowIso()
+
   const run: RunV1 = {
     id: makeId(isBaseline ? 'run_llm_baseline' : 'run_llm'),
     kind: 'llm',
@@ -342,9 +345,9 @@ export function startLlmRun({
     max_steps: typeof maxSteps === 'number' ? maxSteps : undefined,
     max_links: typeof maxLinks === 'number' ? maxLinks : undefined,
     max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined,
-    started_at: startedAtIso || nowIso(),
+    started_at,
     status: 'running',
-    steps: [{ type: 'start', article: session.start_article }],
+    steps: [{ type: 'start', article: session.start_article, at: started_at }],
   }
 
   updateSession(sessionId, (s) => {
@@ -502,12 +505,17 @@ export function appendRunStep({
   runId: string
   step: StepV1
 }) {
+  const normalizedStep: StepV1 =
+    typeof step.at === 'string' && step.at.length > 0
+      ? step
+      : { ...step, at: nowIso() }
+
   return updateSession(sessionId, (s) => ({
     ...s,
     runs: s.runs.map((run) => {
       if (run.id !== runId) return run
       if (run.status !== 'running') return run
-      return { ...run, steps: [...run.steps, step] }
+      return { ...run, steps: [...run.steps, normalizedStep] }
     }),
   }))
 }
@@ -542,6 +550,7 @@ export function forceWinRun({
   runId: string
   finishedAtIso?: string
 }) {
+  const finished_at = finishedAtIso || nowIso()
   return updateSession(sessionId, (s) => ({
     ...s,
     runs: s.runs.map((run) => {
@@ -554,9 +563,14 @@ export function forceWinRun({
           : [{ type: 'start', article: s.start_article }]
       const lastIndex = steps.length - 1
       const last = steps[lastIndex]
-      steps[lastIndex] = { ...last, type: 'win', article: s.destination_article }
+      steps[lastIndex] = {
+        ...last,
+        type: 'win',
+        article: s.destination_article,
+        at: finished_at,
+      }
 
-      return finalizeRun({ ...run, steps }, 'win', finishedAtIso)
+      return finalizeRun({ ...run, steps }, 'win', finished_at)
     }),
   }))
 }

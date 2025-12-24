@@ -1,7 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
-import { API_BASE } from "@/lib/constants";
+import { useEffect, useRef } from "react";
 import { runLlmRace } from "@/lib/llm-runner";
 import {
   appendRunStep,
@@ -10,7 +9,8 @@ import {
   useSessionsStore,
 } from "@/lib/session-store";
 import type { RunV1, SessionV1 } from "@/lib/session-types";
-import { normalizeWikiTitle, wikiTitlesMatch } from "@/lib/wiki-title";
+import { canonicalizeTitle } from "@/lib/wiki-canonical";
+import { wikiTitlesMatch } from "@/lib/wiki-title";
 
 const DEFAULT_MAX_STEPS = 20;
 const DEFAULT_MAX_LINKS: number | null = null;
@@ -47,45 +47,6 @@ function getRunLimits(run: RunV1, session: SessionV1) {
 export default function LlmRunManager() {
   const { sessions } = useSessionsStore();
   const controllersRef = useRef<Map<string, AbortController>>(new Map());
-
-  const canonicalTitleCacheRef = useRef<Map<string, string>>(new Map());
-  const canonicalTitleInFlightRef = useRef<Map<string, Promise<string>>>(new Map());
-
-  const canonicalizeTitle = useCallback(async (title: string) => {
-    const key = normalizeWikiTitle(title);
-    const cached = canonicalTitleCacheRef.current.get(key);
-    if (cached) return cached;
-
-    const inFlight = canonicalTitleInFlightRef.current.get(key);
-    if (inFlight) return inFlight;
-
-    const promise = (async () => {
-      try {
-        const response = await fetch(
-          `${API_BASE}/canonical_title/${encodeURIComponent(title)}`
-        );
-        if (response.ok) {
-          const data = (await response.json()) as { title?: unknown };
-          if (typeof data.title === "string" && data.title.trim().length > 0) {
-            canonicalTitleCacheRef.current.set(key, data.title);
-            return data.title;
-          }
-        }
-      } catch {
-        // ignore
-      }
-
-      canonicalTitleCacheRef.current.set(key, title);
-      return title;
-    })();
-
-    canonicalTitleInFlightRef.current.set(key, promise);
-    try {
-      return await promise;
-    } finally {
-      canonicalTitleInFlightRef.current.delete(key);
-    }
-  }, []);
 
   useEffect(() => {
     const controllers = controllersRef.current;
@@ -168,7 +129,7 @@ export default function LlmRunManager() {
       controller.abort();
       controllers.delete(runId);
     }
-  }, [canonicalizeTitle, sessions]);
+  }, [sessions]);
 
   return null;
 }
