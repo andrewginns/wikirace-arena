@@ -38,8 +38,8 @@ export default function PlayTab({
   const [playMode, setPlayMode] = useState<PlayMode>(loadStoredPlayMode);
   const [isServerConnected, setIsServerConnected] = useState<boolean>(false);
   const [modelList] = useState<string[]>([
-    "gpt-5.1",
     "gpt-5.2",
+    "gpt-5.1",
     "gpt-5-mini",
     "gpt-5-nano",
   ]);
@@ -177,7 +177,12 @@ export default function PlayTab({
       </div>
 
       {playMode === "multiplayer" ? (
-        <MultiplayerPlay allArticles={effectiveArticles} isServerConnected={isServerConnected} />
+        <MultiplayerPlay
+          allArticles={effectiveArticles}
+          isServerConnected={isServerConnected}
+          modelList={modelList}
+          onGoToViewerTab={onGoToViewerTab}
+        />
       ) : (
         <>
           <div id="play-setup" className="space-y-6">

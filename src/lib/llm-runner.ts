@@ -1,6 +1,7 @@
 import { API_BASE } from '@/lib/constants'
 import type { StepV1 } from '@/lib/session-types'
-import { normalizeWikiTitle, wikiTitlesMatch } from '@/lib/wiki-title'
+import { canonicalizeTitle } from '@/lib/wiki-canonical'
+import { wikiTitlesMatch } from '@/lib/wiki-title'
 
 type RunLlmRaceArgs = {
   startArticle: string
@@ -14,110 +15,6 @@ type RunLlmRaceArgs = {
   maxTokens: number | null
   signal?: AbortSignal
   onStep: (step: StepV1) => void
-}
-
-type LlmUsage = {
-  promptTokens?: number
-  completionTokens?: number
-  totalTokens?: number
-}
-
-const canonicalTitleCache = new Map<string, string>()
-const canonicalTitleInFlight = new Map<string, Promise<string>>()
-
-async function canonicalizeTitle(title: string) {
-  const key = normalizeWikiTitle(title)
-  const cached = canonicalTitleCache.get(key)
-  if (cached) return cached
-
-  const inFlight = canonicalTitleInFlight.get(key)
-  if (inFlight) return inFlight
-
-  const promise = (async () => {
-    try {
-      const response = await fetch(
-        `${API_BASE}/canonical_title/${encodeURIComponent(title)}`
-      )
-      if (response.ok) {
-        const data = (await response.json()) as { title?: unknown }
-        if (typeof data.title === 'string' && data.title.trim().length > 0) {
-          canonicalTitleCache.set(key, data.title)
-          return data.title
-        }
-      }
-    } catch {
-      // ignore
-    }
-
-    canonicalTitleCache.set(key, title)
-    return title
-  })()
-
-  canonicalTitleInFlight.set(key, promise)
-  try {
-    return await promise
-  } finally {
-    canonicalTitleInFlight.delete(key)
-  }
-}
-
-const buildPrompt = (
-  current: string,
-  target: string,
-  pathSoFar: string[],
-  links: string[]
-) => {
-  const formattedLinks = links.map((l, i) => `${i + 1}. ${l}`).join('\n')
-  const formattedPath = pathSoFar.join(' -> ')
-
-  return `You are playing WikiRun, trying to navigate from one Wikipedia article to another using only links.
-
-IMPORTANT: You MUST put your final answer in <answer>NUMBER</answer> tags, where NUMBER is the link number.
-For example, if you want to choose link 3, output <answer>3</answer>.
-
-Current article: ${current}
-Target article: ${target}
-Available links (numbered):
-${formattedLinks}
-
-Your path so far: ${formattedPath}
-
-Think about which link is most likely to lead you toward the target article.
-First, analyze each link briefly and how it connects to your goal, then select the most promising one.
-
-Remember to format your final answer by explicitly writing out the xml number tags like this: <answer>NUMBER</answer>`
-}
-
-function extractAnswer(response: string, maximumAnswer: number) {
-  const matches = response.match(/<answer>(\d+)<\/answer>/g)
-  if (!matches || matches.length === 0) {
-    return {
-      answer: null,
-      error: `No <answer>NUMBER</answer> found. Choose a number between 1 and ${maximumAnswer}.`,
-    }
-  }
-  if (matches.length > 1) {
-    return {
-      answer: null,
-      error: 'Multiple <answer> tags found. Respond with exactly one.',
-    }
-  }
-
-  const m = matches[0].match(/<answer>(\d+)<\/answer>/)
-  const value = m ? Number.parseInt(m[1]) : NaN
-  if (Number.isNaN(value)) {
-    return {
-      answer: null,
-      error: `Answer is not a number. Choose a number between 1 and ${maximumAnswer}.`,
-    }
-  }
-  if (value < 1 || value > maximumAnswer) {
-    return {
-      answer: null,
-      error: `Answer out of bounds. Choose a number between 1 and ${maximumAnswer}.`,
-    }
-  }
-  return { answer: value, error: null }
 }
 
 async function fetchArticleLinks(articleTitle: string) {
@@ -135,16 +32,33 @@ async function fetchArticleLinks(articleTitle: string) {
   return data.links as string[]
 }
 
-async function callLlm({
+type ChooseLinkResponse = {
+  selected_index?: unknown
+  tries?: unknown
+  llm_output?: unknown
+  llm_outputs?: unknown
+  answer_errors?: unknown
+  prompt_tokens?: unknown
+  completion_tokens?: unknown
+  total_tokens?: unknown
+}
+
+async function chooseLink({
   model,
-  prompt,
+  currentArticle,
+  targetArticle,
+  pathSoFar,
+  links,
   maxTokens,
   apiBase,
   reasoningEffort,
   signal,
 }: {
   model: string
-  prompt: string
+  currentArticle: string
+  targetArticle: string
+  pathSoFar: string[]
+  links: string[]
   maxTokens: number | null
   apiBase?: string
   reasoningEffort?: string
@@ -152,17 +66,17 @@ async function callLlm({
 }) {
   const payload: Record<string, unknown> = {
     model,
-    prompt,
+    current_article: currentArticle,
+    target_article: targetArticle,
+    path_so_far: pathSoFar,
+    links,
+    max_tries: 3,
+    max_tokens: typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : null,
     api_base: apiBase || null,
-  }
-  if (typeof maxTokens === 'number' && Number.isFinite(maxTokens) && maxTokens > 0) {
-    payload.max_tokens = maxTokens
-  }
-  if (reasoningEffort && reasoningEffort.trim().length > 0) {
-    payload.reasoning_effort = reasoningEffort
+    reasoning_effort: reasoningEffort || null,
   }
 
-  const response = await fetch(`${API_BASE}/llm/chat`, {
+  const response = await fetch(`${API_BASE}/llm/choose_link`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -174,42 +88,7 @@ async function callLlm({
     throw new Error(`LLM request failed (${response.status}): ${text}`)
   }
 
-  const data: unknown = await response.json()
-  const parsed = data as { content?: unknown; usage?: unknown }
-  const content = parsed.content
-  if (typeof content !== 'string' || content.length === 0) {
-    throw new Error('LLM returned empty content')
-  }
-
-  const usageRaw = parsed.usage as
-    | {
-        prompt_tokens?: unknown
-        completion_tokens?: unknown
-        total_tokens?: unknown
-        input_tokens?: unknown
-        output_tokens?: unknown
-      }
-    | undefined
-  const usage: LlmUsage | null = usageRaw
-    ? {
-        promptTokens:
-          typeof usageRaw.prompt_tokens === 'number'
-            ? usageRaw.prompt_tokens
-            : typeof usageRaw.input_tokens === 'number'
-              ? usageRaw.input_tokens
-              : undefined,
-        completionTokens:
-          typeof usageRaw.completion_tokens === 'number'
-            ? usageRaw.completion_tokens
-            : typeof usageRaw.output_tokens === 'number'
-              ? usageRaw.output_tokens
-              : undefined,
-        totalTokens:
-          typeof usageRaw.total_tokens === 'number' ? usageRaw.total_tokens : undefined,
-      }
-    : null
-
-  return { content, usage }
+  return (await response.json()) as ChooseLinkResponse
 }
 
 export async function runLlmRace({
@@ -275,87 +154,54 @@ export async function runLlmRace({
       return { result: 'lose' as const }
     }
 
-    const basePrompt = buildPrompt(current, destinationArticle, pathSoFar, links)
-    let prompt = basePrompt
+    const chooseResponse = await chooseLink({
+      model,
+      currentArticle: current,
+      targetArticle: destinationArticle,
+      pathSoFar,
+      links,
+      maxTokens,
+      apiBase,
+      reasoningEffort,
+      signal,
+    })
 
-    const llmOutputs: string[] = []
-    let lastOutput: string | null = null
-    let promptTokensSum = 0
-    let completionTokensSum = 0
-    let totalTokensSum = 0
-    let sawPromptTokens = false
-    let sawCompletionTokens = false
-    let sawAnyUsage = false
+    const chosenIndex =
+      typeof chooseResponse.selected_index === 'number'
+        ? chooseResponse.selected_index
+        : null
 
-    const maxTries = 3
-    let chosenIndex: number | null = null
-    let usedTry: number | null = null
-    const answerErrors: string[] = []
+    const llmMetadata: Record<string, unknown> = {
+      tries: typeof chooseResponse.tries === 'number' ? chooseResponse.tries : 0,
+      llm_output:
+        typeof chooseResponse.llm_output === 'string' || chooseResponse.llm_output === null
+          ? chooseResponse.llm_output
+          : null,
+    }
 
-    for (let tryNum = 0; tryNum < maxTries; tryNum++) {
-      const { content: response, usage } = await callLlm({
-        model,
-        prompt,
-        maxTokens,
-        apiBase,
-        reasoningEffort,
-        signal,
-      })
+    if (
+      Array.isArray(chooseResponse.llm_outputs) &&
+      chooseResponse.llm_outputs.every((v) => typeof v === 'string')
+    ) {
+      llmMetadata.llm_outputs = chooseResponse.llm_outputs
+    }
 
-      llmOutputs.push(response)
-      lastOutput = response
-
-      if (usage) {
-        if (typeof usage.promptTokens === 'number') {
-          promptTokensSum += usage.promptTokens
-          sawPromptTokens = true
-          sawAnyUsage = true
-        }
-        if (typeof usage.completionTokens === 'number') {
-          completionTokensSum += usage.completionTokens
-          sawCompletionTokens = true
-          sawAnyUsage = true
-        }
-
-        const callTotal =
-          typeof usage.totalTokens === 'number'
-            ? usage.totalTokens
-            : typeof usage.promptTokens === 'number' ||
-                typeof usage.completionTokens === 'number'
-              ? (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)
-              : null
-        if (typeof callTotal === 'number') {
-          totalTokensSum += callTotal
-          sawAnyUsage = true
-        }
-      }
-
-      const { answer, error } = extractAnswer(response, links.length)
-      if (answer !== null) {
-        chosenIndex = answer
-        usedTry = tryNum
-        break
-      }
-
-      if (error) answerErrors.push(error)
-
-      const retryMessage = `IMPORTANT: ${error}`
-      prompt = `${basePrompt}\n\n${retryMessage}`
+    if (typeof chooseResponse.prompt_tokens === 'number') {
+      llmMetadata.prompt_tokens = chooseResponse.prompt_tokens
+    }
+    if (typeof chooseResponse.completion_tokens === 'number') {
+      llmMetadata.completion_tokens = chooseResponse.completion_tokens
+    }
+    if (typeof chooseResponse.total_tokens === 'number') {
+      llmMetadata.total_tokens = chooseResponse.total_tokens
     }
 
     if (chosenIndex === null) {
-      const llmMetadata: Record<string, unknown> = {
-        tries: maxTries,
-        answer_errors: answerErrors,
-        llm_output: lastOutput,
-      }
-      if (llmOutputs.length > 1) {
-        llmMetadata.llm_outputs = llmOutputs
-      }
-      if (sawAnyUsage) {
-        if (sawPromptTokens) llmMetadata.prompt_tokens = promptTokensSum
-        if (sawCompletionTokens) llmMetadata.completion_tokens = completionTokensSum
-        llmMetadata.total_tokens = totalTokensSum
+      if (
+        Array.isArray(chooseResponse.answer_errors) &&
+        chooseResponse.answer_errors.every((v) => typeof v === 'string')
+      ) {
+        llmMetadata.answer_errors = chooseResponse.answer_errors
       }
 
       onStep({
@@ -367,19 +213,6 @@ export async function runLlmRace({
         },
       })
       return { result: 'lose' as const }
-    }
-
-    const llmMetadata: Record<string, unknown> = {
-      tries: usedTry ?? 0,
-      llm_output: lastOutput,
-    }
-    if (llmOutputs.length > 1) {
-      llmMetadata.llm_outputs = llmOutputs
-    }
-    if (sawAnyUsage) {
-      if (sawPromptTokens) llmMetadata.prompt_tokens = promptTokensSum
-      if (sawCompletionTokens) llmMetadata.completion_tokens = completionTokensSum
-      llmMetadata.total_tokens = totalTokensSum
     }
 
     const selected = links[chosenIndex - 1]

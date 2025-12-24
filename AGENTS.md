@@ -4,13 +4,19 @@
 
 - `src/`: Vite + React + TypeScript frontend (primary UI work).
   - `src/components/`: feature/UI components (prefer `kebab-case.tsx`).
+    - `src/components/multiplayer/`: multiplayer setup/lobby/arena wrapper components.
+    - `src/components/race/`: shared race UI (Arena, setup dialogs) used by both Local + Multiplayer.
   - `src/components/ui/`: shadcn/ui primitives (Radix + Tailwind).
   - `src/lib/`: shared helpers, state, and types.
+    - `src/lib/race-state.ts` + `src/lib/race-driver.ts`: unify local + multiplayer into a common Arena interface.
+    - `src/lib/multiplayer-store.ts`: client store + API calls + websocket sync for rooms.
 - `public/`: static assets served by Vite.
 - `dist/`: production build output (generated).
+- `docs/multiplayer/`: multiplayer implementation notes.
 - `docs/ux-audit/`: UX audit notes + Playwright screenshots.
 - `scripts/`: developer scripts (e.g. `generate-ux-audit.mjs`).
 - `api.py`: FastAPI backend (serves API and mounts `dist/` in production).
+  - Multiplayer rooms live under `/rooms/*` (REST + websocket) and are stored in-memory.
 - `get_wikihop.py`: build `parallel_eval/wikihop.db` from Wikimedia SQL dumps (no scraping; can auto-download dumps).
 - `parallel_eval/`: Python tooling for running agents/evals.
 - `parallel_eval/wikimedia_dumps/`: default cache location for downloaded dumps.
@@ -24,6 +30,8 @@ Make targets (see `Makefile`):
 - `make ui`: run the Vite dev server.
 - `make server`: run the API (`uvicorn`) with `WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db`.
 - `make build`: build the frontend to `dist/`.
+- `make ux-audit`: start API + Vite and run Playwright UX screenshots.
+- `make ux-audit-headed`: same as above, but headed.
 
 Frontend (prefer Yarn; repo includes both `yarn.lock` and `package-lock.json`):
 
@@ -56,11 +64,14 @@ Backend + DB (local API):
 - **Hop definition:** a hop is one move/link-click between articles (edge count). Many `steps[]` arrays include the start page at index 0, so hops are typically `max(0, steps.length - 1)` (see `src/lib/session-utils.ts` / `src/lib/hops.ts`).
 - **Unlimited budgets:** LLM limits use `null` to mean “unlimited” for `max_links` and `max_tokens` (stored in session rules and passed down to runs). Classic/Marathon presets default to unlimited; Sprint retains finite defaults.
 - **Token accounting:** per-step metadata may include either `prompt_tokens`/`completion_tokens` or `input_tokens`/`output_tokens` (and sometimes `total_tokens`). The UI aggregates these across a run and also displays per-step usage in the Arena run details.
+- **Multiplayer “finished” behavior:** rooms stay open even after all runs are complete so hosts can add more players/AIs. The Arena shows “Race finished” based on run statuses, not `room.status`.
+- **Arena layout storage:** local + multiplayer layout preferences are stored separately (`wikirace:arena-layout:v1` vs `wikirace:arena-layout:multiplayer:v1`). Multiplayer defaults to a collapsed leaderboard.
 
 ## Testing Guidelines
 
 - No dedicated unit-test suite currently; minimum checks are `yarn lint` + `yarn build` (note: `make test` calls `yarn test`).
 - For UI changes, do a quick smoke test: start a race, add challengers, and verify leaderboard/arena interactions.
+- For multiplayer UI changes, smoke test: create room, join from a second tab/device, add AI in lobby + arena (including Presets), make a human move, give up, hide/show runs, and verify websocket updates.
 
 ## Commit & Pull Request Guidelines
 
@@ -69,5 +80,5 @@ Backend + DB (local API):
 
 ## Security & Configuration Tips
 
-- Don’t commit secrets; `.env` is ignored. Common env vars: `VITE_API_BASE`, `WIKISPEEDIA_DB_PATH`, and provider keys (e.g. `OPENAI_API_KEY`).
+- Don’t commit secrets; `.env` is ignored. Common env vars: `VITE_API_BASE`, `WIKISPEEDIA_DB_PATH`, provider keys (e.g. `OPENAI_API_KEY`), and multiplayer controls like `WIKIRACE_ROOM_TTL_SECONDS`, `WIKIRACE_ROOM_CLEANUP_INTERVAL_SECONDS`, `WIKIRACE_MAX_LLM_RUNS_PER_ROOM`, `WIKIRACE_MAX_CONCURRENT_LLM_CALLS`, `WIKIRACE_PUBLIC_HOST`.
 - The app stores state in `localStorage`; clearing `wikirace:*` keys can help when debugging UI behavior.

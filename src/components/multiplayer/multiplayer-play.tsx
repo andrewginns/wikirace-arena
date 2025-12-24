@@ -13,9 +13,13 @@ import {
 export default function MultiplayerPlay({
   allArticles,
   isServerConnected,
+  modelList = [],
+  onGoToViewerTab,
 }: {
   allArticles: string[];
   isServerConnected: boolean;
+  modelList?: string[];
+  onGoToViewerTab?: () => void;
 }) {
   const { room, player_id, player_name, join_url, ws_status, error } = useMultiplayerStore();
   const [bootstrapped, setBootstrapped] = useState(false);
@@ -76,6 +80,7 @@ export default function MultiplayerPlay({
         wsStatus={ws_status}
         error={error}
         onLeave={leaveRoom}
+        modelList={modelList}
       />
     );
   }
@@ -89,6 +94,9 @@ export default function MultiplayerPlay({
       wsStatus={ws_status}
       error={error}
       onLeave={leaveRoom}
+      modelList={modelList}
+      isServerConnected={isServerConnected}
+      onGoToViewerTab={onGoToViewerTab}
     />
   );
 }

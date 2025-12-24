@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { API_BASE } from "@/lib/constants";
 import type {
+  AddLlmRunRequest,
   CreateRoomRequest,
   CreateRoomResponse,
   JoinRoomResponse,
@@ -435,6 +436,117 @@ export async function startRoom() {
     setState({ ...state, room, error: null });
   } catch (err) {
     setError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+export async function addLlmParticipant(
+  request: Omit<AddLlmRunRequest, "requested_by_player_id">
+) {
+  const roomId = state.room?.id;
+  const playerId = state.player_id;
+  if (!roomId || !playerId) {
+    setError("Not connected to a room");
+    return null;
+  }
+
+  setError(null);
+  try {
+    const room = await apiJson<MultiplayerRoomV1>(
+      `/rooms/${encodeURIComponent(roomId)}/add_llm`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ...request,
+          requested_by_player_id: playerId,
+        }),
+      }
+    );
+    setState({ ...state, room, error: null });
+    return room;
+  } catch (err) {
+    setError(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+export async function cancelRun(runId: string) {
+  const roomId = state.room?.id;
+  const playerId = state.player_id;
+  if (!roomId || !playerId) {
+    setError("Not connected to a room");
+    return null;
+  }
+  const trimmed = runId.trim();
+  if (!trimmed) return null;
+
+  setError(null);
+  try {
+    const room = await apiJson<MultiplayerRoomV1>(
+      `/rooms/${encodeURIComponent(roomId)}/runs/${encodeURIComponent(trimmed)}/cancel`,
+      {
+        method: "POST",
+        body: JSON.stringify({ requested_by_player_id: playerId }),
+      }
+    );
+    setState({ ...state, room, error: null });
+    return room;
+  } catch (err) {
+    setError(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+export async function abandonRun(runId: string) {
+  const roomId = state.room?.id;
+  const playerId = state.player_id;
+  if (!roomId || !playerId) {
+    setError("Not connected to a room");
+    return null;
+  }
+  const trimmed = runId.trim();
+  if (!trimmed) return null;
+
+  setError(null);
+  try {
+    const room = await apiJson<MultiplayerRoomV1>(
+      `/rooms/${encodeURIComponent(roomId)}/runs/${encodeURIComponent(trimmed)}/abandon`,
+      {
+        method: "POST",
+        body: JSON.stringify({ requested_by_player_id: playerId }),
+      }
+    );
+    setState({ ...state, room, error: null });
+    return room;
+  } catch (err) {
+    setError(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+export async function restartRun(runId: string) {
+  const roomId = state.room?.id;
+  const playerId = state.player_id;
+  if (!roomId || !playerId) {
+    setError("Not connected to a room");
+    return null;
+  }
+  const trimmed = runId.trim();
+  if (!trimmed) return null;
+
+  setError(null);
+  try {
+    const room = await apiJson<MultiplayerRoomV1>(
+      `/rooms/${encodeURIComponent(roomId)}/runs/${encodeURIComponent(trimmed)}/restart`,
+      {
+        method: "POST",
+        body: JSON.stringify({ requested_by_player_id: playerId }),
+      }
+    );
+    setState({ ...state, room, error: null });
+    return room;
+  } catch (err) {
+    setError(err instanceof Error ? err.message : String(err));
+    return null;
   }
 }
 

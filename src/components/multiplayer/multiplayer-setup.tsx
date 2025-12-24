@@ -15,6 +15,34 @@ import {
   useMultiplayerStore,
 } from "@/lib/multiplayer-store";
 
+type Preset = {
+  id: "sprint" | "classic" | "marathon";
+  name: string;
+  description: string;
+  rules: { maxHops: number; maxLinks: number | null; maxTokens: number | null };
+};
+
+const PRESETS: Preset[] = [
+  {
+    id: "sprint",
+    name: "Sprint",
+    description: "Fast rounds. Great for humans.",
+    rules: { maxHops: 12, maxLinks: 200, maxTokens: 1500 },
+  },
+  {
+    id: "classic",
+    name: "Classic",
+    description: "Balanced default.",
+    rules: { maxHops: 20, maxLinks: null, maxTokens: null },
+  },
+  {
+    id: "marathon",
+    name: "Marathon",
+    description: "More hops + more thinking time.",
+    rules: { maxHops: 35, maxLinks: null, maxTokens: null },
+  },
+];
+
 function toOptionalPositiveInt(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -44,6 +72,20 @@ export default function MultiplayerSetup({
   const [maxHops, setMaxHops] = useState<string>("20");
   const [maxLinks, setMaxLinks] = useState<string>("");
   const [maxTokens, setMaxTokens] = useState<string>("");
+
+  const matchedPreset = useMemo(() => {
+    const hops = toOptionalPositiveInt(maxHops) ?? 20;
+    const links = toOptionalPositiveInt(maxLinks);
+    const tokens = toOptionalPositiveInt(maxTokens);
+    return (
+      PRESETS.find(
+        (p) =>
+          p.rules.maxHops === hops &&
+          p.rules.maxLinks === links &&
+          p.rules.maxTokens === tokens
+      ) || null
+    );
+  }, [maxHops, maxLinks, maxTokens]);
 
   const [joinRoomId, setJoinRoomId] = useState<string>(prefillRoomId || "");
   const [joinName, setJoinName] = useState<string>(player_name || "");
@@ -146,6 +188,41 @@ export default function MultiplayerSetup({
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="sm:col-span-3 rounded-md border bg-muted/10 p-3">
+                <div className="text-xs font-medium">Rules preset</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {PRESETS.map((preset) => {
+                    const selected = matchedPreset?.id === preset.id;
+                    return (
+                      <Button
+                        key={preset.id}
+                        type="button"
+                        variant={selected ? "secondary" : "outline"}
+                        size="sm"
+                        onClick={() => {
+                          setMaxHops(String(preset.rules.maxHops));
+                          setMaxLinks(
+                            preset.rules.maxLinks === null
+                              ? ""
+                              : String(preset.rules.maxLinks)
+                          );
+                          setMaxTokens(
+                            preset.rules.maxTokens === null
+                              ? ""
+                              : String(preset.rules.maxTokens)
+                          );
+                        }}
+                      >
+                        {preset.name}
+                      </Button>
+                    );
+                  })}
+                </div>
+                <div className="mt-2 text-[11px] text-muted-foreground">
+                  {matchedPreset?.description || "Custom rules."}
+                </div>
+              </div>
+
               <div>
                 <Label className="text-xs">Max hops</Label>
                 <Input
