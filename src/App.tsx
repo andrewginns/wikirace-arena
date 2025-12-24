@@ -27,23 +27,7 @@ export default function Home() {
   const [selectedTab, setSelectedTab] = useState<TabValue>(loadStoredTab);
   const [startArticle, setStartArticle] = useState<string>("");
   const [destinationArticle, setDestinationArticle] = useState<string>("");
-  const [isSmallScreen, setIsSmallScreen] = useState<boolean>(false);
   const [hasSeenPlayTab, setHasSeenPlayTab] = useState<boolean>(loadHasSeenPlayTab);
-  
-  useEffect(() => {
-    const checkScreenSize = () => {
-      setIsSmallScreen(window.innerWidth < 768);
-    };
-    
-    // Check on initial load
-    checkScreenSize();
-    
-    // Add resize listener
-    window.addEventListener("resize", checkScreenSize);
-    
-    // Clean up
-    return () => window.removeEventListener("resize", checkScreenSize);
-  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -65,12 +49,6 @@ export default function Home() {
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/30">
       <LlmRunManager />
       <div className="container mx-auto p-4 max-w-7xl">
-      {isSmallScreen && (
-        <div className="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 mb-4 rounded shadow">
-          <p className="font-bold">Warning:</p>
-          <p>This application doesn't work well on small screens. Please use a desktop for the best experience.</p>
-        </div>
-      )}
       <div className="flex flex-col gap-4 md:flex-row md:justify-between md:items-end">
         <div className="space-y-1">
           <h1 className="text-3xl font-bold tracking-tight">WikiRacing Arena</h1>
