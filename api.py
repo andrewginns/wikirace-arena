@@ -1357,7 +1357,7 @@ def _inject_wiki_bridge(html: str) -> str:
   }
 
   function toProxyPath(title) {
-    return "/wiki/" + encodeURIComponent(title.replaceAll(" ", "_"))
+    return window.location.origin + "/wiki/" + encodeURIComponent(title.replaceAll(" ", "_"))
   }
 
   function getCurrentTitle() {

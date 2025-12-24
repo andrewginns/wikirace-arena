@@ -11,6 +11,7 @@ import { Separator } from "@/components/ui/separator";
 import ModelPicker from "@/components/model-picker";
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import { addLlmParticipant, cancelRun, restartRun, startRoom } from "@/lib/multiplayer-store";
+import { useMediaQuery } from "@/lib/use-media-query";
 
 function toOptionalPositiveInt(value: string): number | undefined {
   const trimmed = value.trim();
@@ -54,6 +55,8 @@ export default function MultiplayerLobby({
   const [aiMaxSteps, setAiMaxSteps] = useState("");
   const [aiMaxLinks, setAiMaxLinks] = useState("");
   const [aiMaxTokens, setAiMaxTokens] = useState("");
+
+  const isMobile = useMediaQuery("(max-width: 639px)");
 
   useEffect(() => {
     if (aiModel.trim().length > 0) return;
@@ -204,6 +207,12 @@ export default function MultiplayerLobby({
 
         <Separator className="my-3" />
 
+        {isMobile && inviteLink ? (
+          <div className="rounded-md border bg-muted/10 p-3 text-xs text-muted-foreground break-all">
+            Invite: {inviteLink}
+          </div>
+        ) : null}
+
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
           <div className="order-last lg:order-none lg:col-span-7">
             <div className="text-sm font-medium">Players</div>
@@ -262,7 +271,7 @@ export default function MultiplayerLobby({
                         {run.status === "finished" ? run.result || "finished" : run.status}
                       </Badge>
 
-                      {isHost ? (
+                      {isHost && !isMobile ? (
                         <Button
                           variant="outline"
                           size="sm"
@@ -283,7 +292,7 @@ export default function MultiplayerLobby({
               )}
             </div>
 
-            {isHost ? (
+            {isHost && !isMobile ? (
               <div className="mt-4 rounded-md border bg-muted/20 p-3">
                 <div className="text-xs font-medium">Add AI</div>
                 <div className="mt-1 text-[11px] text-muted-foreground">
@@ -513,58 +522,60 @@ export default function MultiplayerLobby({
             ) : null}
           </div>
 
-          <div className="order-first lg:order-none lg:col-span-5">
-            <div className="text-sm font-medium">Start race</div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              The host starts the race for everyone.
-            </div>
-            <div className="mt-3 space-y-2">
-              <Button
-                className="w-full"
-                disabled={!isHost || startLoading}
-                onClick={() => {
-                  if (!isHost) return;
-                  setStartLoading(true);
-                  void (async () => {
-                    try {
-                      await startRoom();
-                    } finally {
-                      setStartLoading(false);
-                    }
-                  })();
-                }}
-              >
-                {!isHost
-                  ? "Waiting for host…"
-                  : startLoading
-                    ? "Starting…"
-                    : "Start race"}
-              </Button>
-
-              <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
-                Open the invite link on other devices, join the lobby, then press Start.
+          {!isMobile && (
+            <div className="order-first lg:order-none lg:col-span-5">
+              <div className="text-sm font-medium">Start race</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                The host starts the race for everyone.
               </div>
+              <div className="mt-3 space-y-2">
+                <Button
+                  className="w-full"
+                  disabled={!isHost || startLoading}
+                  onClick={() => {
+                    if (!isHost) return;
+                    setStartLoading(true);
+                    void (async () => {
+                      try {
+                        await startRoom();
+                      } finally {
+                        setStartLoading(false);
+                      }
+                    })();
+                  }}
+                >
+                  {!isHost
+                    ? "Waiting for host…"
+                    : startLoading
+                      ? "Starting…"
+                      : "Start race"}
+                </Button>
 
-              {qrUrl && inviteLink && (
-                <div className="rounded-md border bg-muted/10 p-3">
-                  <div className="text-xs font-medium">Scan to join</div>
-                  <div className="mt-2 flex flex-col items-center gap-2 sm:flex-row sm:items-start">
-                    <img
-                      src={qrUrl}
-                      alt="Room invite QR code"
-                      className="h-[180px] w-[180px] rounded bg-white p-2"
-                    />
-                    <div className="text-[11px] text-muted-foreground break-all">
-                      {inviteLink}
+                <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+                  Open the invite link on other devices, join the lobby, then press Start.
+                </div>
+
+                {qrUrl && inviteLink && (
+                  <div className="rounded-md border bg-muted/10 p-3">
+                    <div className="text-xs font-medium">Scan to join</div>
+                    <div className="mt-2 flex flex-col items-center gap-2 sm:flex-row sm:items-start">
+                      <img
+                        src={qrUrl}
+                        alt="Room invite QR code"
+                        className="h-[180px] w-[180px] rounded bg-white p-2"
+                      />
+                      <div className="text-[11px] text-muted-foreground break-all">
+                        {inviteLink}
+                      </div>
+                    </div>
+                    <div className="mt-2 text-[11px] text-muted-foreground">
+                      (QR image is fetched from qrserver.com.)
                     </div>
                   </div>
-                  <div className="mt-2 text-[11px] text-muted-foreground">
-                    (QR image is fetched from qrserver.com.)
-                  </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </Card>
     </div>

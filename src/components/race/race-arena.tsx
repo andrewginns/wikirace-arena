@@ -11,6 +11,7 @@ import {
 } from "react";
 import { API_BASE } from "@/lib/constants";
 import { cn } from "@/lib/utils";
+import { useMediaQuery } from "@/lib/use-media-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -83,7 +84,10 @@ const RUN_COLOR_PALETTE = [
 
 const LAYOUT_STORAGE_KEY = "wikirace:arena-layout:v1";
 const MULTIPLAYER_LAYOUT_STORAGE_KEY = "wikirace:arena-layout:multiplayer:v1";
+const MOBILE_LAYOUT_STORAGE_KEY = "wikirace:arena-layout:mobile:v1";
+const MULTIPLAYER_MOBILE_LAYOUT_STORAGE_KEY = "wikirace:arena-layout:multiplayer:mobile:v1";
 const HUMAN_PANE_MODE_STORAGE_KEY = "wikirace:arena-human-pane:v1";
+const MOBILE_HUMAN_PANE_MODE_STORAGE_KEY = "wikirace:arena-human-pane:mobile:v1";
 const HIDDEN_RUNS_STORAGE_KEY_PREFIX = "wikirace:arena-hidden-runs:v1";
 
 type HumanPaneMode = "wiki" | "split" | "links";
@@ -133,9 +137,9 @@ const MULTIPLAYER_DEFAULT_LAYOUT: ArenaLayout = {
 const LEGACY_DEFAULT_MAP_HEIGHT = 420;
 const PREVIOUS_DEFAULT_MAP_HEIGHT = 840;
 
-function loadHumanPaneMode(): HumanPaneMode {
+function loadHumanPaneMode(storageKey: string): HumanPaneMode {
   if (typeof window === "undefined") return "wiki";
-  const raw = window.localStorage.getItem(HUMAN_PANE_MODE_STORAGE_KEY);
+  const raw = window.localStorage.getItem(storageKey);
   if (raw === "wiki" || raw === "split" || raw === "links") return raw;
   return "wiki";
 }
@@ -149,7 +153,12 @@ function normalizeWikiZoom(value: unknown): WikiZoom {
   return 60;
 }
 
-function layoutStorageKey(mode: RaceMode | null): string {
+function layoutStorageKey(mode: RaceMode | null, isMobile: boolean): string {
+  if (isMobile) {
+    return mode === "multiplayer"
+      ? MULTIPLAYER_MOBILE_LAYOUT_STORAGE_KEY
+      : MOBILE_LAYOUT_STORAGE_KEY;
+  }
   return mode === "multiplayer" ? MULTIPLAYER_LAYOUT_STORAGE_KEY : LAYOUT_STORAGE_KEY;
 }
 
@@ -157,11 +166,11 @@ function defaultLayoutForMode(mode: RaceMode | null): ArenaLayout {
   return mode === "multiplayer" ? MULTIPLAYER_DEFAULT_LAYOUT : DEFAULT_LAYOUT;
 }
 
-function loadLayout(mode: RaceMode | null): ArenaLayout {
+function loadLayout(mode: RaceMode | null, isMobile: boolean): ArenaLayout {
   const defaultLayout = defaultLayoutForMode(mode);
   if (typeof window === "undefined") return defaultLayout;
   try {
-    const raw = window.localStorage.getItem(layoutStorageKey(mode));
+    const raw = window.localStorage.getItem(layoutStorageKey(mode, isMobile));
     if (!raw) return defaultLayout;
     const parsed = JSON.parse(raw) as Partial<ArenaLayout>;
     const leaderboardWidthRaw =
@@ -451,6 +460,7 @@ export default function RaceArena({
 
   const raceId = race?.id || null;
   const raceMode: RaceMode | null = race?.mode ?? null;
+  const isMobile = useMediaQuery("(max-width: 639px)");
   const [hiddenRunIds, setHiddenRunIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
@@ -474,13 +484,17 @@ export default function RaceArena({
     return { ...race, runs: visibleRuns };
   }, [race, hiddenRunIds]);
 
-  const [layout, setLayout] = useState<ArenaLayout>(() => loadLayout(raceMode));
-  const prevRaceModeRef = useRef<RaceMode | null>(raceMode);
+  const [layout, setLayout] = useState<ArenaLayout>(() => loadLayout(raceMode, isMobile));
+  const prevLayoutContextRef = useRef<{ raceMode: RaceMode | null; isMobile: boolean }>({
+    raceMode,
+    isMobile,
+  });
   useEffect(() => {
-    if (prevRaceModeRef.current === raceMode) return;
-    prevRaceModeRef.current = raceMode;
-    setLayout(loadLayout(raceMode));
-  }, [raceMode]);
+    const prev = prevLayoutContextRef.current;
+    if (prev.raceMode === raceMode && prev.isMobile === isMobile) return;
+    prevLayoutContextRef.current = { raceMode, isMobile };
+    setLayout(loadLayout(raceMode, isMobile));
+  }, [raceMode, isMobile]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(() => new Set());
   const [compareEnabled, setCompareEnabled] = useState(false);
@@ -499,7 +513,12 @@ export default function RaceArena({
   const [aiMaxSteps, setAiMaxSteps] = useState<string>("");
   const [aiMaxLinks, setAiMaxLinks] = useState<string>("");
   const [aiMaxTokens, setAiMaxTokens] = useState<string>("");
-  const [humanPaneMode, setHumanPaneMode] = useState<HumanPaneMode>(() => loadHumanPaneMode());
+  const [humanPaneMode, setHumanPaneMode] = useState<HumanPaneMode>(() =>
+    loadHumanPaneMode(
+      isMobile ? MOBILE_HUMAN_PANE_MODE_STORAGE_KEY : HUMAN_PANE_MODE_STORAGE_KEY
+    )
+  );
+  const [linksSearchOpen, setLinksSearchOpen] = useState(false);
   const [arenaViewMode, setArenaViewMode] = useState<ArenaViewMode>("article");
   const [linkQuery, setLinkQuery] = useState<string>("");
   const [wikiLoading, setWikiLoading] = useState(false);
@@ -560,13 +579,31 @@ export default function RaceArena({
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(layoutStorageKey(raceMode), JSON.stringify(layout));
-  }, [layout, raceMode]);
+    window.localStorage.setItem(layoutStorageKey(raceMode, isMobile), JSON.stringify(layout));
+  }, [isMobile, layout, raceMode]);
+
+  useEffect(() => {
+    setHumanPaneMode(
+      loadHumanPaneMode(
+        isMobile ? MOBILE_HUMAN_PANE_MODE_STORAGE_KEY : HUMAN_PANE_MODE_STORAGE_KEY
+      )
+    );
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (!isMobile) return;
+    if (humanPaneMode !== "split") return;
+    setHumanPaneMode("wiki");
+  }, [humanPaneMode, isMobile]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(HUMAN_PANE_MODE_STORAGE_KEY, humanPaneMode);
-  }, [humanPaneMode]);
+    if (isMobile && humanPaneMode === "split") return;
+    window.localStorage.setItem(
+      isMobile ? MOBILE_HUMAN_PANE_MODE_STORAGE_KEY : HUMAN_PANE_MODE_STORAGE_KEY,
+      humanPaneMode
+    );
+  }, [humanPaneMode, isMobile]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowTick(Date.now()), 1000);
@@ -832,8 +869,15 @@ export default function RaceArena({
     }
 
     if (selectedRunId && session.runs.some((r) => r.id === selectedRunId)) return;
+
+    const yourDefaultRunId =
+      session.mode === "multiplayer" && session.you_player_id
+        ? session.runs.find(
+            (run) => run.kind === "human" && run.player_id === session.you_player_id
+          )?.id
+        : null;
     const firstRunning = session.runs.find((r) => r.status === "running")?.id;
-    setSelectedRunId(firstRunning || session.runs[0]?.id || null);
+    setSelectedRunId(yourDefaultRunId || firstRunning || session.runs[0]?.id || null);
   }, [session, selectedRunId]);
 
   useEffect(() => {
@@ -961,7 +1005,8 @@ export default function RaceArena({
   useEffect(() => {
     setLinkQuery("");
     setLinkActiveIndex(0);
-  }, [selectedRunId, displayedArticle]);
+    setLinksSearchOpen(false);
+  }, [selectedRunId, wikiArticle]);
 
   const leaderboardSections = useMemo(() => {
     if (!session) {
@@ -1111,23 +1156,50 @@ export default function RaceArena({
   );
 
   const [links, setLinks] = useState<string[]>([]);
+  const [linksTitle, setLinksTitle] = useState<string | null>(null);
   const [linksLoading, setLinksLoading] = useState(false);
   const [linksError, setLinksError] = useState<string | null>(null);
-  const [wikiPageLinks, setWikiPageLinks] = useState<string[] | null>(null);
+  const [wikiPageLinks, setWikiPageLinks] = useState<{ title: string; links: string[] } | null>(
+    null
+  );
+  const linksFetchIdRef = useRef(0);
 
   useEffect(() => {
     setWikiPageLinks(null);
-  }, [displayedArticle, selectedRunIdValue]);
+    setLinksTitle(null);
+  }, [selectedRunIdValue]);
+
+  useEffect(() => {
+    setWikiPageLinks((prev) => {
+      if (!prev) return prev;
+      if (wikiTitlesMatch(prev.title, wikiArticle)) return prev;
+      return null;
+    });
+    setLinksTitle((prev) => {
+      if (!prev) return prev;
+      if (wikiTitlesMatch(prev, wikiArticle)) return prev;
+      return null;
+    });
+  }, [wikiArticle]);
+
+  const linksArticle = wikiPageLinks?.title ?? wikiArticle;
+  const hasLinksForArticle = Boolean(linksTitle && wikiTitlesMatch(linksTitle, linksArticle));
+  const linksReady =
+    hasLinksForArticle &&
+    !linksLoading &&
+    (wikiPageLinks !== null || humanPaneMode === "links");
 
   const sortedLinks = useMemo(() => {
+    if (!hasLinksForArticle) return [];
     return [...links].sort((a, b) => a.localeCompare(b));
-  }, [links]);
+  }, [hasLinksForArticle, links]);
 
   const availableLinks = useMemo(() => {
-    if (!wikiPageLinks) return [];
-    const pageSet = new Set(wikiPageLinks.map((link) => normalizeWikiTitle(link)));
+    if (!linksReady) return [];
+    if (!wikiPageLinks) return sortedLinks;
+    const pageSet = new Set(wikiPageLinks.links.map((link) => normalizeWikiTitle(link)));
     return sortedLinks.filter((link) => pageSet.has(normalizeWikiTitle(link)));
-  }, [sortedLinks, wikiPageLinks]);
+  }, [linksReady, sortedLinks, wikiPageLinks]);
 
   const filteredLinks = useMemo(() => {
     const q = linkQuery.trim().toLowerCase();
@@ -1146,6 +1218,7 @@ export default function RaceArena({
 
   const fetchLinks = useCallback(
     async (articleTitle: string) => {
+      const fetchId = (linksFetchIdRef.current += 1);
       setLinksLoading(true);
       setLinksError(null);
       try {
@@ -1160,24 +1233,31 @@ export default function RaceArena({
         if (!data || !Array.isArray(data.links)) {
           throw new Error("Unexpected API response from get_article_with_links");
         }
+        if (fetchId !== linksFetchIdRef.current) return;
         setLinks(data.links as string[]);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setLinks([]);
-        setLinksError(msg);
-      } finally {
-        setLinksLoading(false);
-      }
-    },
-    []
-  );
+        setLinksTitle(articleTitle);
+	      } catch (err) {
+	        if (fetchId !== linksFetchIdRef.current) return;
+	        const msg = err instanceof Error ? err.message : String(err);
+	        setLinks([]);
+	        setLinksError(msg);
+	      } finally {
+	        if (fetchId === linksFetchIdRef.current) {
+	          setLinksLoading(false);
+	        }
+	      }
+	    },
+	    []
+	  );
 
   useEffect(() => {
     if (!isSelectedHuman) return;
     if (!isSelectedRunning) return;
     if (!selectedRun) return;
-    fetchLinks(displayedArticle);
-  }, [isSelectedHuman, isSelectedRunning, displayedArticle, selectedRun, fetchLinks]);
+    if (!linksArticle) return;
+    if (hasLinksForArticle) return;
+    fetchLinks(linksArticle);
+  }, [fetchLinks, hasLinksForArticle, isSelectedHuman, isSelectedRunning, linksArticle, selectedRun]);
 
   const canControlSelectedRun = useMemo(() => {
     if (!driverValue) return false;
@@ -1214,10 +1294,10 @@ export default function RaceArena({
     }
   }, [driverValue, session]);
 
-  const displayedArticleRef = useRef(displayedArticle);
+  const wikiArticleRef = useRef(wikiArticle);
   useEffect(() => {
-    displayedArticleRef.current = displayedArticle;
-  }, [displayedArticle]);
+    wikiArticleRef.current = wikiArticle;
+  }, [wikiArticle]);
 
   const moveSelectedRunRef = useRef(moveSelectedRun);
   useEffect(() => {
@@ -1307,11 +1387,11 @@ export default function RaceArena({
       if (msg.type === "wikirace:pageLinks") {
         const title = msg.title;
         if (typeof title !== "string" || title.length === 0) return;
-        if (!wikiTitlesMatch(title, displayedArticleRef.current)) return;
+        if (!wikiTitlesMatch(title, wikiArticleRef.current)) return;
         const links = msg.links;
         if (!Array.isArray(links)) return;
         if (links.some((link) => typeof link !== "string")) return;
-        setWikiPageLinks(links as string[]);
+        setWikiPageLinks({ title, links: links as string[] });
         return;
       }
 
@@ -1593,6 +1673,7 @@ export default function RaceArena({
       : null;
   const canAddAi = Boolean(driverValue?.addAi && driverValue.capabilities.canAddAi);
   const defaultLayout = defaultLayoutForMode(session.mode);
+  const isMultiplayerMobile = isMobile && session.mode === "multiplayer";
 
   const addAiPreset = async (
     drafts: Array<{
@@ -1732,7 +1813,7 @@ export default function RaceArena({
 	              />
 	            )}
 
-	            {canAddAi && (
+	            {canAddAi && !isMultiplayerMobile && (
 	              <Dialog open={addAiOpen} onOpenChange={setAddAiOpen}>
 	                <DialogTrigger asChild>
 	                  <Button variant="outline" size="sm">
@@ -1932,7 +2013,7 @@ export default function RaceArena({
 	                New race
 	              </Button>
 	            )}
-	            {hiddenRunIds.size > 0 && (
+	            {hiddenRunIds.size > 0 && !isMultiplayerMobile && (
 	              <Button
 	                variant="outline"
 	                size="sm"
@@ -1941,11 +2022,12 @@ export default function RaceArena({
 	                Show hidden ({hiddenRunIds.size})
 	              </Button>
 	            )}
-	            <Popover open={exportMenuOpen} onOpenChange={setExportMenuOpen}>
-	              <PopoverTrigger asChild>
-	                <Button
-	                  variant="outline"
-	                  size="sm"
+	            {!isMultiplayerMobile && (
+	              <Popover open={exportMenuOpen} onOpenChange={setExportMenuOpen}>
+	                <PopoverTrigger asChild>
+	                  <Button
+	                    variant="outline"
+	                    size="sm"
                   className="gap-2"
                   disabled={session.runs.length === 0}
                 >
@@ -1953,40 +2035,43 @@ export default function RaceArena({
                   Export
                   <ChevronDown className="h-4 w-4 opacity-60" />
                 </Button>
-              </PopoverTrigger>
-              <PopoverContent className="p-1 w-56" align="end">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  className="w-full justify-start"
-                  onClick={() => {
-                    exportRaceJson();
-                    setExportMenuOpen(false);
-                  }}
-                >
-                  Race JSON
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  className="w-full justify-start"
-                  onClick={() => {
-                    exportViewerJson();
-                    setExportMenuOpen(false);
-                  }}
-                >
-                  Viewer JSON
-                </Button>
-              </PopoverContent>
-            </Popover>
-            <Button
-              variant="default"
-              size="sm"
-              onClick={saveToViewer}
-              disabled={session.runs.length === 0}
-            >
-              Save to viewer
-            </Button>
+	                </PopoverTrigger>
+	                <PopoverContent className="p-1 w-56" align="end">
+	                  <Button
+	                    type="button"
+	                    variant="ghost"
+	                    className="w-full justify-start"
+	                    onClick={() => {
+	                      exportRaceJson();
+	                      setExportMenuOpen(false);
+	                    }}
+	                  >
+	                    Race JSON
+	                  </Button>
+	                  <Button
+	                    type="button"
+	                    variant="ghost"
+	                    className="w-full justify-start"
+	                    onClick={() => {
+	                      exportViewerJson();
+	                      setExportMenuOpen(false);
+	                    }}
+	                  >
+	                    Viewer JSON
+	                  </Button>
+	                </PopoverContent>
+	              </Popover>
+	            )}
+	            {!isMultiplayerMobile && (
+	              <Button
+	                variant="default"
+	                size="sm"
+	                onClick={saveToViewer}
+	                disabled={session.runs.length === 0}
+	              >
+	                Save to viewer
+	              </Button>
+	            )}
           </div>
 	        </div>
 	      </Card>
@@ -2007,9 +2092,11 @@ export default function RaceArena({
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button size="sm" onClick={saveToViewer} disabled={session.runs.length === 0}>
-                  Save to viewer
-                </Button>
+                {!isMultiplayerMobile && (
+                  <Button size="sm" onClick={saveToViewer} disabled={session.runs.length === 0}>
+                    Save to viewer
+                  </Button>
+                )}
 
                 <Button
                   size="sm"
@@ -2029,39 +2116,41 @@ export default function RaceArena({
                       : "Copy summary"}
                 </Button>
 
-                <Popover open={finishExportMenuOpen} onOpenChange={setFinishExportMenuOpen}>
-                  <PopoverTrigger asChild>
-                    <Button variant="outline" size="sm" className="gap-2">
-                      <Download className="h-4 w-4" />
-                      Export
-                      <ChevronDown className="h-4 w-4 opacity-60" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="p-1 w-56" align="end">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="w-full justify-start"
-                      onClick={() => {
-                        exportRaceJson();
-                        setFinishExportMenuOpen(false);
-                      }}
-                    >
-                      Race JSON
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="w-full justify-start"
-                      onClick={() => {
-                        exportViewerJson();
-                        setFinishExportMenuOpen(false);
-                      }}
-                    >
-                      Viewer JSON
-                    </Button>
-                  </PopoverContent>
-                </Popover>
+                {!isMultiplayerMobile && (
+                  <Popover open={finishExportMenuOpen} onOpenChange={setFinishExportMenuOpen}>
+                    <PopoverTrigger asChild>
+                      <Button variant="outline" size="sm" className="gap-2">
+                        <Download className="h-4 w-4" />
+                        Export
+                        <ChevronDown className="h-4 w-4 opacity-60" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="p-1 w-56" align="end">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="w-full justify-start"
+                        onClick={() => {
+                          exportRaceJson();
+                          setFinishExportMenuOpen(false);
+                        }}
+                      >
+                        Race JSON
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="w-full justify-start"
+                        onClick={() => {
+                          exportViewerJson();
+                          setFinishExportMenuOpen(false);
+                        }}
+                      >
+                        Viewer JSON
+                      </Button>
+                    </PopoverContent>
+                  </Popover>
+                )}
               </div>
             </div>
 
@@ -2101,12 +2190,12 @@ export default function RaceArena({
           </Card>
         )}
 
-      <div className="flex items-stretch">
+	  <div className="flex flex-col gap-4 sm:flex-row sm:gap-0 items-stretch">
         {layout.leaderboardCollapsed ? null : (
           <>
             <div
-              className="min-w-0 flex-shrink-0"
-              style={{ width: layout.leaderboardWidth }}
+	              className="min-w-0 flex-shrink-0 w-full order-2 sm:order-none"
+	              style={isMobile ? undefined : { width: layout.leaderboardWidth }}
             >
 	          <Card className="p-3 h-full flex flex-col min-h-0">
 	            <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2175,7 +2264,7 @@ export default function RaceArena({
                   </Button>
                 )}
 
-                {selectedRunIds.size > 0 && driverValue?.deleteRuns && (
+	              {selectedRunIds.size > 0 && driverValue?.deleteRuns && !isMultiplayerMobile && (
                   <Dialog>
                     <DialogTrigger asChild>
                       <Button variant="outline" size="sm" className="h-8 gap-2">
@@ -2556,16 +2645,16 @@ export default function RaceArena({
 	          </Card>
             </div>
 
-            <ResizeHandle
-              axis="x"
-              onDelta={resizeLeaderboardWidth}
-              onDoubleClick={() => setLayout(defaultLayout)}
-              className="w-2 flex-shrink-0"
-            />
+	            <ResizeHandle
+	              axis="x"
+	              onDelta={resizeLeaderboardWidth}
+	              onDoubleClick={() => setLayout(defaultLayout)}
+	              className="hidden sm:block w-2 flex-shrink-0 order-3 sm:order-none"
+	            />
           </>
         )}
 
-	        <div className="min-w-0 flex-1">
+	        <div className="min-w-0 flex-1 order-1 sm:order-none">
 	          <div className="flex flex-col">
               <Card className="p-3 mb-3">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -2698,7 +2787,7 @@ export default function RaceArena({
 	                      </Button>
 	                    )}
 
-	                    {selectedRun && driverValue?.deleteRuns && (
+	                    {selectedRun && driverValue?.deleteRuns && !isMultiplayerMobile && (
 	                      <Dialog>
 	                        <DialogTrigger asChild>
 	                          <Button variant="outline" size="sm" className="gap-2">
@@ -2769,29 +2858,40 @@ export default function RaceArena({
                         <div className="text-sm font-medium">Available links</div>
                         <div className="flex items-center gap-2">
                           {humanPaneMode === "links" && (
-                            <Tabs
-                              value={humanPaneMode}
-                              onValueChange={(v) => setHumanPaneMode(v as HumanPaneMode)}
-                            >
-                              <TabsList className="h-8">
-                                <TabsTrigger value="wiki" className="text-xs px-2">
-                                  Wiki
-                                </TabsTrigger>
-                                <TabsTrigger value="split" className="text-xs px-2">
-                                  Split
-                                </TabsTrigger>
-                                <TabsTrigger value="links" className="text-xs px-2">
-                                  Links
-                                </TabsTrigger>
-                              </TabsList>
-                            </Tabs>
+                            isMobile ? (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-8 text-xs"
+                                onClick={() => setHumanPaneMode("wiki")}
+                              >
+                                Back to Wikipedia
+                              </Button>
+                            ) : (
+                              <Tabs
+                                value={humanPaneMode}
+                                onValueChange={(v) => setHumanPaneMode(v as HumanPaneMode)}
+                              >
+                                <TabsList className="h-8">
+                                  <TabsTrigger value="wiki" className="text-xs px-2">
+                                    Wiki
+                                  </TabsTrigger>
+                                  <TabsTrigger value="split" className="text-xs px-2">
+                                    Split
+                                  </TabsTrigger>
+                                  <TabsTrigger value="links" className="text-xs px-2">
+                                    Links
+                                  </TabsTrigger>
+                                </TabsList>
+                              </Tabs>
+                            )
                           )}
                         </div>
                       </div>
                       <Separator className="my-3" />
 
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        {linksLoading || wikiPageLinks === null ? (
+                        {!linksReady ? (
                           <span>Loading…</span>
                         ) : linkQuery.trim().length > 0 ? (
                           <span>
@@ -2804,75 +2904,96 @@ export default function RaceArena({
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          value={linkQuery}
-                          onChange={(e) => {
-                            setLinkQuery(e.target.value);
-                            setLinkActiveIndex(0);
-                          }}
-                          onKeyDown={(e) => {
-                            if (replayEnabled) return;
-                            if (!canControlSelectedRun) return;
-                            if (e.key === "ArrowDown") {
-                              e.preventDefault();
-                              setLinkActiveIndex((prev) =>
-                                clampNumber(prev + 1, 0, Math.max(0, visibleLinks.length - 1))
-                              );
-                              return;
-                            }
-                            if (e.key === "ArrowUp") {
-                              e.preventDefault();
-                              setLinkActiveIndex((prev) =>
-                                clampNumber(prev - 1, 0, Math.max(0, visibleLinks.length - 1))
-                              );
-                              return;
-                            }
-                            if (e.key !== "Enter") return;
-                            const q = linkQuery.trim().toLowerCase();
-                            const activeLink = visibleLinks[linkActiveIndex];
-                            if (activeLink) {
-                              void moveSelectedRun(activeLink);
-                              setLinkQuery("");
-                              return;
-                            }
-                            if (q.length === 0) return;
+	                      {isMobile && !linksSearchOpen && linkQuery.trim().length === 0 ? (
+	                        <Button
+	                          variant="outline"
+	                          size="sm"
+	                          className="h-9 w-full justify-start text-muted-foreground"
+	                          onClick={() => setLinksSearchOpen(true)}
+	                          disabled={
+	                            replayEnabled || !canControlSelectedRun || !linksReady
+	                          }
+	                        >
+	                          Search links…
+	                        </Button>
+	                      ) : (
+	                        <div className="flex items-center gap-2">
+	                          <Input
+	                            value={linkQuery}
+	                            onChange={(e) => {
+	                              setLinkQuery(e.target.value);
+	                              setLinkActiveIndex(0);
+	                            }}
+	                            onKeyDown={(e) => {
+	                              if (replayEnabled) return;
+	                              if (!canControlSelectedRun) return;
+	                              if (e.key === "ArrowDown") {
+	                                e.preventDefault();
+	                                setLinkActiveIndex((prev) =>
+	                                  clampNumber(
+	                                    prev + 1,
+	                                    0,
+	                                    Math.max(0, visibleLinks.length - 1)
+	                                  )
+	                                );
+	                                return;
+	                              }
+	                              if (e.key === "ArrowUp") {
+	                                e.preventDefault();
+	                                setLinkActiveIndex((prev) =>
+	                                  clampNumber(
+	                                    prev - 1,
+	                                    0,
+	                                    Math.max(0, visibleLinks.length - 1)
+	                                  )
+	                                );
+	                                return;
+	                              }
+	                              if (e.key !== "Enter") return;
+	                              const q = linkQuery.trim().toLowerCase();
+	                              const activeLink = visibleLinks[linkActiveIndex];
+	                              if (activeLink) {
+	                                void moveSelectedRun(activeLink);
+	                                setLinkQuery("");
+	                                return;
+	                              }
+	                              if (q.length === 0) return;
 
-                            const exact = filteredLinks.find((link) => link.toLowerCase() === q);
-                            if (exact) {
-                              void moveSelectedRun(exact);
-                              setLinkQuery("");
-                              return;
-                            }
+	                              const exact = filteredLinks.find(
+	                                (link) => link.toLowerCase() === q
+	                              );
+	                              if (exact) {
+	                                void moveSelectedRun(exact);
+	                                setLinkQuery("");
+	                                return;
+	                              }
 
-                            if (filteredLinks.length === 1) {
-                              void moveSelectedRun(filteredLinks[0]);
-                              setLinkQuery("");
-                            }
-                          }}
-                          placeholder="Search links…"
-                          className="h-9"
-                          disabled={
-                            replayEnabled ||
-                            !canControlSelectedRun ||
-                            linksLoading ||
-                            wikiPageLinks === null
-                          }
-                        />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-9"
-                          onClick={() => setLinkQuery("")}
-                          disabled={linkQuery.trim().length === 0}
-                        >
-                          Clear
-                        </Button>
-                      </div>
+	                              if (filteredLinks.length === 1) {
+	                                void moveSelectedRun(filteredLinks[0]);
+	                                setLinkQuery("");
+	                              }
+	                            }}
+	                            placeholder="Search links…"
+	                            className="h-9"
+	                            disabled={
+	                              replayEnabled || !canControlSelectedRun || !linksReady
+	                            }
+	                          />
+	                          <Button
+	                            variant="outline"
+	                            size="sm"
+	                            className="h-9"
+	                            onClick={() => setLinkQuery("")}
+	                            disabled={linkQuery.trim().length === 0}
+	                          >
+	                            Clear
+	                          </Button>
+	                        </div>
+	                      )}
 
                       {selectedRun.status !== "running" ? (
                         <div className="mt-3 text-sm text-muted-foreground">Run finished.</div>
-                      ) : linksLoading || wikiPageLinks === null ? (
+	                      ) : !linksReady ? (
                         <div className="mt-3 text-sm text-muted-foreground">Loading links…</div>
                       ) : linksError ? (
                         <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-md p-3">
@@ -2882,7 +3003,7 @@ export default function RaceArena({
                       ) : availableLinks.length === 0 ? (
                         <div className="mt-3 text-sm text-muted-foreground">
                           No links found for{" "}
-                          <span className="font-medium">{displayedArticle}</span>.
+                          <span className="font-medium">{linksArticle}</span>.
                         </div>
                       ) : filteredLinks.length === 0 ? (
                         <div className="mt-3 text-sm text-muted-foreground">
@@ -2941,24 +3062,34 @@ export default function RaceArena({
                       <div className="flex items-center justify-between">
                         <div className="text-sm font-medium">Wikipedia view</div>
                         <div className="flex items-center gap-2 min-w-0">
-                          {selectedRun?.kind === "human" && (
-                            <Tabs
-                              value={humanPaneMode}
-                              onValueChange={(v) => setHumanPaneMode(v as HumanPaneMode)}
-                            >
-                              <TabsList className="h-8">
-                                <TabsTrigger value="wiki" className="text-xs px-2">
-                                  Wiki
-                                </TabsTrigger>
-                                <TabsTrigger value="split" className="text-xs px-2">
-                                  Split
-                                </TabsTrigger>
-                                <TabsTrigger value="links" className="text-xs px-2">
-                                  Links
-                                </TabsTrigger>
-                              </TabsList>
-                            </Tabs>
-                          )}
+                          {selectedRun?.kind === "human" &&
+                            (isMobile ? (
+                              <Button
+                                variant="default"
+                                size="sm"
+                                className="h-8 text-xs"
+                                onClick={() => setHumanPaneMode("links")}
+                              >
+                                Links
+                              </Button>
+                            ) : (
+                              <Tabs
+                                value={humanPaneMode}
+                                onValueChange={(v) => setHumanPaneMode(v as HumanPaneMode)}
+                              >
+                                <TabsList className="h-8">
+                                  <TabsTrigger value="wiki" className="text-xs px-2">
+                                    Wiki
+                                  </TabsTrigger>
+                                  <TabsTrigger value="split" className="text-xs px-2">
+                                    Split
+                                  </TabsTrigger>
+                                  <TabsTrigger value="links" className="text-xs px-2">
+                                    Links
+                                  </TabsTrigger>
+                                </TabsList>
+                              </Tabs>
+                            ))}
                           <Select
                             value={String(wikiZoomValue)}
                             onValueChange={(v) =>
@@ -3048,8 +3179,9 @@ export default function RaceArena({
 	                  axis="y"
 	                  onDelta={resizeWikiVsRunDetails}
 	                  onDoubleClick={() => setLayout(defaultLayout)}
-	                  className="h-2"
+	                  className="hidden sm:block h-2"
 	                />
+	                <div className="h-2 sm:hidden" aria-hidden="true" />
 	              </>
 	            )}
 
@@ -3076,6 +3208,7 @@ export default function RaceArena({
 	                          {selectedRun.kind}
 	                        </Badge>
 	                        {selectedRun.kind === "llm" &&
+	                        !isMultiplayerMobile &&
 	                        driverValue?.cancelRun &&
 	                        driverValue.capabilities.canCancelRun(selectedRun.id) &&
 	                        selectedRun.status === "running" ? (
@@ -3088,6 +3221,7 @@ export default function RaceArena({
 	                          </Button>
 	                        ) : null}
 	                        {selectedRun.kind === "llm" &&
+	                        !isMultiplayerMobile &&
 	                        driverValue?.restartRun &&
 	                        driverValue.capabilities.canRestartRun(selectedRun.id) ? (
 	                          <Button
@@ -3545,12 +3679,15 @@ export default function RaceArena({
 		            {mapOnTopInResults ? null : autoExpandRunDetails ? (
 		              <div className="h-2" aria-hidden="true" />
 		            ) : (
-	              <ResizeHandle
-	                axis="y"
-	                onDelta={resizeRunDetailsVsMap}
-	                onDoubleClick={() => setLayout(defaultLayout)}
-	                className="h-2"
-	              />
+	              <>
+	                <ResizeHandle
+	                  axis="y"
+	                  onDelta={resizeRunDetailsVsMap}
+	                  onDoubleClick={() => setLayout(defaultLayout)}
+	                  className="hidden sm:block h-2"
+	                />
+	                <div className="h-2 sm:hidden" aria-hidden="true" />
+	              </>
 		            )}
 
 		            <div
@@ -3727,7 +3864,10 @@ export default function RaceArena({
 	              onDoubleClick={() =>
 	                setLayout((prev) => ({ ...prev, mapHeight: defaultLayout.mapHeight }))
 	              }
-	              className={cn("h-2", mapOnTopInResults ? "order-2" : null)}
+	              className={cn(
+	                "hidden sm:block h-2",
+	                mapOnTopInResults ? "order-2" : null
+	              )}
 	            />
 
               {selectedRunFinished && (
