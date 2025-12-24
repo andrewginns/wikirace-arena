@@ -16,6 +16,7 @@ export default function MultiplayerArena({
   wsStatus,
   error,
   onLeave,
+  onNewRound,
   modelList = [],
   isServerConnected = true,
   onGoToViewerTab,
@@ -27,6 +28,7 @@ export default function MultiplayerArena({
   wsStatus: string;
   error: string | null;
   onLeave: () => void;
+  onNewRound?: () => void;
   modelList?: string[];
   isServerConnected?: boolean;
   onGoToViewerTab?: () => void;
@@ -59,6 +61,11 @@ export default function MultiplayerArena({
               <Badge variant="outline" className="text-[11px]">
                 {isHost ? `Host: ${playerName}` : playerName}
               </Badge>
+            ) : null}
+            {isHost && onNewRound ? (
+              <Button variant="secondary" size="sm" onClick={onNewRound}>
+                New round
+              </Button>
             ) : null}
             <Button variant="outline" size="sm" onClick={onLeave}>
               Leave

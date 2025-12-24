@@ -9,11 +9,13 @@ import { Separator } from "@/components/ui/separator";
 import { VirtualizedCombobox } from "@/components/ui/virtualized-combobox";
 import WikiArticlePreview from "@/components/wiki-article-preview";
 import { cn } from "@/lib/utils";
+import { ArrowLeftRight, Shuffle } from "lucide-react";
 import {
   createRoom,
   joinRoom,
   useMultiplayerStore,
 } from "@/lib/multiplayer-store";
+import popularNodes from "../../../results/popular_nodes.json";
 
 type Preset = {
   id: "sprint" | "classic" | "marathon";
@@ -50,6 +52,12 @@ function toOptionalPositiveInt(value: string): number | null {
   if (!Number.isFinite(parsed)) return null;
   const asInt = Math.floor(parsed);
   return asInt > 0 ? asInt : null;
+}
+
+function pickRandom(items: string[]) {
+  if (items.length === 0) return null;
+  const idx = Math.floor(Math.random() * items.length);
+  return items[idx] || null;
 }
 
 export default function MultiplayerSetup({
@@ -94,6 +102,38 @@ export default function MultiplayerSetup({
     if (allArticles.length > 0) return allArticles;
     return [startPage, targetPage];
   }, [allArticles, startPage, targetPage]);
+
+  const randomPool = useMemo(() => {
+    if (popularNodes.length > 0) return popularNodes;
+    return options;
+  }, [options]);
+
+  const selectRandomArticle = (setter: (article: string) => void) => {
+    const picked = pickRandom(randomPool);
+    if (!picked) return;
+    setter(picked);
+  };
+
+  const selectRandomMatchup = () => {
+    const start = pickRandom(randomPool);
+    if (!start) return;
+    let target = pickRandom(randomPool);
+    if (!target) return;
+    let tries = 0;
+    while (target === start && tries < 10) {
+      target = pickRandom(randomPool);
+      if (!target) return;
+      tries += 1;
+    }
+
+    setStartPage(start);
+    setTargetPage(target);
+  };
+
+  const swapPages = () => {
+    setStartPage(targetPage);
+    setTargetPage(startPage);
+  };
 
   const canCreate =
     isServerConnected &&
@@ -154,6 +194,29 @@ export default function MultiplayerSetup({
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="sm:col-span-2 flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  onClick={selectRandomMatchup}
+                  disabled={randomPool.length === 0}
+                >
+                  <Shuffle className="h-4 w-4" />
+                  Random matchup
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  onClick={swapPages}
+                >
+                  <ArrowLeftRight className="h-4 w-4" />
+                  Swap
+                </Button>
+              </div>
               <div>
                 <Label className="text-xs">Start</Label>
                 <div className="mt-1 space-y-2">
@@ -166,6 +229,17 @@ export default function MultiplayerSetup({
                   />
                   <div className="flex items-center justify-between gap-2">
                     <WikiArticlePreview title={startPage} size={40} />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 whitespace-nowrap"
+                      onClick={() => selectRandomArticle(setStartPage)}
+                      disabled={randomPool.length === 0}
+                    >
+                      <Shuffle className="h-3.5 w-3.5 mr-1" />
+                      Random
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -182,6 +256,17 @@ export default function MultiplayerSetup({
                   />
                   <div className="flex items-center justify-between gap-2">
                     <WikiArticlePreview title={targetPage} size={40} />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 whitespace-nowrap"
+                      onClick={() => selectRandomArticle(setTargetPage)}
+                      disabled={randomPool.length === 0}
+                    >
+                      <Shuffle className="h-3.5 w-3.5 mr-1" />
+                      Random
+                    </Button>
                   </div>
                 </div>
               </div>

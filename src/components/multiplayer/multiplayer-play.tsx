@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import MultiplayerSetup from "@/components/multiplayer/multiplayer-setup";
+import MultiplayerRoundSetup from "@/components/multiplayer/multiplayer-round-setup";
 import MultiplayerLobby from "@/components/multiplayer/multiplayer-lobby";
 import MultiplayerArena from "@/components/multiplayer/multiplayer-arena";
 import {
@@ -23,12 +24,19 @@ export default function MultiplayerPlay({
 }) {
   const { room, player_id, player_name, join_url, ws_status, error } = useMultiplayerStore();
   const [bootstrapped, setBootstrapped] = useState(false);
+  const [roundSetupOpen, setRoundSetupOpen] = useState(false);
 
   useEffect(() => {
     if (bootstrapped) return;
     setBootstrapped(true);
     void bootstrapMultiplayer();
   }, [bootstrapped]);
+
+  useEffect(() => {
+    if (room) return;
+    if (!roundSetupOpen) return;
+    setRoundSetupOpen(false);
+  }, [room, roundSetupOpen]);
 
   const prefillRoomId = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -70,6 +78,19 @@ export default function MultiplayerPlay({
     );
   }
 
+  const isHost = Boolean(player_id && player_id === room.owner_player_id);
+  if (roundSetupOpen && isHost) {
+    return (
+      <MultiplayerRoundSetup
+        room={room}
+        allArticles={allArticles}
+        isServerConnected={isServerConnected}
+        error={error}
+        onCancel={() => setRoundSetupOpen(false)}
+      />
+    );
+  }
+
   if (room.status === "lobby") {
     return (
       <MultiplayerLobby
@@ -94,6 +115,7 @@ export default function MultiplayerPlay({
       wsStatus={ws_status}
       error={error}
       onLeave={leaveRoom}
+      onNewRound={isHost ? () => setRoundSetupOpen(true) : undefined}
       modelList={modelList}
       isServerConnected={isServerConnected}
       onGoToViewerTab={onGoToViewerTab}

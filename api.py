@@ -186,6 +186,12 @@ class StartRoomRequest(BaseModel):
     player_id: str
 
 
+class NewRoundRequest(BaseModel):
+    player_id: str
+    start_article: str
+    destination_article: str
+
+
 class MoveRoomRequest(BaseModel):
     player_id: str
     to_article: str
@@ -284,7 +290,7 @@ class SQLiteDB:
             return None
 
         current = resolved
-        seen = {current.lower()}
+        seen = {current}
 
         for _ in range(6):
             title, links = self.get_article_with_links(current)
@@ -296,10 +302,9 @@ class SQLiteDB:
             candidate = self.resolve_title(links[0])
             if not candidate:
                 break
-            key = candidate.lower()
-            if key in seen:
+            if candidate in seen:
                 break
-            seen.add(key)
+            seen.add(candidate)
             current = candidate
 
         return current
@@ -1103,6 +1108,8 @@ async def _finish_llm_run(
                 return
 
         step_article = forced_article or article
+        if step_type in ("move", "lose"):
+            step_article = db.canonical_title(step_article) or step_article
         step: dict[str, Any] = {"type": step_type, "article": step_article, "at": updated_at}
         if metadata:
             step["metadata"] = metadata
@@ -1501,9 +1508,14 @@ def _inject_wiki_bridge(html: str) -> str:
 
       var title = titleFromHref(href)
 
-      // ignore same-page section links
+      // Keep same-article section links inside the proxy iframe origin.
+      // Some pages include full /wiki/Title#Section hrefs; with <base> set to
+      // simple.wikipedia.org those would navigate away and break tracking.
       try {
-        if (title.replaceAll("_", " ") === decodePart(location.pathname.slice("/wiki/".length)).replaceAll("_", " ") && anchor.hash) {
+        var currentTitle = getCurrentTitle()
+        if (currentTitle && title && anchor.hash && title.replaceAll("_", " ") === currentTitle.replaceAll("_", " ")) {
+          event.preventDefault()
+          window.location.hash = anchor.hash
           return
         }
       } catch {
@@ -1840,6 +1852,71 @@ async def start_room(room_id: str, body: StartRoomRequest):
     return room
 
 
+@app.post("/rooms/{room_id}/new_round", response_model=RoomStateV1)
+async def new_round(room_id: str, body: NewRoundRequest):
+    room_id = _normalize_room_id(room_id)
+    lock = ROOM_LOCKS.get(room_id)
+    room = ROOMS.get(room_id)
+    if not lock or not room:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Room not found ({room_id}). Rooms are stored in memory; "
+                "if the server restarted/reloaded, create a new room."
+            ),
+        )
+
+    start_raw = body.start_article.replace("_", " ").strip()
+    destination_raw = body.destination_article.replace("_", " ").strip()
+    if not start_raw or not destination_raw:
+        raise HTTPException(status_code=400, detail="Start and target are required")
+
+    start_resolved = db.canonical_title(start_raw)
+    destination_resolved = db.canonical_title(destination_raw)
+    if not start_resolved:
+        raise HTTPException(status_code=404, detail="Start article not found")
+    if not destination_resolved:
+        raise HTTPException(status_code=404, detail="Target article not found")
+    if _titles_match(start_resolved, destination_resolved):
+        raise HTTPException(status_code=400, detail="Start and target must be different")
+
+    updated_at = _now_iso()
+
+    async with lock:
+        if body.player_id != room.get("owner_player_id"):
+            raise HTTPException(status_code=403, detail="Only the host can start a new round")
+
+        # Stop any in-flight LLM tasks from the previous round.
+        _cancel_room_tasks(room_id)
+
+        room["start_article"] = start_resolved
+        room["destination_article"] = destination_resolved
+        room["status"] = "lobby"
+        room["started_at"] = None
+        room["finished_at"] = None
+
+        rules = room.get("rules") or {}
+        max_hops = rules.get("max_hops")
+        max_hops = max_hops if isinstance(max_hops, int) and max_hops > 0 else 20
+
+        for run in room.get("runs", []):
+            if not isinstance(run, dict):
+                continue
+            run["status"] = "not_started"
+            run["started_at"] = None
+            run["finished_at"] = None
+            run["result"] = None
+            run["steps"] = []
+
+            if run.get("kind") == "human":
+                run["max_steps"] = max_hops
+
+        room["updated_at"] = updated_at
+
+    await _broadcast_room(room_id)
+    return room
+
+
 @app.post("/rooms/{room_id}/move", response_model=RoomStateV1)
 async def room_move(room_id: str, body: MoveRoomRequest):
     room_id = _normalize_room_id(room_id)
@@ -1862,6 +1939,8 @@ async def room_move(room_id: str, body: MoveRoomRequest):
     if not resolved:
         raise HTTPException(status_code=404, detail="Article not found")
 
+    canonical_next = db.canonical_title(resolved) or resolved
+
     updated_at = _now_iso()
     changed = False
 
@@ -1882,7 +1961,11 @@ async def room_move(room_id: str, body: MoveRoomRequest):
         if not isinstance(current_article, str) or not current_article:
             current_article = room.get("start_article")
 
-        if isinstance(current_article, str) and _titles_match(current_article, resolved):
+        if (
+            isinstance(current_article, str)
+            and current_article.replace("_", " ").strip()
+            == canonical_next.replace("_", " ").strip()
+        ):
             return room
 
         current_hops = max(0, len(steps) - 1)
@@ -1903,13 +1986,12 @@ async def room_move(room_id: str, body: MoveRoomRequest):
         if not title:
             raise HTTPException(status_code=400, detail=f"Current article not found ({current_article})")
 
-        if resolved not in links:
+        if resolved not in links and canonical_next not in links:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid move: '{resolved}' is not a link from '{title}'",
             )
 
-        canonical_next = db.canonical_title(resolved)
         canonical_target = db.canonical_title(destination_article)
 
         if canonical_next and canonical_target and _titles_match(canonical_next, canonical_target):
@@ -1923,11 +2005,11 @@ async def room_move(room_id: str, body: MoveRoomRequest):
             run["status"] = "finished"
             run["result"] = "lose"
             run["finished_at"] = updated_at
-            step_article = resolved
+            step_article = canonical_next
             step_metadata = {"reason": "max_hops", "max_hops": max_hops}
         else:
             step_type = "move"
-            step_article = resolved
+            step_article = canonical_next
 
         step: dict[str, Any] = {"type": step_type, "article": step_article, "at": updated_at}
         if step_metadata:

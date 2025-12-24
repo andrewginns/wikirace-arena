@@ -439,6 +439,35 @@ export async function startRoom() {
   }
 }
 
+export async function setupNewRound(startArticle: string, destinationArticle: string) {
+  const roomId = state.room?.id;
+  const playerId = state.player_id;
+  if (!roomId || !playerId) {
+    setError("Not connected to a room");
+    return null;
+  }
+
+  setError(null);
+  try {
+    const room = await apiJson<MultiplayerRoomV1>(
+      `/rooms/${encodeURIComponent(roomId)}/new_round`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          player_id: playerId,
+          start_article: startArticle,
+          destination_article: destinationArticle,
+        }),
+      }
+    );
+    setState({ ...state, room, error: null });
+    return room;
+  } catch (err) {
+    setError(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
 export async function addLlmParticipant(
   request: Omit<AddLlmRunRequest, "requested_by_player_id">
 ) {
