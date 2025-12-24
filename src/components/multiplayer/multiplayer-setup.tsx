@@ -80,6 +80,7 @@ export default function MultiplayerSetup({
   const [maxHops, setMaxHops] = useState<string>("20");
   const [maxLinks, setMaxLinks] = useState<string>("");
   const [maxTokens, setMaxTokens] = useState<string>("");
+  const [includeImageLinks, setIncludeImageLinks] = useState<boolean>(false);
 
   const matchedPreset = useMemo(() => {
     const hops = toOptionalPositiveInt(maxHops) ?? 20;
@@ -337,6 +338,22 @@ export default function MultiplayerSetup({
                   className={cn("mt-1", !maxTokens && "text-muted-foreground")}
                 />
               </div>
+
+              <div className="sm:col-span-3 rounded-md border bg-muted/10 p-3 flex items-start justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="text-xs font-medium">Include image-only links</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Show links that only appear as icons/images (e.g. flags).
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4"
+                  checked={includeImageLinks}
+                  onChange={(e) => setIncludeImageLinks(e.target.checked)}
+                  aria-label="Include image-only links"
+                />
+              </div>
             </div>
 
             <Button
@@ -356,6 +373,7 @@ export default function MultiplayerSetup({
                         max_hops: toOptionalPositiveInt(maxHops) ?? 20,
                         max_links: toOptionalPositiveInt(maxLinks),
                         max_tokens: toOptionalPositiveInt(maxTokens),
+                        include_image_links: includeImageLinks,
                       },
                     });
                   } finally {
