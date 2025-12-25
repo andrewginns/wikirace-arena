@@ -13,6 +13,7 @@ export type MultiplayerRulesV1 = {
   max_links: number | null;
   max_tokens: number | null;
   include_image_links: boolean;
+  disable_links_view: boolean;
 };
 
 export type MultiplayerPlayerV1 = {

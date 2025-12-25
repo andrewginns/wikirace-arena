@@ -107,6 +107,11 @@ type ArenaCssVars = CSSProperties & {
   ["--links-pane-width"]?: string;
 };
 
+type DirectLinkMiss = {
+  hopIndex: number;
+  fromArticle: string;
+};
+
 type WikiZoom = 60 | 75 | 90 | 100;
 
 type ArenaLayout = {
@@ -129,6 +134,8 @@ const DEFAULT_LAYOUT: ArenaLayout = {
   wikiZoom: 60,
 };
 
+const COULD_HAVE_WON_LINK_CACHE_SIZE = 64;
+
 const MULTIPLAYER_DEFAULT_LAYOUT: ArenaLayout = {
   ...DEFAULT_LAYOUT,
   leaderboardCollapsed: true,
@@ -136,6 +143,14 @@ const MULTIPLAYER_DEFAULT_LAYOUT: ArenaLayout = {
 
 const LEGACY_DEFAULT_MAP_HEIGHT = 420;
 const PREVIOUS_DEFAULT_MAP_HEIGHT = 840;
+
+function trimCacheMap<T>(cache: Map<string, T>, maxSize: number) {
+  while (cache.size > maxSize) {
+    const firstKey = cache.keys().next().value as string | undefined;
+    if (!firstKey) return;
+    cache.delete(firstKey);
+  }
+}
 
 function loadHumanPaneMode(storageKey: string): HumanPaneMode {
   if (typeof window === "undefined") return "wiki";
@@ -528,6 +543,8 @@ export default function RaceArena({
   const [replayHop, setReplayHop] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [mapPreviewArticle, setMapPreviewArticle] = useState<string | null>(null);
+  const [directLinkMiss, setDirectLinkMiss] = useState<DirectLinkMiss | null>(null);
+  const couldHaveWonLinkCacheRef = useRef<Map<string, Set<string> | null>>(new Map());
   const lastIframeNavigateRef = useRef<{ title: string; at: number } | null>(null);
   const wikiIframeRef = useRef<HTMLIFrameElement | null>(null);
   const winToastTimeoutRef = useRef<number | null>(null);
@@ -939,6 +956,7 @@ export default function RaceArena({
   const selectedRunFinished = selectedRunStatus !== null && selectedRunStatus !== "running";
   const lockWikiNavigation = replayEnabled && !selectedRunFinished;
   const includeImageLinks = Boolean(session?.rules.include_image_links);
+  const disableLinksView = Boolean(session?.rules.disable_links_view);
 
   const wikiHeightMultiplier = session?.mode === "multiplayer" && isSelectedHuman ? 2 : 1;
   const effectiveWikiHeight = layout.wikiHeight * wikiHeightMultiplier;
@@ -1004,10 +1022,85 @@ export default function RaceArena({
   }, [selectedRunId, selectedRunKind, selectedRunStatus, humanPaneMode]);
 
   useEffect(() => {
+    if (!disableLinksView) return;
+    if (selectedRunKind !== "human") return;
+    if (humanPaneMode !== "wiki") setHumanPaneMode("wiki");
+  }, [disableLinksView, selectedRunKind, humanPaneMode]);
+
+  useEffect(() => {
     setLinkQuery("");
     setLinkActiveIndex(0);
     setLinksSearchOpen(false);
   }, [selectedRunId, wikiArticle]);
+
+  const fetchOutgoingLinkSet = useCallback(async (articleTitle: string) => {
+    const cache = couldHaveWonLinkCacheRef.current;
+    const key = normalizeWikiTitle(articleTitle);
+    if (cache.has(key)) return cache.get(key) ?? null;
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/get_article_with_links/${encodeURIComponent(articleTitle)}`
+      );
+      if (!response.ok) {
+        cache.set(key, null);
+        trimCacheMap(cache, COULD_HAVE_WON_LINK_CACHE_SIZE);
+        return null;
+      }
+      const data = (await response.json()) as { links?: unknown };
+      if (!data || !Array.isArray(data.links)) {
+        cache.set(key, null);
+        trimCacheMap(cache, COULD_HAVE_WON_LINK_CACHE_SIZE);
+        return null;
+      }
+      const normalized = new Set<string>();
+      for (const link of data.links) {
+        if (typeof link === "string") normalized.add(normalizeWikiTitle(link));
+      }
+      cache.set(key, normalized);
+      trimCacheMap(cache, COULD_HAVE_WON_LINK_CACHE_SIZE);
+      return normalized;
+    } catch {
+      cache.set(key, null);
+      trimCacheMap(cache, COULD_HAVE_WON_LINK_CACHE_SIZE);
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDirectLinkMiss(null);
+
+    if (!session) return;
+    if (!selectedRun) return;
+    if (!selectedRunFinished) return;
+    if (selectedRun.steps.length < 2) return;
+
+    const destination = session.destination_article;
+    const normalizedDestination = normalizeWikiTitle(destination);
+
+    void (async () => {
+      for (let hopIndex = 0; hopIndex < selectedRun.steps.length - 1; hopIndex += 1) {
+        const fromArticle = selectedRun.steps[hopIndex]?.article;
+        const nextArticle = selectedRun.steps[hopIndex + 1]?.article;
+        if (!fromArticle || !nextArticle) continue;
+        if (wikiTitlesMatch(nextArticle, destination)) continue;
+
+        const outgoing = await fetchOutgoingLinkSet(fromArticle);
+        if (cancelled) return;
+        if (!outgoing) continue;
+
+        if (outgoing.has(normalizedDestination)) {
+          setDirectLinkMiss({ hopIndex, fromArticle });
+          return;
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchOutgoingLinkSet, selectedRun, selectedRunFinished, session]);
 
   const leaderboardSections = useMemo(() => {
     if (!session) {
@@ -2848,19 +2941,25 @@ export default function RaceArena({
 	                    <div
 	                      className={cn(
 	                        "grid grid-cols-1 gap-4 h-full min-h-0",
-	                        selectedRun?.kind === "human" && humanPaneMode === "split"
+	                        selectedRun?.kind === "human" &&
+                              !disableLinksView &&
+                              humanPaneMode === "split"
 	                          ? "xl:grid-cols-[var(--links-pane-width)_auto_1fr] xl:gap-0"
 	                          : "xl:grid-cols-12"
 	                      )}
 	                      style={
-	                        selectedRun?.kind === "human" && humanPaneMode === "split"
+	                        selectedRun?.kind === "human" &&
+                              !disableLinksView &&
+                              humanPaneMode === "split"
 	                          ? ({
 	                              "--links-pane-width": `${layout.linksPaneWidth}px`,
 	                            } as ArenaCssVars)
 	                          : undefined
 	                      }
 	                    >
-	                  {selectedRun?.kind === "human" && humanPaneMode !== "wiki" && (
+	                  {selectedRun?.kind === "human" &&
+                          !disableLinksView &&
+                          humanPaneMode !== "wiki" && (
 	                    <Card
 	                      className={cn(
 	                        "p-3 h-full flex flex-col min-h-0",
@@ -2870,7 +2969,7 @@ export default function RaceArena({
                       <div className="flex items-center justify-between">
                         <div className="text-sm font-medium">Available links</div>
                         <div className="flex items-center gap-2">
-                          {humanPaneMode === "links" && (
+                          {!disableLinksView && humanPaneMode === "links" && (
                             isMobile ? (
                               <Button
                                 variant="outline"
@@ -3048,7 +3147,9 @@ export default function RaceArena({
 	                    </Card>
 	                  )}
 
-	                  {selectedRun?.kind === "human" && humanPaneMode === "split" && (
+	                  {selectedRun?.kind === "human" &&
+                        !disableLinksView &&
+                        humanPaneMode === "split" && (
 	                    <ResizeHandle
 	                      axis="x"
 	                      onDelta={resizeLinksPaneWidth}
@@ -3062,11 +3163,15 @@ export default function RaceArena({
 	                    />
 	                  )}
 	
-	                  {selectedRun?.kind !== "human" || humanPaneMode !== "links" ? (
+	                  {selectedRun?.kind !== "human" ||
+                        disableLinksView ||
+                        humanPaneMode !== "links" ? (
 	                    <Card
 	                      className={cn(
 	                        "p-3 overflow-hidden h-full flex flex-col min-h-0",
-	                        selectedRun?.kind === "human" && humanPaneMode === "split"
+	                        selectedRun?.kind === "human" &&
+                              !disableLinksView &&
+                              humanPaneMode === "split"
 	                          ? "order-first xl:order-none min-w-0"
 	                          : "xl:col-span-12"
 	                      )}
@@ -3076,6 +3181,7 @@ export default function RaceArena({
                         <div className="text-sm font-medium">Wikipedia view</div>
                         <div className="flex items-center gap-2 min-w-0">
                           {selectedRun?.kind === "human" &&
+                            !disableLinksView &&
                             (isMobile ? (
                               <Button
                                 variant="default"
@@ -3338,6 +3444,36 @@ export default function RaceArena({
 
 	                    <Separator className="my-2" />
 	                    <div className="space-y-2">
+	                      {directLinkMiss && (
+	                        <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+	                          <div className="flex items-start justify-between gap-3">
+	                            <div className="min-w-0">
+	                              <div className="text-sm font-medium text-amber-900">
+	                                You could have won
+	                              </div>
+	                              <div className="mt-1 text-xs text-amber-900/80">
+	                                Hop {directLinkMiss.hopIndex}: on{" "}
+	                                <span className="font-medium">{directLinkMiss.fromArticle}</span>
+	                                , there was a direct link to{" "}
+	                                <span className="font-medium">{session.destination_article}</span>.
+	                              </div>
+	                            </div>
+	                            <Button
+	                              variant="outline"
+	                              size="sm"
+	                              className="h-8 text-xs shrink-0"
+	                              onClick={() => {
+	                                setMapPreviewArticle(null);
+	                                setReplayEnabled(true);
+	                                setReplayPlaying(false);
+	                                setReplayHop(directLinkMiss.hopIndex);
+	                              }}
+	                            >
+	                              Jump to hop
+	                            </Button>
+	                          </div>
+	                        </div>
+	                      )}
 	                      <div className="flex items-center justify-between gap-2">
 	                        <div className="text-xs text-muted-foreground">Path</div>
 	                        <div className="flex items-center gap-2">

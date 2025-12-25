@@ -14,6 +14,7 @@ export type RaceRules = {
   maxLinks: number | null;
   maxTokens: number | null;
   includeImageLinks: boolean;
+  disableLinksView: boolean;
 };
 
 export type RaceConfig = {
