@@ -13,6 +13,8 @@ const SEEN_PLAY_TAB_STORAGE_KEY = "wikirace:seen-play-tab:v1";
 
 function loadStoredTab(): TabValue {
   if (typeof window === "undefined") return "view";
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("room")) return "play";
   const stored = window.localStorage.getItem(LAST_TAB_STORAGE_KEY);
   if (stored === "view" || stored === "play" || stored === "about") return stored;
   return "view";

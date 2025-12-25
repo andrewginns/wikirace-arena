@@ -80,19 +80,37 @@ const PRESETS: Preset[] = [
     id: "sprint",
     name: "Sprint",
     description: "Fast rounds. Great for humans.",
-    rules: { maxHops: 12, maxLinks: 200, maxTokens: 1500, includeImageLinks: false },
+    rules: {
+      maxHops: 12,
+      maxLinks: 200,
+      maxTokens: 1500,
+      includeImageLinks: false,
+      disableLinksView: false,
+    },
   },
   {
     id: "classic",
     name: "Classic",
     description: "Balanced default.",
-    rules: { maxHops: 20, maxLinks: null, maxTokens: null, includeImageLinks: false },
+    rules: {
+      maxHops: 20,
+      maxLinks: null,
+      maxTokens: null,
+      includeImageLinks: false,
+      disableLinksView: false,
+    },
   },
   {
     id: "marathon",
     name: "Marathon",
     description: "More hops + more thinking time.",
-    rules: { maxHops: 35, maxLinks: null, maxTokens: null, includeImageLinks: false },
+    rules: {
+      maxHops: 35,
+      maxLinks: null,
+      maxTokens: null,
+      includeImageLinks: false,
+      disableLinksView: false,
+    },
   },
 ];
 
@@ -525,7 +543,11 @@ export default function RaceSetup({
                           key={p.id}
                           type="button"
                           onClick={() =>
-                            setRules((r) => ({ ...p.rules, includeImageLinks: r.includeImageLinks }))
+                            setRules((r) => ({
+                              ...p.rules,
+                              includeImageLinks: r.includeImageLinks,
+                              disableLinksView: r.disableLinksView,
+                            }))
                           }
                           className={cn(
                             "rounded-md border bg-background/60 p-2 text-left transition-colors hover:bg-muted/40",
@@ -704,6 +726,27 @@ export default function RaceSetup({
                         setRules((r) => ({ ...r, includeImageLinks: e.target.checked }))
                       }
                       aria-label="Include image-only links"
+                    />
+                  </div>
+
+                  <div className="md:col-span-2 rounded-lg border bg-muted/20 p-3 flex items-start justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        Disable links view
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Hides the Links/Split panel controls (link clicking in the article still works).
+                      </div>
+                    </div>
+
+                    <input
+                      type="checkbox"
+                      className="mt-1 h-4 w-4"
+                      checked={rules.disableLinksView}
+                      onChange={(e) =>
+                        setRules((r) => ({ ...r, disableLinksView: e.target.checked }))
+                      }
+                      aria-label="Disable links view"
                     />
                   </div>
                 </div>

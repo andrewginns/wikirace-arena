@@ -109,6 +109,7 @@ class RoomRulesV1(BaseModel):
     max_links: Optional[int] = None
     max_tokens: Optional[int] = None
     include_image_links: bool = False
+    disable_links_view: bool = False
 
 
 class RoomPlayerV1(BaseModel):
@@ -476,7 +477,13 @@ def _detect_lan_ip() -> Optional[str]:
 
 
 def _normalize_room_rules(raw: Optional[RoomRulesV1]) -> dict[str, Any]:
-    default = {"max_hops": 20, "max_links": None, "max_tokens": None, "include_image_links": False}
+    default = {
+        "max_hops": 20,
+        "max_links": None,
+        "max_tokens": None,
+        "include_image_links": False,
+        "disable_links_view": False,
+    }
     if raw is None:
         return default
 
@@ -495,12 +502,14 @@ def _normalize_room_rules(raw: Optional[RoomRulesV1]) -> dict[str, Any]:
         max_tokens = raw.max_tokens if isinstance(raw.max_tokens, int) and raw.max_tokens > 0 else None
 
     include_image_links = bool(raw.include_image_links)
+    disable_links_view = bool(raw.disable_links_view)
 
     return {
         "max_hops": max_hops,
         "max_links": max_links,
         "max_tokens": max_tokens,
         "include_image_links": include_image_links,
+        "disable_links_view": disable_links_view,
     }
 
 

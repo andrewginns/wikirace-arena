@@ -21,6 +21,8 @@ const PLAY_MODE_STORAGE_KEY = "wikirace:play-mode:v1";
 
 function loadStoredPlayMode(): PlayMode {
   if (typeof window === "undefined") return "local";
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("room")) return "multiplayer";
   const stored = window.localStorage.getItem(PLAY_MODE_STORAGE_KEY);
   if (stored === "multiplayer") return "multiplayer";
   return "local";
@@ -123,6 +125,7 @@ export default function PlayTab({
         max_links: config.rules.maxLinks,
         max_tokens: config.rules.maxTokens,
         include_image_links: config.rules.includeImageLinks,
+        disable_links_view: config.rules.disableLinksView,
       },
       humanTimer: {
         auto_start_on_first_action: config.humanTimer?.autoStartOnFirstAction ?? true,

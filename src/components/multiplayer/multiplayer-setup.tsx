@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -81,6 +81,7 @@ export default function MultiplayerSetup({
   const [maxLinks, setMaxLinks] = useState<string>("");
   const [maxTokens, setMaxTokens] = useState<string>("");
   const [includeImageLinks, setIncludeImageLinks] = useState<boolean>(false);
+  const [disableLinksView, setDisableLinksView] = useState<boolean>(false);
 
   const matchedPreset = useMemo(() => {
     const hops = toOptionalPositiveInt(maxHops) ?? 20;
@@ -98,6 +99,14 @@ export default function MultiplayerSetup({
 
   const [joinRoomId, setJoinRoomId] = useState<string>(prefillRoomId || "");
   const [joinName, setJoinName] = useState<string>(player_name || "");
+  const joinNameWasEmptyRef = useRef(joinName.trim().length === 0);
+  const joinNameInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!prefillRoomId) return;
+    if (!joinNameWasEmptyRef.current) return;
+    joinNameInputRef.current?.focus();
+  }, [prefillRoomId]);
 
   const options = useMemo(() => {
     if (allArticles.length > 0) return allArticles;
@@ -354,6 +363,22 @@ export default function MultiplayerSetup({
                   aria-label="Include image-only links"
                 />
               </div>
+
+              <div className="sm:col-span-3 rounded-md border bg-muted/10 p-3 flex items-start justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="text-xs font-medium">Disable links view</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Hides the Links/Split panel controls (link clicking in the article still works).
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4"
+                  checked={disableLinksView}
+                  onChange={(e) => setDisableLinksView(e.target.checked)}
+                  aria-label="Disable links view"
+                />
+              </div>
             </div>
 
             <Button
@@ -374,6 +399,7 @@ export default function MultiplayerSetup({
                         max_links: toOptionalPositiveInt(maxLinks),
                         max_tokens: toOptionalPositiveInt(maxTokens),
                         include_image_links: includeImageLinks,
+                        disable_links_view: disableLinksView,
                       },
                     });
                   } finally {
@@ -409,6 +435,7 @@ export default function MultiplayerSetup({
               <Label className="text-xs">Your name</Label>
               <Input
                 value={joinName}
+                ref={joinNameInputRef}
                 onChange={(e) => setJoinName(e.target.value)}
                 placeholder="Player"
                 className="mt-1"
