@@ -63,7 +63,10 @@ Backend + DB (local API):
 
 - **Hop definition:** a hop is one move/link-click between articles (edge count). Many `steps[]` arrays include the start page at index 0, so hops are typically `max(0, steps.length - 1)` (see `src/lib/session-utils.ts` / `src/lib/hops.ts`).
 - **Unlimited budgets:** LLM limits use `null` to mean “unlimited” for `max_links` and `max_tokens` (stored in session rules and passed down to runs). Classic/Marathon presets default to unlimited; Sprint retains finite defaults.
+- **Invite links:** opening `/?room=room_XXXX` should land on **Play → Multiplayer** and focus **Join a room → Your name** when it’s empty.
 - **Token accounting:** per-step metadata may include either `prompt_tokens`/`completion_tokens` or `input_tokens`/`output_tokens` (and sometimes `total_tokens`). The UI aggregates these across a run and also displays per-step usage in the Arena run details.
+- **Disable links view:** `disable_links_view` is a rules flag (default `false`) that hides Links/Split panel controls for human runs. It must not disable link clicking inside the Wikipedia iframe.
+- **“You could have won” callout:** only show when there was a Direct-Link-to-Target Miss (a hop where the current page linked directly to the destination, but the next step was not the destination).
 - **Multiplayer “finished” behavior:** rooms stay open even after all runs are complete so hosts can add more players/AIs. The Arena shows “Race finished” based on run statuses, not `room.status`.
 - **Arena layout storage:** local + multiplayer layout preferences are stored separately (`wikirace:arena-layout:v1` vs `wikirace:arena-layout:multiplayer:v1`). Multiplayer defaults to a collapsed leaderboard.
 
@@ -81,4 +84,8 @@ Backend + DB (local API):
 ## Security & Configuration Tips
 
 - Don’t commit secrets; `.env` is ignored. Common env vars: `VITE_API_BASE`, `WIKISPEEDIA_DB_PATH`, provider keys (e.g. `OPENAI_API_KEY`), and multiplayer controls like `WIKIRACE_ROOM_TTL_SECONDS`, `WIKIRACE_ROOM_CLEANUP_INTERVAL_SECONDS`, `WIKIRACE_MAX_LLM_RUNS_PER_ROOM`, `WIKIRACE_MAX_CONCURRENT_LLM_CALLS`, `WIKIRACE_PUBLIC_HOST`.
+- Wiki iframe proxy tuning (server-side `/wiki/*` fetch + cache): `WIKIRACE_WIKI_CACHE_MAX_ENTRIES`, `WIKIRACE_WIKI_CACHE_TTL_SECONDS`, `WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS`, `WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS`, `WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS`.
+- Title resolution caching: `WIKIRACE_RESOLVE_ARTICLE_CACHE_TTL_SECONDS` controls `Cache-Control` max-age for `/resolve_article/*`.
+- Debugging wiki proxy cache: responses include `X-Wiki-Proxy-Cache: HIT|MISS|OFFLINE`.
+- Client-side title resolution cache persists in `sessionStorage` under `wikirace:resolvedTitleCache:v1`.
 - The app stores state in `localStorage`; clearing `wikirace:*` keys can help when debugging UI behavior.
