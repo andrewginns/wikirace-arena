@@ -3,17 +3,19 @@ import json
 import os
 import re
 import asyncio
+import time
 import secrets
 import string
 import socket
 import subprocess
 import sys
 import ipaddress
+from collections import OrderedDict
 from urllib.parse import quote
 from typing import Tuple, List, Optional, Any
 from functools import lru_cache
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -261,6 +263,10 @@ class SQLiteDB:
         if not title:
             return None
 
+        return self._resolve_title_normalized(title)
+
+    @lru_cache(maxsize=32768)
+    def _resolve_title_normalized(self, title: str) -> Optional[str]:
         self.cursor.execute(
             "SELECT title FROM core_articles WHERE title = ? LIMIT 1",
             (title,),
@@ -348,7 +354,27 @@ def _env_positive_int(name: str, default: int) -> int:
 
 WIKIRACE_MAX_LLM_RUNS_PER_ROOM = _env_positive_int("WIKIRACE_MAX_LLM_RUNS_PER_ROOM", 8)
 WIKIRACE_MAX_CONCURRENT_LLM_CALLS = _env_positive_int("WIKIRACE_MAX_CONCURRENT_LLM_CALLS", 3)
+WIKIRACE_WIKI_CACHE_MAX_ENTRIES = _env_positive_int("WIKIRACE_WIKI_CACHE_MAX_ENTRIES", 256)
+WIKIRACE_WIKI_CACHE_TTL_SECONDS = _env_positive_int("WIKIRACE_WIKI_CACHE_TTL_SECONDS", 900)
+WIKIRACE_RESOLVE_ARTICLE_CACHE_TTL_SECONDS = _env_positive_int(
+    "WIKIRACE_RESOLVE_ARTICLE_CACHE_TTL_SECONDS", 3600
+)
+WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS = _env_positive_int(
+    "WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS", 2
+)
+WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS = _env_positive_int(
+    "WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS", 5
+)
+WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS = _env_positive_int(
+    "WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS", 32
+)
 LLM_CALL_SEMAPHORE = asyncio.Semaphore(WIKIRACE_MAX_CONCURRENT_LLM_CALLS)
+
+
+_WIKI_HTTP_SESSION: Optional[aiohttp.ClientSession] = None
+_WIKI_PROXY_CACHE: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
+_WIKI_PROXY_INFLIGHT: dict[str, asyncio.Task[str]] = {}
+_WIKI_PROXY_LOCK = asyncio.Lock()
 
 
 def _now_iso() -> str:
@@ -1235,6 +1261,29 @@ ROOM_CLEANUP_INTERVAL_SECONDS = int(os.getenv("WIKIRACE_ROOM_CLEANUP_INTERVAL_SE
 
 
 @app.on_event("startup")
+async def _start_wiki_http_session() -> None:
+    global _WIKI_HTTP_SESSION
+
+    if _WIKI_HTTP_SESSION is not None and not _WIKI_HTTP_SESSION.closed:
+        return
+
+    timeout = aiohttp.ClientTimeout(
+        total=WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS,
+        connect=WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS,
+    )
+    connector = aiohttp.TCPConnector(
+        limit=WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS,
+        ttl_dns_cache=300,
+    )
+    headers = {"User-Agent": "wikiracing-llms"}
+    _WIKI_HTTP_SESSION = aiohttp.ClientSession(
+        timeout=timeout,
+        headers=headers,
+        connector=connector,
+    )
+
+
+@app.on_event("startup")
 async def _start_room_cleanup_task():
     async def _cleanup_loop():
         while True:
@@ -1273,6 +1322,21 @@ async def _shutdown_room_tasks():
         _cancel_room_tasks(room_id)
 
 
+@app.on_event("shutdown")
+async def _shutdown_wiki_http_session() -> None:
+    global _WIKI_HTTP_SESSION
+
+    session = _WIKI_HTTP_SESSION
+    _WIKI_HTTP_SESSION = None
+
+    if session is None:
+        return
+    if session.closed:
+        return
+
+    await session.close()
+
+
 def _inject_base_href(html: str) -> str:
     base_tag = f'<base href="{SIMPLEWIKI_ORIGIN}/" />'
     head_match = re.search(r"<head[^>]*>", html, flags=re.IGNORECASE)
@@ -1294,9 +1358,129 @@ def _inject_wiki_bridge(html: str) -> str:
 (function () {
   var replayMode = false
   var includeImageLinks = false
+
+  var RESOLVED_TITLE_CACHE_KEY = "wikirace:resolvedTitleCache:v1"
+  var RESOLVED_TITLE_CACHE_MAX_ENTRIES = 512
+  var RESOLVED_TITLE_CACHE_TTL_MS = 60 * 60 * 1000
+  var RESOLVED_TITLE_CACHE_NEGATIVE_TTL_MS = 5 * 60 * 1000
+
   var resolvedTitleCache = Object.create(null)
+  var resolvedTitleCacheExpiresAt = Object.create(null)
+  var resolvedTitleCacheOrder = []
+  var resolvedTitleCacheDirty = false
+  var resolvedTitleCacheFlushTimer = null
   var navRequestSeq = 0
   var pendingNavigate = Object.create(null)
+
+  function removeFromArray(list, value) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] === value) {
+        list.splice(i, 1)
+        return
+      }
+    }
+  }
+
+  function trimResolvedTitleCache() {
+    while (resolvedTitleCacheOrder.length > RESOLVED_TITLE_CACHE_MAX_ENTRIES) {
+      var oldest = resolvedTitleCacheOrder.shift()
+      if (!oldest) continue
+      delete resolvedTitleCache[oldest]
+      delete resolvedTitleCacheExpiresAt[oldest]
+    }
+  }
+
+  function persistResolvedTitleCache() {
+    try {
+      if (!window.sessionStorage) return
+
+      var now = Date.now()
+      var entries = []
+
+      for (var i = 0; i < resolvedTitleCacheOrder.length; i++) {
+        var title = resolvedTitleCacheOrder[i]
+        if (typeof title !== "string" || !title) continue
+
+        var expiresAt = resolvedTitleCacheExpiresAt[title]
+        if (typeof expiresAt !== "number" || expiresAt <= now) continue
+        if (!Object.prototype.hasOwnProperty.call(resolvedTitleCache, title)) continue
+
+        var value = resolvedTitleCache[title]
+        if (!(typeof value === "string" && value) && value !== false) continue
+
+        entries.push([title, value, expiresAt])
+      }
+
+      window.sessionStorage.setItem(
+        RESOLVED_TITLE_CACHE_KEY,
+        JSON.stringify({ version: 1, entries: entries })
+      )
+    } catch {
+      // ignore
+    }
+  }
+
+  function scheduleResolvedTitleCacheFlush() {
+    if (resolvedTitleCacheFlushTimer) return
+
+    resolvedTitleCacheFlushTimer = window.setTimeout(function () {
+      resolvedTitleCacheFlushTimer = null
+      if (!resolvedTitleCacheDirty) return
+      resolvedTitleCacheDirty = false
+      persistResolvedTitleCache()
+    }, 200)
+  }
+
+  function rememberResolvedTitle(title, resolved, ttlMs) {
+    if (!title) return
+
+    resolvedTitleCache[title] = resolved || false
+    resolvedTitleCacheExpiresAt[title] = Date.now() + ttlMs
+
+    removeFromArray(resolvedTitleCacheOrder, title)
+    resolvedTitleCacheOrder.push(title)
+    trimResolvedTitleCache()
+
+    resolvedTitleCacheDirty = true
+    scheduleResolvedTitleCacheFlush()
+  }
+
+  function loadResolvedTitleCache() {
+    try {
+      if (!window.sessionStorage) return
+
+      var raw = window.sessionStorage.getItem(RESOLVED_TITLE_CACHE_KEY)
+      if (!raw) return
+
+      var parsed = JSON.parse(raw)
+      var entries = parsed && parsed.entries
+      if (!Array.isArray(entries)) return
+
+      var now = Date.now()
+      for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i]
+        if (!Array.isArray(entry) || entry.length < 3) continue
+
+        var title = entry[0]
+        var value = entry[1]
+        var expiresAt = entry[2]
+
+        if (typeof title !== "string" || !title) continue
+        if (typeof expiresAt !== "number" || expiresAt <= now) continue
+        if (!(typeof value === "string" && value) && value !== false) continue
+
+        resolvedTitleCache[title] = value
+        resolvedTitleCacheExpiresAt[title] = expiresAt
+        resolvedTitleCacheOrder.push(title)
+      }
+
+      trimResolvedTitleCache()
+    } catch {
+      // ignore
+    }
+  }
+
+  loadResolvedTitleCache()
 
   function setReplayMode(enabled) {
     replayMode = !!enabled
@@ -1410,7 +1594,13 @@ def _inject_wiki_bridge(html: str) -> str:
     if (!title) return Promise.resolve(null)
 
     if (Object.prototype.hasOwnProperty.call(resolvedTitleCache, title)) {
-      return Promise.resolve(resolvedTitleCache[title] || null)
+      var expiresAt = resolvedTitleCacheExpiresAt[title]
+      if (typeof expiresAt === "number" && expiresAt > Date.now()) {
+        return Promise.resolve(resolvedTitleCache[title] || null)
+      }
+      delete resolvedTitleCache[title]
+      delete resolvedTitleCacheExpiresAt[title]
+      removeFromArray(resolvedTitleCacheOrder, title)
     }
 
     var url = window.location.origin + "/resolve_article/" + encodeURIComponent(title)
@@ -1424,7 +1614,11 @@ def _inject_wiki_bridge(html: str) -> str:
           data && data.exists && typeof data.title === "string" && data.title
             ? data.title
             : null
-        resolvedTitleCache[title] = resolved || false
+        rememberResolvedTitle(
+          title,
+          resolved,
+          resolved ? RESOLVED_TITLE_CACHE_TTL_MS : RESOLVED_TITLE_CACHE_NEGATIVE_TTL_MS
+        )
         return resolved
       })
       .catch(function () {
@@ -1654,8 +1848,11 @@ async def get_article(article_title: str):
 
 
 @app.get("/resolve_article/{article_title:path}", response_model=ResolveTitleResponse)
-async def resolve_article(article_title: str):
+async def resolve_article(article_title: str, response: Response):
     """Resolve a potentially non-canonical title to the DB's stored title."""
+
+    max_age = max(0, int(WIKIRACE_RESOLVE_ARTICLE_CACHE_TTL_SECONDS))
+    response.headers["Cache-Control"] = f"public, max-age={max_age}"
 
     resolved = db.resolve_title(article_title)
     return ResolveTitleResponse(exists=resolved is not None, title=resolved)
@@ -2463,6 +2660,67 @@ def _offline_wiki_html(title: str, links: list[str], error: Optional[str] = None
 </html>"""
 
 
+def _normalize_wiki_proxy_title(article_title: str) -> str:
+    return (article_title or "").replace(" ", "_").strip()
+
+
+def _wiki_proxy_headers(cache_status: str) -> dict[str, str]:
+    max_age = max(0, int(WIKIRACE_WIKI_CACHE_TTL_SECONDS))
+    return {
+        "Cache-Control": f"public, max-age={max_age}",
+        "X-Wiki-Proxy-Cache": cache_status,
+    }
+
+
+def _wiki_proxy_cache_get(key: str, now: float) -> Optional[str]:
+    entry = _WIKI_PROXY_CACHE.get(key)
+    if not entry:
+        return None
+
+    expires_at, html = entry
+    if expires_at <= now:
+        _WIKI_PROXY_CACHE.pop(key, None)
+        return None
+
+    _WIKI_PROXY_CACHE.move_to_end(key)
+    return html
+
+
+def _wiki_proxy_cache_set(key: str, html: str, now: float) -> None:
+    _WIKI_PROXY_CACHE[key] = (now + WIKIRACE_WIKI_CACHE_TTL_SECONDS, html)
+    _WIKI_PROXY_CACHE.move_to_end(key)
+
+    while len(_WIKI_PROXY_CACHE) > WIKIRACE_WIKI_CACHE_MAX_ENTRIES:
+        _WIKI_PROXY_CACHE.popitem(last=False)
+
+
+async def _fetch_remote_wiki_html(remote_url: str) -> str:
+    session = _WIKI_HTTP_SESSION
+    if session is None or session.closed:
+        timeout = aiohttp.ClientTimeout(
+            total=WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS,
+            connect=WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS,
+        )
+        headers = {"User-Agent": "wikiracing-llms"}
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as temp_session:
+            async with temp_session.get(remote_url, allow_redirects=True) as response:
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"Failed to fetch wiki page ({response.status})"
+                    )
+                return await response.text()
+
+    async with session.get(remote_url, allow_redirects=True) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Failed to fetch wiki page ({response.status})")
+        return await response.text()
+
+
+async def _fetch_rewritten_wiki_html(remote_url: str) -> str:
+    html = await _fetch_remote_wiki_html(remote_url)
+    return _rewrite_wiki_html(html)
+
+
 @app.get("/wiki/{article_title:path}", response_class=HTMLResponse)
 async def wiki_proxy(article_title: str):
     """Proxy a Simple Wikipedia page and inject a click bridge.
@@ -2471,29 +2729,48 @@ async def wiki_proxy(article_title: str):
     into game moves.
     """
 
-    safe_title = article_title.replace(" ", "_")
+    resolved_title = db.resolve_title(article_title)
+    safe_title = _normalize_wiki_proxy_title(resolved_title or article_title)
     remote_url = f"{SIMPLEWIKI_ORIGIN}/wiki/{quote(safe_title, safe='')}"
 
-    timeout = aiohttp.ClientTimeout(total=20)
-    headers = {"User-Agent": "wikiracing-llms"}
+    cache_key = resolved_title or safe_title
+    now = time.monotonic()
+
+    async with _WIKI_PROXY_LOCK:
+        cached = _wiki_proxy_cache_get(cache_key, now)
+        if cached is not None:
+            return HTMLResponse(content=cached, headers=_wiki_proxy_headers("HIT"))
+
+        inflight = _WIKI_PROXY_INFLIGHT.get(cache_key)
+        if inflight is None:
+            inflight = asyncio.create_task(_fetch_rewritten_wiki_html(remote_url))
+            _WIKI_PROXY_INFLIGHT[cache_key] = inflight
 
     try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(remote_url, allow_redirects=True) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"Failed to fetch wiki page ({response.status})")
-                html = await response.text()
+        rewritten_html = await inflight
 
-        return HTMLResponse(content=_rewrite_wiki_html(html))
+        async with _WIKI_PROXY_LOCK:
+            if _WIKI_PROXY_INFLIGHT.get(cache_key) is inflight:
+                _WIKI_PROXY_INFLIGHT.pop(cache_key, None)
+            _wiki_proxy_cache_set(cache_key, rewritten_html, time.monotonic())
+
+        return HTMLResponse(content=rewritten_html, headers=_wiki_proxy_headers("MISS"))
     except Exception as exc:
+        async with _WIKI_PROXY_LOCK:
+            if _WIKI_PROXY_INFLIGHT.get(cache_key) is inflight:
+                _WIKI_PROXY_INFLIGHT.pop(cache_key, None)
+
         # Offline fallback: generate a minimal HTML page from DB links so the
         # arena can still function (and Playwright can click links) without an
         # external network connection.
-        resolved = db.resolve_title(article_title) or article_title.replace("_", " ").strip()
+        resolved = resolved_title or article_title.replace("_", " ").strip()
         title, links = db.get_article_with_links(resolved)
         display_title = title or resolved or article_title
         fallback_html = _offline_wiki_html(display_title, links, str(exc))
-        return HTMLResponse(content=_inject_wiki_bridge(fallback_html))
+        return HTMLResponse(
+            content=_inject_wiki_bridge(fallback_html),
+            headers=_wiki_proxy_headers("OFFLINE"),
+        )
 
 
 def _get_field(obj: Any, key: str) -> Any:
