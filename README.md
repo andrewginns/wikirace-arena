@@ -21,11 +21,16 @@ Race from one Wikipedia article to another using only hyperlinks — either as a
 
 ![Play Game](docs/ux-audit/screenshots/validation/p1-play-setup-with-quick-start.png)
 
+**Multiplayer** (mobile participant)
+
+![Multiplayer (mobile)](docs/ux-audit/screenshots/multiplayer/playwright-multiplayer-mobile-participant-arena.png)
+
 ## What’s in this repo
 
 - **Frontend**: Vite + React + TypeScript UI in `src/`
   - **Play Game**: create a matchup, add humans + models, run races, compare paths
   - **View Runs**: load evaluation JSON, filter/autoplay runs, visualize paths, “Try this path” to jump into gameplay
+  - **Design system**: Tailwind v4 + shadcn/ui primitives, with theme tokens in `src/index.css` (colors, radius, shadows, fonts)
 - **Backend**: FastAPI app in `api.py`
   - Serves article + link data from a local SQLite DB (`wikihop.db`)
   - Optional LLM move generation via LiteLLM (`POST /llm/chat`)
@@ -238,16 +243,24 @@ It isn’t a standalone visualization file — the visualizations live in the Re
 
 ## UX audit screenshots
 
-The repo includes a UX audit folder at `docs/ux-audit/` with screenshots and a recommendations doc.
+The repo includes a UX audit folder at `docs/ux-audit/` with Playwright-generated screenshots.
 
-To regenerate screenshots (requires Playwright):
+To regenerate screenshots (requires Playwright browsers):
 
 ```bash
 npx playwright install chromium
 
-# Make sure both servers are running:
-make server
-yarn dev
+# One-shot (starts API + UI, runs Playwright, then shuts down)
+make ux-audit
 
-yarn ux:audit
+# Headed mode
+make ux-audit-headed
 ```
+
+Notes:
+
+- The UX audit script captures **desktop and mobile** layouts, including a **mobile participant** joining a multiplayer room.
+- If you prefer to run servers yourself, you can still do:
+  - `make server`
+  - `yarn dev`
+  - `yarn ux:audit`

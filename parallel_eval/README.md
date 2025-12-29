@@ -17,10 +17,16 @@ uv sync
 
 ### Get the `wikihop.db` database
 
-Generate the DB via the script (recommended/required):
+Generate the DB via the script (recommended/required).
+It builds `parallel_eval/wikihop.db` from Wikimedia SQL dumps (no scraping) and caches downloads under `parallel_eval/wikimedia_dumps/`.
 
 ```bash
-uv run python get_wikihop.py --output parallel_eval/wikihop.db
+uv run python get_wikihop.py \
+  --wiki simplewiki \
+  --dump-date latest \
+  --download \
+  --output parallel_eval/wikihop.db \
+  --overwrite
 ```
 
 Why: direct download URLs have been brittle; a 404/error page saved to disk can cause `SQLITE_NOTADB` when opened by SQLite.
@@ -68,6 +74,9 @@ Notes:
 
 ## Run a parallel evaluation (many games)
 
+Note: `proctor.py` resolves relative paths (like `--db-path`, `--article-list`, `--output-dir`) relative to the `parallel_eval/` folder.
+So when running from the repo root, pass `--db-path wikihop.db` (or omit the flag) rather than `--db-path parallel_eval/wikihop.db`.
+
 `proctor.py` runs a full cross-product of `article_list × article_list` (excluding same→same), optionally with multiple trials.
 
 The default article list is `supernodes.json`.
@@ -79,7 +88,7 @@ uv run python parallel_eval/proctor.py \
   --model 'hosted_vllm/Qwen/Qwen3-30B-A3B' \
   --api-base 'http://localhost:8000/v1' \
   --workers 200 \
-  --db-path parallel_eval/wikihop.db
+  --db-path wikihop.db
 ```
 
 Outputs (in `--output-dir`, default `parallel_eval/proctor_tmp`):
