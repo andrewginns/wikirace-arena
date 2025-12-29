@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { StatusChip } from "@/components/ui/status-chip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -142,7 +143,7 @@ export default function MultiplayerLobby({
   return (
     <div className="space-y-4">
       {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
           {error}
         </div>
       )}
@@ -233,12 +234,9 @@ export default function MultiplayerLobby({
                       {p.id}
                     </div>
                   </div>
-                  <Badge
-                    variant={p.connected ? "default" : "outline"}
-                    className="text-[11px]"
-                  >
+                  <StatusChip status={p.connected ? "active" : "neutral"}>
                     {p.connected ? "Connected" : "Offline"}
-                  </Badge>
+                  </StatusChip>
                 </div>
               ))}
             </div>
@@ -264,12 +262,23 @@ export default function MultiplayerLobby({
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Badge
-                        variant={run.status === "finished" ? "default" : "outline"}
-                        className="text-[11px]"
+                      <StatusChip
+                        status={
+                          run.status === "running"
+                            ? "running"
+                            : run.status === "finished"
+                              ? run.result === "win"
+                                ? "finished"
+                                : run.result === "lose"
+                                  ? "error"
+                                  : "neutral"
+                              : "neutral"
+                        }
                       >
-                        {run.status === "finished" ? run.result || "finished" : run.status}
-                      </Badge>
+                        {run.status === "finished"
+                          ? run.result || "finished"
+                          : run.status.replaceAll("_", " ")}
+                      </StatusChip>
 
                       {isHost && !isMobile ? (
                         <Button

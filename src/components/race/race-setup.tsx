@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { StatusChip } from "@/components/ui/status-chip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -1104,7 +1105,7 @@ export default function RaceSetup({
 	                          key={p.id}
 	                          className={cn(
 	                            "rounded-lg border p-3 bg-card flex flex-col gap-3",
-	                            isDuplicate && "border-red-300 bg-red-50/40"
+	                            isDuplicate && "border-status-error/30 bg-status-error/5"
 	                          )}
 	                        >
 	                          <div className="flex items-center justify-between gap-3">
@@ -1119,12 +1120,7 @@ export default function RaceSetup({
 	                                  {p.kind === "human" ? "Human" : "Model"}
 	                                </div>
 	                                {isDuplicate && (
-	                                  <Badge
-	                                    variant="outline"
-	                                    className="text-[11px] border-red-200 bg-red-50 text-red-800"
-	                                  >
-	                                    Duplicate
-	                                  </Badge>
+	                                  <StatusChip status="error">Duplicate</StatusChip>
 	                                )}
 	                                {p.kind === "llm" && p.reasoningEffort?.trim() && (
 	                                  <Badge variant="outline" className="text-[11px]">
@@ -1243,14 +1239,14 @@ export default function RaceSetup({
 	                id="start-race-section"
 	              >
 	                {!isServerConnected && (
-	                  <div className="text-xs text-yellow-900 bg-yellow-50 border border-yellow-200 rounded-md p-3">
+	                  <div className="rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
 	                    Server connection issue. The game may be unavailable until the API
 	                    is running.
 	                  </div>
 	                )}
 
 	                {(errors.length > 0 || duplicateSummary) && (
-	                  <div className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-md p-3 space-y-1">
+	                  <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground space-y-1">
 	                    {errors.map((err) => (
 	                      <div key={err}>{err}</div>
 	                    ))}

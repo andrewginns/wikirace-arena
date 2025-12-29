@@ -9,19 +9,12 @@ import ForceGraph2D, {
 import { Run } from "./reasoning-trace";
 import * as d3 from "d3";
 import { API_BASE } from "@/lib/constants";
-// This is a placeholder component for the force-directed graph
-// In a real implementation, you would use a library like D3.js or react-force-graph
+import { getChartPalette, getStatusColors, resolveCssColor } from "@/lib/theme-colors";
 
-// CSS variables for styling
-const STYLES = {
-  fixedNodeColor: "#e63946", // Red
-  fluidNodeColor: "#457b9d", // Steel Blue
-  linkColor: "#adb5bd", // Grey
-  highlightColor: "#fca311", // Orange/Yellow
-  successColor: "#2a9d8f", // Teal
+const DEFAULT_GRAPH_OPACITY = {
   minNodeOpacity: 0.3,
   minLinkOpacity: 0.15,
-};
+} as const;
 
 const COMPARE_PATH_STYLE = {
   // How much to boost chroma for compare paths (higher = more vivid).
@@ -113,18 +106,25 @@ export default function ForceDirectedGraph({
   compareColorByRunId,
   onNodeSelect,
 }: ForceDirectedGraphProps) {
+  const theme = useMemo(() => {
+    const chart = getChartPalette();
+    const status = getStatusColors();
+    return {
+      chart,
+      status,
+      fixedNodeColor: resolveCssColor("--competitive", chart[1] ?? "#db2777"),
+      fluidNodeColor: resolveCssColor("--muted-foreground", "#475569"),
+      linkColor: resolveCssColor("--border", "#e2e8f0"),
+      labelBg: resolveCssColor("--card", "#ffffff"),
+      labelFg: resolveCssColor("--foreground", "#0f172a"),
+    };
+  }, []);
+
   const isCompareMode = (compareRunIds?.length ?? 0) > 0;
   const compareRunSet = useMemo(() => new Set(compareRunIds ?? []), [compareRunIds]);
   const internalCompareColorByRunId = useMemo(() => {
     if (!isCompareMode) return {} as Record<number, string>;
-    const palette = [
-      "#e63946", // red
-      "#457b9d", // blue
-      "#2a9d8f", // teal
-      "#fca311", // orange
-      "#a855f7", // purple
-      "#22c55e", // green
-    ];
+    const palette = theme.chart;
 
     const map: Record<number, string> = {};
     for (let i = 0; i < (compareRunIds?.length ?? 0); i++) {
@@ -132,7 +132,7 @@ export default function ForceDirectedGraph({
       map[id] = palette[i % palette.length]!;
     }
     return map;
-  }, [compareRunIds, isCompareMode]);
+  }, [compareRunIds, isCompareMode, theme.chart]);
 
   const effectiveCompareColors = compareColorByRunId ?? internalCompareColorByRunId;
 
@@ -143,12 +143,12 @@ export default function ForceDirectedGraph({
       const base = effectiveCompareColors[id];
       map[id] = base
         ? boostChromaHexColor(base, COMPARE_PATH_STYLE)
-        : STYLES.linkColor;
+        : theme.linkColor;
     }
     return map;
-  }, [compareRunIds, effectiveCompareColors, isCompareMode]);
+  }, [compareRunIds, effectiveCompareColors, isCompareMode, theme.linkColor]);
 
-  const effectiveFocusColor = focusColor ?? STYLES.highlightColor;
+  const effectiveFocusColor = focusColor ?? theme.status.running;
 
   const focusRunColor = useMemo(() => {
     if (!isCompareMode || runId === null) return effectiveFocusColor;
@@ -589,9 +589,7 @@ export default function ForceDirectedGraph({
     }
 
     // Nodes not in the selected run get their default colors
-    return node.type === "fixed"
-      ? STYLES.fixedNodeColor
-      : STYLES.fluidNodeColor;
+    return node.type === "fixed" ? theme.fixedNodeColor : theme.fluidNodeColor;
   };
 
   const isLinkInCompareRuns = (link: GraphLink) => {
@@ -606,16 +604,16 @@ export default function ForceDirectedGraph({
   // Helper function to determine link color based on current runId
   const getLinkColor = (link: GraphLink) => {
     if (isLinkInCompareRuns(link)) {
-      const base = comparePathColorsByRunId[link.runId] ?? STYLES.linkColor;
+      const base = comparePathColorsByRunId[link.runId] ?? theme.linkColor;
       return withAlpha(base, COMPARE_PATH_STYLE.alpha);
     }
     if (isLinkInCurrentRun(link)) {
       return focusRunColor;
     }
     if (link.kind === "wiki") {
-      return `rgba(173, 181, 189, ${STYLES.minLinkOpacity})`;
+      return withAlpha(theme.linkColor, DEFAULT_GRAPH_OPACITY.minLinkOpacity);
     }
-    return STYLES.linkColor;
+    return theme.linkColor;
   };
 
   const shouldAnimateLink = (link: GraphLink) => {
@@ -709,14 +707,14 @@ export default function ForceDirectedGraph({
               ? highlightOpacity
               : typeof node.baseOpacity === "number"
               ? node.baseOpacity
-              : STYLES.minNodeOpacity;
+              : DEFAULT_GRAPH_OPACITY.minNodeOpacity;
 
             // Draw node circle with appropriate styling
             ctx.globalAlpha = opacity;
             const radius = node.radius || (node.type === "fixed" ? 7 : 5);
             ctx.beginPath();
             ctx.arc(node.x!, node.y!, radius, 0, 2 * Math.PI);
-            ctx.fillStyle = node.isMainNode ? STYLES.fixedNodeColor : STYLES.fluidNodeColor;
+            ctx.fillStyle = node.isMainNode ? theme.fixedNodeColor : theme.fluidNodeColor;
             ctx.fill();
 
             // Add white stroke around nodes
@@ -736,7 +734,7 @@ export default function ForceDirectedGraph({
               const labelTopY = nodeY + 8;
 
               // Draw label background
-              ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+              ctx.fillStyle = withAlpha(theme.labelBg, 0.85);
               ctx.fillRect(
                 labelX - labelWidth / 2,
                 labelTopY,
@@ -747,7 +745,7 @@ export default function ForceDirectedGraph({
               // Draw label text
               ctx.textAlign = "center";
               ctx.textBaseline = "middle";
-              ctx.fillStyle = "black";
+              ctx.fillStyle = theme.labelFg;
               ctx.fillText(label, labelX, labelTopY + labelHeight / 2);
             }
 
@@ -757,7 +755,7 @@ export default function ForceDirectedGraph({
 	              ctx.font = `700 ${numberFontSize}px Sans-Serif`;
 	              ctx.textAlign = "center";
 	              ctx.textBaseline = "middle";
-	              ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+	              ctx.fillStyle = withAlpha(theme.labelFg, 0.75);
 	              ctx.fillText(String(stepNumber), node.x!, node.y!);
 	            }
 

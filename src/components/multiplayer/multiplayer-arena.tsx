@@ -41,7 +41,7 @@ export default function MultiplayerArena({
   return (
     <div className="space-y-4">
       {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
           {error}
         </div>
       )}

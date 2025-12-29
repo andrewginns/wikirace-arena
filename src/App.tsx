@@ -64,7 +64,7 @@ export default function Home() {
             href="https://github.com/huggingface/wikirace-llms" 
             target="_blank" 
             rel="noopener noreferrer"
-            className="text-gray-700 hover:text-gray-900"
+            className="text-muted-foreground hover:text-foreground"
           >
             <Github size={24} />
           </a>

@@ -17,6 +17,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { StatusChip } from "@/components/ui/status-chip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
@@ -370,7 +371,7 @@ export default function AddChallengersDialog({
                     key={p.id}
                     className={cn(
                       "rounded-lg border p-3 bg-card flex flex-col gap-3",
-                      isDuplicate && "border-red-300 bg-red-50/40"
+                      isDuplicate && "border-status-error/30 bg-status-error/5"
                     )}
                   >
                   <div className="flex items-center justify-between gap-3">
@@ -384,12 +385,7 @@ export default function AddChallengersDialog({
                         {p.kind === "human" ? "Human" : "Model"}
                       </div>
                       {isDuplicate && (
-                        <Badge
-                          variant="outline"
-                          className="text-[11px] border-red-200 bg-red-50 text-red-800"
-                        >
-                          Duplicate
-                        </Badge>
+                        <StatusChip status="error">Duplicate</StatusChip>
                       )}
                       {p.kind === "llm" && p.reasoningEffort?.trim() && (
                         <Badge variant="outline" className="text-[11px]">
@@ -487,14 +483,14 @@ export default function AddChallengersDialog({
           )}
 
           {!isServerConnected && (
-            <div className="text-xs text-yellow-900 bg-yellow-50 border border-yellow-200 rounded-md p-3">
+            <div className="rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
               Server connection issue. LLM runs may be unavailable until the API is running.
             </div>
           )}
         </div>
 
         {duplicateSummary && (
-          <div className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-md p-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground flex flex-wrap items-center justify-between gap-2">
             <div>Duplicates: {duplicateSummary}</div>
             <Button
               type="button"
