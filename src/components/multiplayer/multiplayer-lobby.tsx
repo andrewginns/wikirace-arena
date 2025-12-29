@@ -13,6 +13,7 @@ import ModelPicker from "@/components/model-picker";
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import { addLlmParticipant, cancelRun, restartRun, startRoom } from "@/lib/multiplayer-store";
 import { useMediaQuery } from "@/lib/use-media-query";
+import { AlertTriangle } from "lucide-react";
 
 function toOptionalPositiveInt(value: string): number | undefined {
   const trimmed = value.trim();
@@ -143,8 +144,9 @@ export default function MultiplayerLobby({
   return (
     <div className="space-y-4">
       {error && (
-        <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
-          {error}
+        <div className="flex items-start gap-2 rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
+          <div>{error}</div>
         </div>
       )}
 

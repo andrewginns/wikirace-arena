@@ -40,6 +40,7 @@ const outDir =
 const headed = process.argv.includes("--headed");
 
 const viewport = { width: 1440, height: 900 };
+const mobileViewport = { width: 390, height: 844 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -132,6 +133,25 @@ async function openMultiplayerSetup(page) {
   await page.getByRole("tab", { name: "Play Game" }).click();
   await page.getByRole("tab", { name: "Multiplayer", exact: true }).click();
   await page.getByText("Create a room").waitFor();
+}
+
+async function joinMultiplayerFromInvite(page, { inviteLink, name }) {
+  await page.goto(inviteLink, { waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: "WikiRacing Arena" }).waitFor();
+
+  await page.getByRole("tab", { name: "Play Game" }).click();
+  await page.getByRole("tab", { name: "Multiplayer", exact: true }).click();
+
+  await page.getByText("Join a room", { exact: true }).waitFor();
+  const nameInput = page.getByPlaceholder("Player");
+  await nameInput.waitFor();
+  await nameInput.fill(name);
+
+  const joinRoomButton = page.getByRole("button", { name: "Join room", exact: true });
+  await joinRoomButton.waitFor();
+  await joinRoomButton.click();
+  await page.getByText("Multiplayer lobby").waitFor({ timeout: 15_000 });
+  await sleep(250);
 }
 
 async function ensureLeaderboardExpanded(page) {
@@ -335,6 +355,15 @@ async function main() {
   const page = await context.newPage();
   page.setDefaultTimeout(15_000);
 
+  const mobileContext = await browser.newContext({
+    viewport: mobileViewport,
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
+  });
+  const mobilePage = await mobileContext.newPage();
+  mobilePage.setDefaultTimeout(15_000);
+
   try {
     // View Runs (baseline)
     await openViewRuns(page, { showCta: false });
@@ -513,6 +542,22 @@ async function main() {
     await page.getByText("Multiplayer lobby").waitFor();
     await saveScreenshot(page, "screenshots/multiplayer/playwright-multiplayer-lobby.png");
 
+    // Open the room in a second tab as a mobile participant.
+    await page.waitForFunction(() => {
+      return Boolean(new URL(window.location.href).searchParams.get("room"));
+    });
+    const hostUrl = new URL(page.url());
+    const roomId = hostUrl.searchParams.get("room");
+    if (!roomId) {
+      throw new Error("Multiplayer room URL missing ?room=... param after creating room.");
+    }
+    const inviteLink = `${hostUrl.origin}/?room=${roomId}`;
+    await joinMultiplayerFromInvite(mobilePage, { inviteLink, name: "Mobile" });
+    await saveScreenshot(
+      mobilePage,
+      "screenshots/multiplayer/playwright-multiplayer-mobile-participant-lobby.png"
+    );
+
     // Add one AI racer in the lobby.
     const quickAddModel = page.getByRole("button", { name: /^Add gpt-/ }).first();
     await quickAddModel.click();
@@ -526,6 +571,13 @@ async function main() {
     // Start the shared race.
     await page.getByRole("button", { name: "Start race" }).click();
     await page.getByText("Wikipedia view").waitFor({ timeout: 15_000 });
+
+    await mobilePage.getByText("Wikipedia view").waitFor({ timeout: 15_000 });
+    await sleep(400);
+    await saveScreenshot(
+      mobilePage,
+      "screenshots/multiplayer/playwright-multiplayer-mobile-participant-arena.png"
+    );
 
     // Capture the default (collapsed) layout, then expand for the rest.
     await saveScreenshot(
@@ -565,13 +617,32 @@ async function main() {
       await sleep(600);
     }
 
-    // Give up as the human to finish the race.
+    // Give up as both humans to finish the race.
     await selectLeaderboardRun(page, "Host");
-    await page.getByRole("button", { name: "Give up", exact: true }).click();
-    await page.getByText("Race finished").waitFor({ timeout: 10_000 });
+    const hostGiveUp = page.getByRole("button", { name: "Give up", exact: true });
+    if (await hostGiveUp.isVisible().catch(() => false)) {
+      await hostGiveUp.click();
+      await sleep(400);
+    }
+
+    await ensureLeaderboardExpanded(mobilePage);
+    await selectLeaderboardRun(mobilePage, "Mobile");
+    const mobileGiveUp = mobilePage.getByRole("button", { name: "Give up", exact: true });
+    if (await mobileGiveUp.isVisible().catch(() => false)) {
+      await mobileGiveUp.click();
+      await sleep(400);
+    }
+
+    await page.getByText("Race finished").waitFor({ timeout: 20_000 });
     await saveScreenshot(
       page,
       "screenshots/multiplayer/playwright-multiplayer-abandoned-finished.png",
+      { fullPage: true }
+    );
+
+    await saveScreenshot(
+      mobilePage,
+      "screenshots/multiplayer/playwright-multiplayer-mobile-participant-finished.png",
       { fullPage: true }
     );
 

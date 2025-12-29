@@ -1,4 +1,5 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
 import ViewerTab from "@/components/viewer-tab";
 import PlayTab from "@/components/play-tab";
 import AboutTab from "@/components/about-tab";
@@ -48,28 +49,33 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-muted/30">
-      <LlmRunManager />
-      <div className="container mx-auto p-4 max-w-7xl">
-      <div className="flex flex-col gap-4 md:flex-row md:justify-between md:items-end">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-bold tracking-tight">WikiRacing Arena</h1>
-          <p className="text-sm text-muted-foreground max-w-2xl">
-            A fun way for humans and LLMs to compete: race from one Wikipedia page
-            to another using only links.
-          </p>
-        </div>
-        <div className="flex items-center gap-4">
-          <a 
-            href="https://github.com/huggingface/wikirace-llms" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <Github size={24} />
-          </a>
-        </div>
-      </div>
+	    <div className="min-h-screen bg-gradient-to-b from-background to-muted/30">
+	      <LlmRunManager />
+	      <div className="container mx-auto p-4 max-w-7xl">
+	      <div className="flex flex-col gap-4 md:flex-row md:justify-between md:items-end">
+	        <div className="space-y-1">
+	          <h1 className="text-3xl font-bold tracking-tight">WikiRacing Arena</h1>
+	          <p className="text-sm text-muted-foreground max-w-2xl">
+	            A fun way for humans and LLMs to compete: race from one Wikipedia page
+	            to another using only links.
+	          </p>
+	        </div>
+	        <div className="flex items-center gap-2 sm:gap-4">
+	          {selectedTab !== "play" && (
+	            <Button size="sm" onClick={() => setSelectedTab("play")}>
+	              Play
+	            </Button>
+	          )}
+	          <a 
+	            href="https://github.com/huggingface/wikirace-llms" 
+	            target="_blank" 
+	            rel="noopener noreferrer"
+	            className="text-muted-foreground hover:text-foreground"
+	          >
+	            <Github size={24} />
+	          </a>
+	        </div>
+	      </div>
 
       <Tabs
         defaultValue="view"

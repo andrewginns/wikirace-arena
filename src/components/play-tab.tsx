@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { API_BASE } from "@/lib/constants";
+import { prefersReducedMotion } from "@/lib/motion";
 import RaceSetup from "@/components/race/race-setup";
 import type { RaceConfig } from "@/components/race/race-types";
 import MatchupArena from "@/components/matchup-arena";
@@ -97,7 +98,10 @@ export default function PlayTab({
     const el = document.getElementById(
       scrollTarget === "arena" ? "matchup-arena" : "play-setup"
     );
-    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    el?.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "start",
+    });
     setScrollTarget(null);
   }, [scrollTarget]);
 

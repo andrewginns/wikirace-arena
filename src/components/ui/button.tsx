@@ -10,9 +10,9 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "bg-primary text-primary-foreground shadow-[var(--shadow-floating)] hover:bg-primary/90 hover:-translate-y-px hover:ring-1 hover:ring-primary/20 active:translate-y-0 active:shadow-[var(--shadow-card)]",
+          "bg-primary text-primary-foreground shadow-[var(--shadow-floating)] hover:bg-primary/90 hover:-translate-y-px hover:ring-1 hover:ring-primary/20 active:translate-y-0 active:shadow-[var(--shadow-card)] motion-reduce:hover:translate-y-0",
         competitive:
-          "bg-competitive text-competitive-foreground shadow-[var(--shadow-floating)] hover:bg-competitive/90 hover:-translate-y-px hover:ring-1 hover:ring-competitive/20 active:translate-y-0 active:shadow-[var(--shadow-card)]",
+          "bg-competitive text-competitive-foreground shadow-[var(--shadow-floating)] hover:bg-competitive/90 hover:-translate-y-px hover:ring-1 hover:ring-competitive/20 active:translate-y-0 active:shadow-[var(--shadow-card)] motion-reduce:hover:translate-y-0",
         destructive:
           "bg-destructive text-white shadow-xs hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60",
         outline:

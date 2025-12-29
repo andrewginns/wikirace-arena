@@ -28,10 +28,24 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { VirtualizedCombobox } from "@/components/ui/virtualized-combobox";
 import ModelPicker from "@/components/model-picker";
 import WikiArticlePreview from "@/components/wiki-article-preview";
+import { prefersReducedMotion } from "@/lib/motion";
 import { cn } from "@/lib/utils";
-import { ArrowLeftRight, Bot, HelpCircle, Plus, Settings2, Shuffle, Trash2, Trophy, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeftRight,
+  Bot,
+  HelpCircle,
+  Plus,
+  Settings2,
+  Shuffle,
+  Trash2,
+  Trophy,
+  Users,
+  WifiOff,
+} from "lucide-react";
 import popularNodes from "../../../results/popular_nodes.json";
 import type { RaceConfig, RaceParticipantDraft, RaceRules } from "./race-types";
+import { RaceSetupStickyBar } from "./race-setup-sticky-bar";
 
 function makeId(prefix: string) {
   const randomId =
@@ -248,7 +262,10 @@ export default function RaceSetup({
         ? "participants-section"
         : "start-race-section";
     const el = document.getElementById(id);
-    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    el?.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "start",
+    });
     setHighlightSection(section);
   };
 
@@ -449,7 +466,7 @@ export default function RaceSetup({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-24 md:pb-0">
       <Card className="p-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="space-y-1">
@@ -1239,31 +1256,39 @@ export default function RaceSetup({
 	                id="start-race-section"
 	              >
 	                {!isServerConnected && (
-	                  <div className="rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
-	                    Server connection issue. The game may be unavailable until the API
-	                    is running.
+	                  <div className="flex items-start gap-2 rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
+	                    <WifiOff className="mt-0.5 h-4 w-4 shrink-0 text-status-active" aria-hidden="true" />
+	                    <div>
+	                      Server connection issue. The game may be unavailable until the API
+	                      is running.
+	                    </div>
 	                  </div>
 	                )}
 
 	                {(errors.length > 0 || duplicateSummary) && (
-	                  <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground space-y-1">
-	                    {errors.map((err) => (
-	                      <div key={err}>{err}</div>
-	                    ))}
-	                    {duplicateSummary && (
-	                      <div className="flex flex-wrap items-center justify-between gap-2">
-	                        <div>Duplicates: {duplicateSummary}</div>
-	                        <Button
-	                          type="button"
-	                          variant="outline"
-	                          size="sm"
-	                          className="h-7"
-	                          onClick={removeDuplicateParticipants}
-	                        >
-	                          Remove duplicates
-	                        </Button>
+	                  <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground">
+	                    <div className="flex items-start gap-2">
+	                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
+	                      <div className="space-y-1">
+	                        {errors.map((err) => (
+	                          <div key={err}>{err}</div>
+	                        ))}
+	                        {duplicateSummary && (
+	                          <div className="flex flex-wrap items-center justify-between gap-2">
+	                            <div>Duplicates: {duplicateSummary}</div>
+	                            <Button
+	                              type="button"
+	                              variant="outline"
+	                              size="sm"
+	                              className="h-7"
+	                              onClick={removeDuplicateParticipants}
+	                            >
+	                              Remove duplicates
+	                            </Button>
+	                          </div>
+	                        )}
 	                      </div>
-	                    )}
+	                    </div>
 	                  </div>
 	                )}
 
@@ -1285,6 +1310,17 @@ export default function RaceSetup({
 	          </div>
 	        </div>
 	      </Card>
+
+	      <RaceSetupStickyBar
+	        startPage={startPage}
+	        targetPage={targetPage}
+	        participantsCount={participants.length}
+	        errorMessages={errors}
+	        hasDuplicateParticipants={duplicateSummary !== null}
+	        isServerConnected={isServerConnected}
+	        canStart={canStart}
+	        onStartRace={startRace}
+	      />
 
     </div>
   );

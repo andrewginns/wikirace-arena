@@ -2461,7 +2461,7 @@ export default function RaceArena({
                           : "hover:bg-muted/50 border-border border-l-transparent",
                         isTimerRunning &&
                           "ring-2 ring-status-running/30 ring-offset-1 ring-offset-background",
-                        isRecentlyChanged && "animate-pulse"
+                        isRecentlyChanged && "animate-pulse motion-reduce:animate-none"
                       )}
                     >
                     <div className="flex items-start justify-between gap-2">
@@ -2540,7 +2540,7 @@ export default function RaceArena({
                           : "hover:bg-muted/50 border-border border-l-transparent",
                         isTimerRunning &&
                           "ring-2 ring-status-running/30 ring-offset-1 ring-offset-background",
-                        isRecentlyChanged && "animate-pulse"
+                        isRecentlyChanged && "animate-pulse motion-reduce:animate-none"
                       )}
                     >
                     <div className="flex items-start justify-between gap-2">
@@ -2629,7 +2629,7 @@ export default function RaceArena({
                           : "hover:bg-muted/40 border-border border-l-transparent",
                         isTimerRunning &&
                           "ring-2 ring-status-running/30 ring-offset-1 ring-offset-background",
-                        isRecentlyChanged && "animate-pulse"
+                        isRecentlyChanged && "animate-pulse motion-reduce:animate-none"
                       )}
                     >
                     <div className="flex items-start justify-between gap-2">

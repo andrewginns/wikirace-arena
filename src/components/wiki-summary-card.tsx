@@ -123,7 +123,7 @@ export default function WikiSummaryCard({
           <div
             className={cn(
               "h-14 w-14 rounded-md border bg-muted/30 flex items-center justify-center text-muted-foreground flex-shrink-0",
-              status === "loading" && "animate-pulse"
+              status === "loading" && "animate-pulse motion-reduce:animate-none"
             )}
             aria-label={status === "loading" ? "Loading" : "No image"}
           >
@@ -161,4 +161,3 @@ export default function WikiSummaryCard({
     </Card>
   );
 }
-
