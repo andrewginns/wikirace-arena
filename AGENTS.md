@@ -30,7 +30,7 @@ Make targets (see `Makefile`):
 - `make ui`: run the Vite dev server.
 - `make server`: run the API (`uvicorn`) with `WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db`.
 - `make build`: build the frontend to `dist/`.
-- `make ux-audit`: start API + Vite and run Playwright UX screenshots.
+- `make ux-audit`: start API + Vite and run Playwright UX screenshots (includes multiplayer + mobile participant captures).
 - `make ux-audit-headed`: same as above, but headed.
 
 Frontend (prefer Yarn; repo includes both `yarn.lock` and `package-lock.json`):
@@ -44,8 +44,10 @@ Frontend (prefer Yarn; repo includes both `yarn.lock` and `package-lock.json`):
 
 Playwright (for `yarn ux:audit`):
 
-- `npx playwright install chromium`
-- Run the API server (`make server`) and the Vite dev server (`yarn dev`) before generating screenshots.
+- Install browsers: `npx playwright install chromium` (or `npx playwright install`)
+- `make ux-audit` starts the API + UI automatically and writes screenshots to `docs/ux-audit/`.
+- The UX audit script covers both desktop and mobile viewports, including a mobile participant joining a multiplayer room.
+- For `yarn ux:audit`, run the API server (`make server`) and the Vite dev server (`yarn dev`) before generating screenshots.
 
 Backend + DB (local API):
 
