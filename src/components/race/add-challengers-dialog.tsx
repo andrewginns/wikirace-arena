@@ -22,7 +22,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import ModelPicker from "@/components/model-picker";
-import { Bot, Plus, Shuffle, Trash2, User, Users } from "lucide-react";
+import { AlertTriangle, Bot, Plus, Shuffle, Trash2, User, Users, WifiOff } from "lucide-react";
 import type { RaceParticipantDraft } from "./race-types";
 import { startHumanRun, startLlmRun, useSessionsStore } from "@/lib/session-store";
 import { sessionDisplayName } from "@/lib/session-utils";
@@ -483,15 +483,21 @@ export default function AddChallengersDialog({
           )}
 
           {!isServerConnected && (
-            <div className="rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
-              Server connection issue. LLM runs may be unavailable until the API is running.
+            <div className="flex items-start gap-2 rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
+              <WifiOff className="mt-0.5 h-4 w-4 shrink-0 text-status-active" aria-hidden="true" />
+              <div>
+                Server connection issue. LLM runs may be unavailable until the API is running.
+              </div>
             </div>
           )}
         </div>
 
         {duplicateSummary && (
-          <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground flex flex-wrap items-center justify-between gap-2">
-            <div>Duplicates: {duplicateSummary}</div>
+          <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground flex flex-wrap items-start justify-between gap-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
+              <div>Duplicates: {duplicateSummary}</div>
+            </div>
             <Button
               type="button"
               variant="outline"

@@ -10,7 +10,7 @@ import WikiArticlePreview from "@/components/wiki-article-preview";
 import { setupNewRound } from "@/lib/multiplayer-store";
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import { cn } from "@/lib/utils";
-import { ArrowLeftRight, Shuffle } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, Shuffle, WifiOff } from "lucide-react";
 import popularNodes from "../../../results/popular_nodes.json";
 
 function pickRandom(items: string[]) {
@@ -84,14 +84,16 @@ export default function MultiplayerRoundSetup({
   return (
     <div className="space-y-4">
       {error && (
-        <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
-          {error}
+        <div className="flex items-start gap-2 rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
+          <div>{error}</div>
         </div>
       )}
 
       {!isServerConnected && (
-        <div className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-          Server not connected. Start the API server first.
+        <div className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+          <WifiOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          <div>Server not connected. Start the API server first.</div>
         </div>
       )}
 

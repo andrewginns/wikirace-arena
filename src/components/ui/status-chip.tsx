@@ -1,5 +1,6 @@
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
+import { AlertTriangle, CheckCircle2, Circle, Loader2, Zap } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 
@@ -41,12 +42,62 @@ const statusDotVariants = cva("h-2 w-2 rounded-full", {
   },
 })
 
+const statusIconVariants = cva("shrink-0", {
+  variants: {
+    status: {
+      neutral: "text-muted-foreground",
+      running: "text-status-running",
+      finished: "text-status-finished",
+      active: "text-status-active",
+      error: "text-status-error",
+    },
+    size: {
+      sm: "h-3.5 w-3.5",
+      md: "h-4 w-4",
+    },
+  },
+  defaultVariants: {
+    status: "neutral",
+    size: "sm",
+  },
+})
+
+function defaultStatusIcon(
+  status: NonNullable<VariantProps<typeof statusChipVariants>["status"]>,
+  size: NonNullable<VariantProps<typeof statusChipVariants>["size"]>
+) {
+  const className = cn(statusIconVariants({ status, size }));
+
+  if (status === "running") {
+    return (
+      <Loader2
+        className={cn(className, "animate-spin motion-reduce:animate-none")}
+        aria-hidden="true"
+      />
+    );
+  }
+
+  if (status === "finished") {
+    return <CheckCircle2 className={className} aria-hidden="true" />
+  }
+
+  if (status === "active") {
+    return <Zap className={className} aria-hidden="true" />
+  }
+
+  if (status === "error") {
+    return <AlertTriangle className={className} aria-hidden="true" />
+  }
+
+  return <Circle className={className} aria-hidden="true" />
+}
+
 function StatusChip({
   className,
   status,
   size,
   icon,
-  showDot = true,
+  showDot = false,
   children,
   ...props
 }: React.ComponentProps<"span"> &
@@ -54,22 +105,22 @@ function StatusChip({
     icon?: React.ReactNode
     showDot?: boolean
   }) {
+  const resolvedStatus = status ?? "neutral"
+  const resolvedSize = size ?? "sm"
+
   return (
     <span
       data-slot="status-chip"
       className={cn(statusChipVariants({ status, size }), className)}
       {...props}
     >
-      {icon
-        ? icon
-        : showDot
-          ? (
-              <span
-                className={cn(statusDotVariants({ status }))}
-                aria-hidden="true"
-              />
-            )
-          : null}
+      {icon ? (
+        icon
+      ) : showDot ? (
+        <span className={cn(statusDotVariants({ status }))} aria-hidden="true" />
+      ) : (
+        defaultStatusIcon(resolvedStatus, resolvedSize)
+      )}
       <span>{children}</span>
     </span>
   )

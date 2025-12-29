@@ -105,7 +105,10 @@ export default function WikiArticlePreview({
   if (status === "loading" && !summary) {
     return (
       <div
-        className={cn("rounded-md border bg-muted/40 animate-pulse flex-shrink-0", className)}
+        className={cn(
+          "rounded-md border bg-muted/40 animate-pulse motion-reduce:animate-none flex-shrink-0",
+          className
+        )}
         style={style}
         aria-label={`Loading preview for ${title}`}
       />

@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select";
 import { Pause, Play } from "lucide-react";
 import { formatHops, viewerRunHops } from "@/lib/hops";
+import { prefersReducedMotion } from "@/lib/motion";
 
 interface Run {
   start_article: string;
@@ -161,7 +162,10 @@ export default function RunsList({
     if (nextScrollTop === null) return;
 
     programmaticScrollRef.current = true;
-    container.scrollTo({ top: nextScrollTop, behavior: "smooth" });
+    container.scrollTo({
+      top: nextScrollTop,
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
 
     if (programmaticScrollTimeoutRef.current) {
       window.clearTimeout(programmaticScrollTimeoutRef.current);
@@ -268,8 +272,18 @@ export default function RunsList({
                   runItemsRef.current.delete(originalIndex);
                 }
               }}
+              role="button"
+              tabIndex={0}
+              aria-label={`${run.start_article} to ${run.destination_article}`}
+              onClick={() => _onSelectRun(originalIndex)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  _onSelectRun(originalIndex);
+                }
+              }}
               className={cn(
-                "p-0 cursor-pointer transition-all border border-l-4 overflow-hidden",
+                "p-0 cursor-pointer transition-all border border-l-4 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
                 stripeClass,
                 selectedRunId === originalIndex
                   ? "bg-primary/5 border-primary/50 shadow-[var(--shadow-floating)]"
@@ -278,7 +292,6 @@ export default function RunsList({
             >
               <div 
                 className="p-3 flex flex-col gap-2"
-                onClick={() => _onSelectRun(originalIndex)}
               >
                 <div className="flex items-start justify-between">
                   <div className="space-y-1">
@@ -331,7 +344,7 @@ export default function RunsList({
                       {selectedRunId === originalIndex && (
                         <div className="flex items-center gap-1 text-xs text-primary">
                           <div
-                            className="h-2 w-2 rounded-full bg-primary animate-pulse"
+                            className="h-2 w-2 rounded-full bg-primary animate-pulse motion-reduce:animate-none"
                             aria-hidden="true"
                           />
                           <span>Active</span>

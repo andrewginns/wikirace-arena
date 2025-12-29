@@ -22,7 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusChip } from "@/components/ui/status-chip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Check, Copy, Trash2, UploadIcon } from "lucide-react";
+import { AlertTriangle, Check, Copy, Trash2, UploadIcon } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -574,9 +574,10 @@ export default function ViewerTab({
                        onChange={(e) => setImportText(e.target.value)}
                        placeholder='{"runs": [...], ...}'
                      />
-                     {importError && (
-                       <div className="rounded-md border border-status-error/30 bg-status-error/10 p-2 text-sm text-foreground">
-                         {importError}
+                    {importError && (
+                       <div className="flex items-start gap-2 rounded-md border border-status-error/30 bg-status-error/10 p-2 text-sm text-foreground">
+                         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
+                         <div>{importError}</div>
                        </div>
                      )}
                    </div>
