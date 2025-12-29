@@ -15,6 +15,7 @@ import { useMediaQuery } from "@/lib/use-media-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { StatusChip } from "@/components/ui/status-chip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -74,12 +75,11 @@ import { normalizeWikiTitle, wikiTitlesMatch } from "@/lib/wiki-title";
 const DEFAULT_MAX_STEPS = 20;
 
 const RUN_COLOR_PALETTE = [
-  "#e63946", // red
-  "#457b9d", // blue
-  "#2a9d8f", // teal
-  "#fca311", // orange
-  "#a855f7", // purple
-  "#22c55e", // green
+  "#2563eb", // chart-1 (brand.primary)
+  "#db2777", // chart-2 (brand.secondary)
+  "#16a34a", // chart-3 (brand.accent)
+  "#0ea5e9", // chart-4 (brand.highlight)
+  "#f59e0b", // chart-5
 ];
 
 const LAYOUT_STORAGE_KEY = "wikirace:arena-layout:v1";
@@ -2187,7 +2187,7 @@ export default function RaceArena({
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
-                  <Trophy className="h-4 w-4 text-amber-600" />
+                  <Trophy className="h-4 w-4 text-status-finished" />
                   <div className="text-sm font-semibold">Race finished</div>
                 </div>
                 <div className="text-xs text-muted-foreground">
@@ -2269,7 +2269,7 @@ export default function RaceArena({
                   return (
                     <div key={run.id} className="rounded-md border bg-muted/10 p-2">
                       <div className="flex items-center gap-2 min-w-0">
-                        <div className="text-[11px] font-semibold text-muted-foreground w-6">
+                        <div className="text-[11px] font-semibold text-competitive w-6">
                           #{idx + 1}
                         </div>
                         <span
@@ -2329,7 +2329,7 @@ export default function RaceArena({
 	              <div className="flex flex-wrap items-center justify-end gap-2">
 	                {selectedRunIds.size >= 2 && (
 	                  <Button
-	                    variant={compareEnabled ? "secondary" : "outline"}
+	                    variant={compareEnabled ? "competitive" : "outline"}
 	                    size="sm"
                     className="h-8"
                     onClick={() => {
@@ -2441,12 +2441,12 @@ export default function RaceArena({
                         ? "Paused"
                         : "Waiting"
                       : "Running";
-                  const statusBadgeClass =
+                  const statusChipStatus =
                     statusLabel === "Running"
-                      ? "border-blue-200 bg-blue-50 text-blue-800"
+                      ? "running"
                       : statusLabel === "Paused"
-                        ? "border-amber-200 bg-amber-50 text-amber-800"
-                        : "border-slate-200 bg-slate-50 text-slate-700";
+                        ? "active"
+                        : "neutral";
 
                 return (
                     <button
@@ -2457,10 +2457,10 @@ export default function RaceArena({
                       className={cn(
                         "w-full text-left rounded-lg border border-l-4 p-2 transition-colors",
                         isActive
-                          ? "border-primary/60 bg-primary/5 shadow-sm border-l-primary"
+                          ? "border-status-active/40 bg-status-active/5 shadow-[var(--shadow-card)] ring-1 ring-status-active/15"
                           : "hover:bg-muted/50 border-border border-l-transparent",
                         isTimerRunning &&
-                          "ring-2 ring-blue-200 ring-offset-1 ring-offset-background",
+                          "ring-2 ring-status-running/30 ring-offset-1 ring-offset-background",
                         isRecentlyChanged && "animate-pulse"
                       )}
                     >
@@ -2498,12 +2498,7 @@ export default function RaceArena({
                       </div>
 
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                        <Badge
-                          variant="outline"
-                          className={cn("text-[11px]", statusBadgeClass)}
-                        >
-                          {statusLabel}
-                        </Badge>
+                        <StatusChip status={statusChipStatus}>{statusLabel}</StatusChip>
                         <div className="text-[11px] text-muted-foreground">
                           {hops}/{maxSteps} • {formatTime(elapsed)}
                         </div>
@@ -2541,10 +2536,10 @@ export default function RaceArena({
                       className={cn(
                         "w-full text-left rounded-lg border border-l-4 p-2 transition-colors",
                         isActive
-                          ? "border-primary/60 bg-primary/5 shadow-sm border-l-primary"
+                          ? "border-status-active/40 bg-status-active/5 shadow-[var(--shadow-card)] ring-1 ring-status-active/15"
                           : "hover:bg-muted/50 border-border border-l-transparent",
                         isTimerRunning &&
-                          "ring-2 ring-blue-200 ring-offset-1 ring-offset-background",
+                          "ring-2 ring-status-running/30 ring-offset-1 ring-offset-background",
                         isRecentlyChanged && "animate-pulse"
                       )}
                     >
@@ -2561,7 +2556,12 @@ export default function RaceArena({
 
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
-                            <div className="text-[11px] font-semibold text-muted-foreground w-7">
+                            <div
+                              className={cn(
+                                "text-[11px] font-semibold w-7",
+                                idx < 3 ? "text-competitive" : "text-muted-foreground"
+                              )}
+                            >
                               #{idx + 1}
                             </div>
                             <span
@@ -2585,12 +2585,7 @@ export default function RaceArena({
                       </div>
 
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                        <Badge
-                          variant="outline"
-                          className="text-[11px] border-green-200 bg-green-50 text-green-800"
-                        >
-                          Win
-                        </Badge>
+                        <StatusChip status="finished">Win</StatusChip>
                         <div className="text-[11px] text-muted-foreground">
                           {hops}/{maxSteps} • {formatTime(elapsed)}
                         </div>
@@ -2630,10 +2625,10 @@ export default function RaceArena({
                         "w-full text-left rounded-lg border border-l-4 p-2 transition-colors",
                         "opacity-80 bg-muted/20",
                         isActive
-                          ? "border-primary/60 bg-primary/5 opacity-100 shadow-sm border-l-primary"
+                          ? "border-status-active/40 bg-status-active/5 opacity-100 shadow-[var(--shadow-card)] ring-1 ring-status-active/15"
                           : "hover:bg-muted/40 border-border border-l-transparent",
                         isTimerRunning &&
-                          "ring-2 ring-blue-200 ring-offset-1 ring-offset-background",
+                          "ring-2 ring-status-running/30 ring-offset-1 ring-offset-background",
                         isRecentlyChanged && "animate-pulse"
                       )}
                     >
@@ -2671,17 +2666,9 @@ export default function RaceArena({
                       </div>
 
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "text-[11px]",
-                            badgeLabel === "Fail"
-                              ? "border-red-200 bg-red-50 text-red-800"
-                              : "border-slate-200 bg-slate-50 text-slate-700"
-                          )}
-                        >
+                        <StatusChip status={badgeLabel === "Fail" ? "error" : "neutral"}>
                           {badgeLabel}
-                        </Badge>
+                        </StatusChip>
                         <div className="text-[11px] text-muted-foreground">
                           {hops}/{maxSteps} • {formatTime(elapsed)}
                         </div>
@@ -2722,11 +2709,11 @@ export default function RaceArena({
                             className={cn(
                               "mt-1 h-2 w-2 rounded-full flex-shrink-0",
                               event.kind === "win"
-                                ? "bg-green-500"
+                                ? "bg-status-finished"
                                 : event.kind === "lose"
-                                ? "bg-red-500"
+                                ? "bg-status-error"
                                 : event.kind === "move"
-                                ? "bg-blue-500"
+                                ? "bg-status-running"
                                 : "bg-muted-foreground"
                             )}
                             aria-hidden="true"
@@ -2826,9 +2813,9 @@ export default function RaceArena({
 	                          </span>
 	                        )}
 	                        {selectedHumanTimerRunning && (
-	                          <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5">
+	                          <StatusChip status="active">
 	                            Active player • {formatTime(selectedRunElapsedSeconds)}
-	                          </span>
+	                          </StatusChip>
 	                        )}
                       </div>
                     </div>
@@ -3108,9 +3095,11 @@ export default function RaceArena({
 	                      ) : !linksReady ? (
                         <div className="mt-3 text-sm text-muted-foreground">Loading links…</div>
                       ) : linksError ? (
-                        <div className="mt-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-md p-3">
-                          <div className="font-medium">Couldn’t load links</div>
-                          <div className="mt-1 break-words">{linksError}</div>
+                        <div className="mt-3 rounded-md border border-status-error/30 bg-status-error/10 p-3">
+                          <StatusChip status="error">Couldn’t load links</StatusChip>
+                          <div className="mt-2 text-sm text-muted-foreground break-words">
+                            {linksError}
+                          </div>
                         </div>
                       ) : availableLinks.length === 0 ? (
                         <div className="mt-3 text-sm text-muted-foreground">
@@ -3445,13 +3434,11 @@ export default function RaceArena({
 	                    <Separator className="my-2" />
 	                    <div className="space-y-2">
 	                      {directLinkMiss && (
-	                        <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+	                        <div className="rounded-md border border-status-active/30 bg-status-active/10 p-3">
 	                          <div className="flex items-start justify-between gap-3">
 	                            <div className="min-w-0">
-	                              <div className="text-sm font-medium text-amber-900">
-	                                You could have won
-	                              </div>
-	                              <div className="mt-1 text-xs text-amber-900/80">
+	                              <StatusChip status="active">You could have won</StatusChip>
+	                              <div className="mt-2 text-xs text-muted-foreground">
 	                                Hop {directLinkMiss.hopIndex}: on{" "}
 	                                <span className="font-medium">{directLinkMiss.fromArticle}</span>
 	                                , there was a direct link to{" "}
@@ -3617,8 +3604,9 @@ export default function RaceArena({
                                 isActive && "ring-2 ring-offset-1",
                                 s.type === "start" && "border-border bg-muted/40",
                                 s.type === "win" &&
-                                  "border-green-200 bg-green-50 text-green-900",
-                                s.type === "lose" && "border-red-200 bg-red-50 text-red-900",
+                                  "border-status-finished/30 bg-status-finished/10 text-foreground",
+                                s.type === "lose" &&
+                                  "border-status-error/30 bg-status-error/10 text-foreground",
                                 s.type === "move" && "border-border bg-background"
                               )}
                             >
@@ -3649,19 +3637,9 @@ export default function RaceArena({
                                 : hop === selectedRun.steps.length - 1;
                               const badge =
                                 step.type === "win" ? (
-                                  <Badge
-                                    variant="outline"
-                                    className="text-[11px] border-green-200 bg-green-50 text-green-800"
-                                  >
-                                    Win
-                                  </Badge>
+                                  <StatusChip status="finished">Win</StatusChip>
                                 ) : step.type === "lose" ? (
-                                  <Badge
-                                    variant="outline"
-                                    className="text-[11px] border-red-200 bg-red-50 text-red-800"
-                                  >
-                                    Lose
-                                  </Badge>
+                                  <StatusChip status="error">Lose</StatusChip>
                                 ) : null;
 
                               return (
@@ -3812,15 +3790,15 @@ export default function RaceArena({
 		                                        )}
 		                                      </div>
 		                                    )}
-		                                    {!output && (
-		                                      <div
-		                                        className={cn(
-		                                          "mt-2 text-xs whitespace-pre-wrap",
-		                                          errorMessage
-		                                            ? "text-red-700"
-		                                            : "text-muted-foreground"
-		                                        )}
-		                                      >
+	                                    {!output && (
+	                                      <div
+	                                        className={cn(
+	                                          "mt-2 text-xs whitespace-pre-wrap",
+	                                          errorMessage
+	                                            ? "text-status-error"
+	                                            : "text-muted-foreground"
+	                                        )}
+	                                      >
 		                                        {errorMessage
 		                                          ? `Error: ${errorMessage}`
 		                                          : "No LLM output captured for this step."}

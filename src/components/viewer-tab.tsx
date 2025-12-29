@@ -20,6 +20,7 @@ import HopsSparkline from "@/components/hops-sparkline";
 import WikiSummaryCard from "@/components/wiki-summary-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { StatusChip } from "@/components/ui/status-chip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Check, Copy, Trash2, UploadIcon } from "lucide-react";
 import {
@@ -35,6 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { addViewerDataset, removeViewerDataset, useViewerDatasetsStore } from "@/lib/viewer-datasets";
 import { formatHops, viewerRunHops } from "@/lib/hops";
+import { getChartPalette } from "@/lib/theme-colors";
 
 const defaultModels = {
   "Qwen3-14B": q3Results,
@@ -61,15 +63,6 @@ interface ModelStats {
   minHops: number;
   maxHops: number;
 }
-
-const COMPARE_PALETTE = [
-  "#e63946", // red
-  "#457b9d", // blue
-  "#2a9d8f", // teal
-  "#fca311", // orange
-  "#a855f7", // purple
-  "#22c55e", // green
-];
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -119,6 +112,8 @@ export default function ViewerTab({
     };
   }, [savedModels]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const comparePalette = useMemo(() => getChartPalette(), []);
 
   const winRuns = useMemo(() => runs.filter((run) => run.result === "win"), [runs]);
   const winHopCounts = useMemo(
@@ -304,10 +299,10 @@ export default function ViewerTab({
   const compareColorByRunId = useMemo(() => {
     const map: Record<number, string> = {};
     for (let i = 0; i < compareRunIds.length; i++) {
-      map[compareRunIds[i]!] = COMPARE_PALETTE[i % COMPARE_PALETTE.length]!;
+      map[compareRunIds[i]!] = comparePalette[i % comparePalette.length]!;
     }
     return map;
-  }, [compareRunIds]);
+  }, [comparePalette, compareRunIds]);
 
   const compareMaxHop = useMemo(() => {
     if (compareRunIds.length < 2) return 0;
@@ -580,7 +575,7 @@ export default function ViewerTab({
                        placeholder='{"runs": [...], ...}'
                      />
                      {importError && (
-                       <div className="text-sm text-red-800 bg-red-50 border border-red-200 rounded-md p-2">
+                       <div className="rounded-md border border-status-error/30 bg-status-error/10 p-2 text-sm text-foreground">
                          {importError}
                        </div>
                      )}
@@ -858,21 +853,21 @@ export default function ViewerTab({
             <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
               <div className="flex items-center gap-1">
                 <span
-                  className="h-2 w-2 rounded-full bg-[#e63946]"
+                  className="h-2 w-2 rounded-full bg-competitive"
                   aria-hidden="true"
                 />
                 Start/target
               </div>
               <div className="flex items-center gap-1">
                 <span
-                  className="h-2 w-2 rounded-full bg-[#457b9d]"
+                  className="h-2 w-2 rounded-full bg-muted-foreground"
                   aria-hidden="true"
                 />
                 Articles
               </div>
               <div className="flex items-center gap-1">
                 <span
-                  className="h-2 w-2 rounded-full bg-[#fca311]"
+                  className="h-2 w-2 rounded-full bg-status-running"
                   aria-hidden="true"
                 />
                 Selected path
@@ -1005,17 +1000,18 @@ export default function ViewerTab({
                     <Badge variant="outline" className="text-[11px]">
                       {formatHops(viewerRunHops(selectedRunData))}
                     </Badge>
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        "text-[11px]",
-                        selectedRunData.result === "win"
-                          ? "border-green-200 bg-green-50 text-green-800"
-                          : "border-slate-200 bg-slate-50 text-slate-700"
-                      )}
-                    >
-                      {selectedRunData.result}
-                    </Badge>
+                    {selectedRunData.result ? (
+                      <StatusChip
+                        status={
+                          selectedRunData.result === "win" ? "finished" : "error"
+                        }
+                      >
+                        {selectedRunData.result === "win" ? "Win" : selectedRunData.result}
+                      </StatusChip>
+                    ) : null}
+                    {selectedRunData.near_miss ? (
+                      <StatusChip status="active">Near miss</StatusChip>
+                    ) : null}
                   </div>
                 </div>
 

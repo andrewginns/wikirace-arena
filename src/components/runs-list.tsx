@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { StatusChip } from "@/components/ui/status-chip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
@@ -251,11 +252,11 @@ export default function RunsList({
           const hops = viewerRunHops(run);
           const isSelected = selectedRunIds?.has(originalIndex) ?? false;
           const stripeClass = isWin
-            ? "border-l-green-500"
+            ? "border-l-status-finished"
             : isNearMiss
-              ? "border-l-amber-500"
+              ? "border-l-status-active"
               : run.result
-                ? "border-l-red-500"
+                ? "border-l-status-error"
                 : "border-l-transparent";
           return (
             <Card
@@ -271,7 +272,7 @@ export default function RunsList({
                 "p-0 cursor-pointer transition-all border border-l-4 overflow-hidden",
                 stripeClass,
                 selectedRunId === originalIndex
-                  ? "bg-primary/5 border-primary/50 shadow-md"
+                  ? "bg-primary/5 border-primary/50 shadow-[var(--shadow-floating)]"
                   : "hover:bg-muted/50 border-border"
               )}
             >
@@ -292,7 +293,7 @@ export default function RunsList({
                           aria-label="Select run"
                         />
                       ) : null}
-                      <span className="text-primary">{run.start_article}</span>
+                      <span className="text-foreground">{run.start_article}</span>
                       <svg
                         xmlns="http://www.w3.org/2000/svg"
                         width="14"
@@ -308,7 +309,7 @@ export default function RunsList({
                         <path d="M5 12h14" />
                         <path d="m12 5 7 7-7 7" />
                       </svg>
-                      <span className="text-primary">{run.destination_article}</span>
+                      <span className="text-foreground">{run.destination_article}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Tooltip>
@@ -322,25 +323,10 @@ export default function RunsList({
                         </TooltipContent>
                       </Tooltip>
                       {run.result && !isWin && (
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "text-[11px] h-5 px-2 py-0",
-                            run.result === "abandoned"
-                              ? "border-slate-200 bg-slate-50 text-slate-700"
-                              : "border-red-200 bg-red-50 text-red-800"
-                          )}
-                        >
-                          {run.result}
-                        </Badge>
+                        <StatusChip status="error">{run.result}</StatusChip>
                       )}
                       {isNearMiss && (
-                        <Badge
-                          variant="outline"
-                          className="text-[11px] h-5 px-2 py-0 border-amber-200 bg-amber-50 text-amber-800"
-                        >
-                          Near miss
-                        </Badge>
+                        <StatusChip status="active">Near miss</StatusChip>
                       )}
                       {selectedRunId === originalIndex && (
                         <div className="flex items-center gap-1 text-xs text-primary">
