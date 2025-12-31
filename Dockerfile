@@ -24,41 +24,28 @@ ENV HOME=/home/user \
 # Set the working directory to the user's home directory
 WORKDIR $HOME/app
 
-COPY requirements.txt .
+COPY pyproject.toml uv.lock ./
 
-# Try and run pip command after setting the user with `USER user` to avoid permission issues with Python
+# Python deps (uv)
 RUN pip install --no-cache-dir --upgrade pip
-
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir uv
+RUN uv sync --frozen --no-install-project
 
 # Copy the current directory contents into the container at $HOME/app setting the owner to the user
 COPY --chown=user . $HOME/app
 
 ENV VITE_ENV=production
 
-RUN --mount=type=secret,id=HUGGINGFACE_CLIENT_SECRET,mode=0444,required=true \
-   echo "HUGGINGFACE_CLIENT_SECRET=$(cat /run/secrets/HUGGINGFACE_CLIENT_SECRET)" >> .env
-   
-RUN echo "VITE_ENV=production" >> .env
-
 RUN yarn install
 RUN yarn build
 
-RUN --mount=type=secret,id=HF_TOKEN,mode=0444,required=true \
-    echo "HF_TOKEN=$(cat /run/secrets/HF_TOKEN)" >> .env
-
-RUN echo $HF_TOKEN
-
-RUN --mount=type=secret,id=HF_TOKEN,mode=0444,required=true \
-    curl https://huggingface.co/api/whoami-v2 -H "Authorization: Bearer $(cat /run/secrets/HF_TOKEN)"
-
-RUN --mount=type=secret,id=HF_TOKEN,mode=0444,required=true \
-    curl -L https://huggingface.co/datasets/HuggingFaceTB/simplewiki-pruned-text-350k/resolve/main/wikihop.db -H "Authorization: Bearer $(cat /run/secrets/HF_TOKEN)" -o wikihop.db
+# Build the wikihop.db locally from the dataset.
+RUN uv run python get_wikihop.py --output wikihop.db
 
 ENV WIKISPEEDIA_DB_PATH=/home/user/app/wikihop.db
 
 
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "7860", "--env-file", ".env"]
+CMD ["uv", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "7860"]
 
 
 # # Download a checkpoint
