@@ -43,7 +43,7 @@ class Player:
         for i, link in enumerate(game_state[-1]["links"]):
             print(f"{i}: {link}")
 
-        idx = int(input(f"Enter the index of the link you want to select: "))
+        idx = int(input("Enter the index of the link you want to select: "))
         return game_state[-1]["links"][idx], {
             "message": f"{self.name} selected link #{i}"
         }  # select the first link
