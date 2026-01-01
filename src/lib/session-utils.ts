@@ -1,4 +1,5 @@
 import type { RunResult, RunV1, SessionV1, StepV1 } from '@/lib/session-types'
+import { llmDisplayNameOverride, llmModelShortName } from '@/lib/llm-display'
 
 export function nowIso() {
   return new Date().toISOString()
@@ -46,27 +47,41 @@ export function finalizeRun(run: RunV1, result: RunResult, finishedAtIso?: strin
 export function runDisplayName(run: RunV1) {
   if (run.kind === 'human') return run.player_name || 'Human'
   const model = run.model || 'LLM'
-  const effort = run.reasoning_effort?.trim()
-  const override = run.player_name?.trim()
-  if (override && override !== model) {
+  const modelShort = llmModelShortName(model) || model
+  const openaiEffort = run.openai_reasoning_effort?.trim()
+  const anthropicBudget =
+    typeof run.anthropic_thinking_budget_tokens === 'number'
+      ? run.anthropic_thinking_budget_tokens
+      : null
+  const overrideRaw = run.player_name?.trim()
+  const override = llmDisplayNameOverride({ playerName: overrideRaw, model })
+  if (overrideRaw && overrideRaw !== model) {
     const overrideLower = override.toLowerCase()
-    const modelLower = model.toLowerCase()
-    const effortLower = effort?.toLowerCase()
+    const modelLower = modelShort.toLowerCase()
+    const effortLower = openaiEffort?.toLowerCase()
+    const thinkingTag =
+      typeof anthropicBudget === 'number' ? `thinking:${anthropicBudget}` : null
+
     const overrideAlreadyIncludesModel = overrideLower.includes(modelLower)
     const overrideAlreadyIncludesEffort = effortLower
       ? overrideLower.includes(effortLower)
       : true
-    if (overrideAlreadyIncludesModel && overrideAlreadyIncludesEffort) {
-      return override
-    }
+    const overrideAlreadyIncludesThinking = thinkingTag
+      ? overrideLower.includes(thinkingTag.toLowerCase())
+      : true
 
-    const suffixParts = [model]
-    if (effort) suffixParts.push(effort)
+    const suffixParts: string[] = []
+    if (!overrideAlreadyIncludesModel) suffixParts.push(modelShort)
+    if (openaiEffort && !overrideAlreadyIncludesEffort) suffixParts.push(openaiEffort)
+    if (thinkingTag && !overrideAlreadyIncludesThinking) suffixParts.push(thinkingTag)
+
+    if (suffixParts.length === 0) return override
     return `${override} (${suffixParts.join(' • ')})`
   }
 
-  if (effort) return `${model} (${effort})`
-  return model
+  if (openaiEffort) return `${modelShort} (${openaiEffort})`
+  if (anthropicBudget) return `${modelShort} (thinking:${anthropicBudget})`
+  return modelShort
 }
 
 export function sessionDisplayName(session: SessionV1) {

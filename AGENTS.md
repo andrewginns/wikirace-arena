@@ -85,7 +85,10 @@ Backend + DB (local API):
 
 ## Security & Configuration Tips
 
-- Don’t commit secrets; `.env` is ignored. Common env vars: `VITE_API_BASE`, `WIKISPEEDIA_DB_PATH`, provider keys (e.g. `OPENAI_API_KEY`), and multiplayer controls like `WIKIRACE_ROOM_TTL_SECONDS`, `WIKIRACE_ROOM_CLEANUP_INTERVAL_SECONDS`, `WIKIRACE_MAX_LLM_RUNS_PER_ROOM`, `WIKIRACE_MAX_CONCURRENT_LLM_CALLS`, `WIKIRACE_PUBLIC_HOST`.
+- Don’t commit secrets; `.env` is ignored. Common env vars: `VITE_API_BASE`, `WIKISPEEDIA_DB_PATH`, provider keys (e.g. `OPENAI_API_KEY`), Logfire (`LOGFIRE_TOKEN`), local tracing controls like `WIKIRACE_LOCAL_RUN_TTL_SECONDS` / `WIKIRACE_LOCAL_RUN_CLEANUP_INTERVAL_SECONDS`, and multiplayer controls like `WIKIRACE_ROOM_TTL_SECONDS`, `WIKIRACE_ROOM_CLEANUP_INTERVAL_SECONDS`, `WIKIRACE_MAX_LLM_RUNS_PER_ROOM`, `WIKIRACE_MAX_CONCURRENT_LLM_CALLS`, `WIKIRACE_PUBLIC_HOST`.
+- Backend env loading: `llm_client.py` calls `load_dotenv(override=True)`, so `.env` values take precedence over shell-exported vars (e.g. in `~/.zshrc`).
+- Logfire: set `LOGFIRE_TOKEN` to enable trace export; when missing the app runs normally (`send_to_logfire="if-token-present"`).
+- Local run tracing (Play → Local): the UI calls `/llm/local_run/start` once per run to create a Logfire parent “attempt” span, then sends the returned `traceparent` header on each `/llm/choose_link` call so all hops nest under that run.
 - Wiki iframe proxy tuning (server-side `/wiki/*` fetch + cache): `WIKIRACE_WIKI_CACHE_MAX_ENTRIES`, `WIKIRACE_WIKI_CACHE_TTL_SECONDS`, `WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS`, `WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS`, `WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS`.
 - Title resolution caching: `WIKIRACE_RESOLVE_ARTICLE_CACHE_TTL_SECONDS` controls `Cache-Control` max-age for `/resolve_article/*`.
 - Debugging wiki proxy cache: responses include `X-Wiki-Proxy-Cache: HIT|MISS|OFFLINE`.

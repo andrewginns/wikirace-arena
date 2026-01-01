@@ -79,7 +79,10 @@ export default function ModelPicker({
                 setQuery("");
               }
             }}
-            placeholder={placeholder || "Type any LiteLLM model string (e.g. openai/gpt-5-mini)"}
+            placeholder={
+              placeholder ||
+              "Type any PydanticAI model id (e.g. openai-responses:gpt-5-mini)"
+            }
             disabled={disabled}
             autoCapitalize="none"
             autoCorrect="off"

@@ -33,7 +33,7 @@ Why: direct download URLs have been brittle; a 404/error page saved to disk can 
 
 ## Which models are supported?
 
-Agent moves are generated via [LiteLLM](https://github.com/BerriAI/litellm), so you can use most major model providers.
+Agent moves are generated via **PydanticAI**, so you can use multiple providers via their native SDKs.
 
 You typically just need to export the right API key for your provider, for example:
 
@@ -45,12 +45,17 @@ export OPENAI_API_KEY=...
 
 Common providers:
 
-- OpenAI: `OPENAI_API_KEY`, model like `gpt-4o-mini`
-- Anthropic: `ANTHROPIC_API_KEY`, model like `anthropic/claude-3-haiku-20240307`
-- Google AI Studio (Gemini): `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), model like `gemini/gemini-1.5-pro`
+- OpenAI (hosted, Responses API): `OPENAI_API_KEY`, model like `openai-responses:gpt-5-mini`
+- Anthropic: `ANTHROPIC_API_KEY`, model like `anthropic:claude-3-haiku-20240307`
+- Google AI Studio (Gemini): `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), model like `google-gla:gemini-2.0-flash`
+- OpenRouter: `OPENROUTER_API_KEY`, model like `openrouter:anthropic/claude-3.5-sonnet`
 
-For OpenAI-compatible hosted endpoints (vLLM, etc.), pass `--api-base`.
-If your server doesn’t require auth, setting `OPENAI_API_KEY=EMPTY` is often enough to satisfy client libraries.
+For OpenAI-compatible hosted endpoints (vLLM, etc.), pass `--api-base` and use an OpenAI model id:
+
+- `openai:<model>` (Chat Completions)
+- `openai-responses:<model>` (Responses API)
+
+If your server doesn’t require auth, setting `OPENAI_API_KEY=EMPTY` is often enough.
 
 ## Play a single game
 
@@ -64,13 +69,8 @@ uv run python parallel_eval/game.py --human --start 'Saint Lucia' --end 'Italy' 
 
 ```bash
 export OPENAI_API_KEY=sk_...
-uv run python parallel_eval/game.py --agent --start 'Saint Lucia' --end 'Italy' --db parallel_eval/wikihop.db --model gpt-4o --max-steps 20
+uv run python parallel_eval/game.py --agent --start 'Saint Lucia' --end 'Italy' --db parallel_eval/wikihop.db --model openai-responses:gpt-5-mini --max-steps 20
 ```
-
-Notes:
-
-- `--model` is passed to LiteLLM. Make sure you use a model string LiteLLM understands.
-- `--api-base` defaults to `https://api.openai.com/v1` in `game.py`.
 
 ## Run a parallel evaluation (many games)
 
@@ -85,7 +85,7 @@ Example: evaluate a vLLM-hosted model with 200 workers:
 
 ```bash
 uv run python parallel_eval/proctor.py \
-  --model 'hosted_vllm/Qwen/Qwen3-30B-A3B' \
+  --model 'openai:Qwen/Qwen3-30B-A3B' \
   --api-base 'http://localhost:8000/v1' \
   --workers 200 \
   --db-path wikihop.db

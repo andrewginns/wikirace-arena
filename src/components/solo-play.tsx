@@ -41,9 +41,10 @@ export default function SoloPlay({
     maxLinks: number;
   }) => void;
 }) {
+  const preferredModel = "openai-responses:gpt-5-mini";
   const [player, setPlayer] = useState<"me" | "model">("model");
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
-    modelList.includes("gpt-5-mini") ? "gpt-5-mini" : modelList[0]
+    modelList.includes(preferredModel) ? preferredModel : modelList[0]
   );
   const [maxHops] = useState<number>(20);
   const [startPage, setStartPage] = useState<string>(
@@ -65,9 +66,9 @@ export default function SoloPlay({
 
   useEffect(() => {
     if (!selectedModel || selectedModel.trim().length === 0) {
-      setSelectedModel(modelList.includes("gpt-5-mini") ? "gpt-5-mini" : modelList[0]);
+      setSelectedModel(modelList.includes(preferredModel) ? preferredModel : modelList[0]);
     }
-  }, [modelList, selectedModel]);
+  }, [modelList, preferredModel, selectedModel]);
 
   const handlePlayerChange = (value: string) => setPlayer(value as "me" | "model");
 
@@ -166,7 +167,7 @@ export default function SoloPlay({
                       value={selectedModel}
                       onValueChange={(v) => setSelectedModel(v)}
                       options={modelList}
-                      description="Pick from the list or type any LiteLLM model string."
+                      description="Pick from the list or type any PydanticAI model id."
                     />
                   </div>
 

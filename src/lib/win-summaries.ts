@@ -17,7 +17,11 @@ export type WinRunSummaryV1 = {
   player_name: string | null;
   model: string | null;
   api_base: string | null;
-  reasoning_effort: string | null;
+  openai_api_mode: string | null;
+  openai_reasoning_effort: string | null;
+  openai_reasoning_summary: string | null;
+  anthropic_thinking_budget_tokens: number | null;
+  google_thinking_config: Record<string, unknown> | null;
 
   max_steps: number | null;
   max_links: number | null;
@@ -101,7 +105,17 @@ export function addWinRunSummary({
     player_name: run.player_name || null,
     model: run.kind === "llm" ? run.model || null : null,
     api_base: run.kind === "llm" ? run.api_base || null : null,
-    reasoning_effort: run.kind === "llm" ? run.reasoning_effort || null : null,
+    openai_api_mode: run.kind === "llm" ? run.openai_api_mode || null : null,
+    openai_reasoning_effort: run.kind === "llm" ? run.openai_reasoning_effort || null : null,
+    openai_reasoning_summary: run.kind === "llm" ? run.openai_reasoning_summary || null : null,
+    anthropic_thinking_budget_tokens:
+      run.kind === "llm" && typeof run.anthropic_thinking_budget_tokens === "number"
+        ? run.anthropic_thinking_budget_tokens
+        : null,
+    google_thinking_config:
+      run.kind === "llm" && run.google_thinking_config
+        ? run.google_thinking_config
+        : null,
 
     max_steps: typeof run.max_steps === "number" ? run.max_steps : null,
     max_links: typeof run.max_links === "number" ? run.max_links : null,
@@ -119,4 +133,3 @@ export function addWinRunSummary({
   persist();
   return summary;
 }
-

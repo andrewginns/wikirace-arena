@@ -1,5 +1,6 @@
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import type { SessionRulesV1, SessionV1 } from "@/lib/session-types";
+import { llmDisplayNameOverride, llmModelLabel, llmModelShortName } from "@/lib/llm-display";
 import { runDisplayName } from "@/lib/session-utils";
 
 export type RaceMode = "local" | "multiplayer";
@@ -35,7 +36,11 @@ export type RaceRun = {
   player_name?: string;
   model?: string;
   api_base?: string;
-  reasoning_effort?: string;
+  openai_api_mode?: string;
+  openai_reasoning_effort?: string;
+  openai_reasoning_summary?: string;
+  anthropic_thinking_budget_tokens?: number;
+  google_thinking_config?: Record<string, unknown>;
 
   max_steps?: number;
   max_links?: number | null;
@@ -107,7 +112,11 @@ export function sessionToRaceState(session: SessionV1): RaceState {
       player_name: run.player_name,
       model: run.model,
       api_base: run.api_base,
-      reasoning_effort: run.reasoning_effort,
+      openai_api_mode: run.openai_api_mode,
+      openai_reasoning_effort: run.openai_reasoning_effort,
+      openai_reasoning_summary: run.openai_reasoning_summary,
+      anthropic_thinking_budget_tokens: run.anthropic_thinking_budget_tokens,
+      google_thinking_config: run.google_thinking_config,
       max_steps: run.max_steps,
       max_links: typeof run.max_links === "number" ? run.max_links : run.max_links === null ? null : undefined,
       max_tokens: typeof run.max_tokens === "number" ? run.max_tokens : run.max_tokens === null ? null : undefined,
@@ -163,7 +172,17 @@ export function roomToRaceState(room: MultiplayerRoomV1, youPlayerId: string | n
     const displayName =
       run.kind === "human"
         ? player?.name || run.player_name || "Human"
-        : run.player_name || run.model || "AI";
+        : llmDisplayNameOverride({
+            playerName: run.player_name,
+            model: run.model,
+          }) ||
+          llmModelLabel({
+            model: run.model,
+            openaiReasoningEffort: run.openai_reasoning_effort,
+            anthropicThinkingBudgetTokens: run.anthropic_thinking_budget_tokens,
+          }) ||
+          llmModelShortName(run.model) ||
+          "AI";
 
     return {
       id: run.id,
@@ -173,7 +192,11 @@ export function roomToRaceState(room: MultiplayerRoomV1, youPlayerId: string | n
       player_name: run.player_name,
       model: run.model,
       api_base: run.api_base,
-      reasoning_effort: run.reasoning_effort,
+      openai_api_mode: run.openai_api_mode,
+      openai_reasoning_effort: run.openai_reasoning_effort,
+      openai_reasoning_summary: run.openai_reasoning_summary,
+      anthropic_thinking_budget_tokens: run.anthropic_thinking_budget_tokens,
+      google_thinking_config: run.google_thinking_config,
       max_steps: run.max_steps,
       max_links: run.max_links === null ? null : typeof run.max_links === "number" ? run.max_links : undefined,
       max_tokens: run.max_tokens === null ? null : typeof run.max_tokens === "number" ? run.max_tokens : undefined,

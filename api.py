@@ -10,6 +10,8 @@ import socket
 import subprocess
 import sys
 import ipaddress
+from dataclasses import dataclass
+from threading import Lock
 from collections import OrderedDict
 from urllib.parse import quote
 from typing import Tuple, List, Optional, Any
@@ -21,8 +23,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import uvicorn
-import litellm
 import aiohttp
+import logfire
+from opentelemetry import trace
+from opentelemetry import context as otel_context
+from opentelemetry.propagate import extract, inject
+from opentelemetry.trace import INVALID_SPAN, Span, set_span_in_context
+
+from llm_client import achat, configure_observability, run_span_name
 
 app = FastAPI(title="WikiSpeedia API")
 
@@ -45,12 +53,15 @@ class LLMChatRequest(BaseModel):
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
     api_base: Optional[str] = None
+
     # Advanced (provider-specific) parameters.
-    # LiteLLM supports `reasoning_effort` for OpenAI reasoning models, and also maps it
-    # to the appropriate underlying fields for providers like Anthropic.
-    reasoning_effort: Optional[str] = None
-    # Alias for providers that expose this as "effort" (we map to reasoning_effort).
-    effort: Optional[str] = None
+    # OpenAI hosted models should use the Responses API. For custom OpenAI-compatible
+    # endpoints (`api_base`), default to Chat Completions unless `openai_api_mode` is set.
+    openai_api_mode: Optional[str] = None
+    openai_reasoning_effort: Optional[str] = None
+    openai_reasoning_summary: Optional[str] = None
+    anthropic_thinking_budget_tokens: Optional[int] = None
+    google_thinking_config: Optional[dict[str, Any]] = None
 
 
 class LLMUsage(BaseModel):
@@ -64,6 +75,28 @@ class LLMChatResponse(BaseModel):
     usage: Optional[LLMUsage] = None
 
 
+class LocalRunTraceStartRequest(BaseModel):
+    session_id: str
+    run_id: str
+    model: str
+    api_base: Optional[str] = None
+    openai_api_mode: Optional[str] = None
+    openai_reasoning_effort: Optional[str] = None
+    openai_reasoning_summary: Optional[str] = None
+    anthropic_thinking_budget_tokens: Optional[int] = None
+    google_thinking_config: Optional[dict[str, Any]] = None
+
+
+class LocalRunTraceStartResponse(BaseModel):
+    traceparent: str
+    span_name: str
+
+
+class LocalRunTraceEndRequest(BaseModel):
+    session_id: str
+    run_id: str
+
+
 class LLMChooseLinkRequest(BaseModel):
     model: str
     current_article: str
@@ -73,7 +106,11 @@ class LLMChooseLinkRequest(BaseModel):
     max_tries: Optional[int] = None
     max_tokens: Optional[int] = None
     api_base: Optional[str] = None
-    reasoning_effort: Optional[str] = None
+    openai_api_mode: Optional[str] = None
+    openai_reasoning_effort: Optional[str] = None
+    openai_reasoning_summary: Optional[str] = None
+    anthropic_thinking_budget_tokens: Optional[int] = None
+    google_thinking_config: Optional[dict[str, Any]] = None
 
 
 class LLMChooseLinkResponse(BaseModel):
@@ -135,7 +172,11 @@ class RoomRunV1(BaseModel):
     player_name: Optional[str] = None
     model: Optional[str] = None
     api_base: Optional[str] = None
-    reasoning_effort: Optional[str] = None
+    openai_api_mode: Optional[str] = None
+    openai_reasoning_effort: Optional[str] = None
+    openai_reasoning_summary: Optional[str] = None
+    anthropic_thinking_budget_tokens: Optional[int] = None
+    google_thinking_config: Optional[dict[str, Any]] = None
     max_steps: Optional[int] = None
     max_links: Optional[int] = None
     max_tokens: Optional[int] = None
@@ -205,7 +246,11 @@ class AddLlmRunRequest(BaseModel):
     model: str
     player_name: Optional[str] = None
     api_base: Optional[str] = None
-    reasoning_effort: Optional[str] = None
+    openai_api_mode: Optional[str] = None
+    openai_reasoning_effort: Optional[str] = None
+    openai_reasoning_summary: Optional[str] = None
+    anthropic_thinking_budget_tokens: Optional[int] = None
+    google_thinking_config: Optional[dict[str, Any]] = None
     max_steps: Optional[int] = None
     max_links: Optional[int] = None
     max_tokens: Optional[int] = None
@@ -341,6 +386,19 @@ ROOM_CONNECTIONS: dict[str, set[WebSocket]] = {}
 ROOM_TASKS: dict[str, dict[str, asyncio.Task]] = {}
 
 
+@dataclass
+class LocalRunTrace:
+    span: Span
+    traceparent: str
+    span_name: str
+    started_at: float
+    last_seen: float
+
+
+LOCAL_RUN_TRACES: dict[str, LocalRunTrace] = {}
+LOCAL_RUN_TRACES_LOCK = Lock()
+
+
 def _env_positive_int(name: str, default: int) -> int:
     raw = (os.getenv(name) or "").strip()
     if not raw:
@@ -352,8 +410,25 @@ def _env_positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _local_run_trace_key(session_id: str, run_id: str) -> str:
+    return f"{session_id}:{run_id}"
+
+
+def _touch_local_run_trace(session_id: str, run_id: str) -> None:
+    now = time.time()
+    key = _local_run_trace_key(session_id, run_id)
+    with LOCAL_RUN_TRACES_LOCK:
+        trace_entry = LOCAL_RUN_TRACES.get(key)
+        if trace_entry is not None:
+            trace_entry.last_seen = now
+
+
 WIKIRACE_MAX_LLM_RUNS_PER_ROOM = _env_positive_int("WIKIRACE_MAX_LLM_RUNS_PER_ROOM", 8)
 WIKIRACE_MAX_CONCURRENT_LLM_CALLS = _env_positive_int("WIKIRACE_MAX_CONCURRENT_LLM_CALLS", 3)
+LOCAL_RUN_TRACE_IDLE_TTL_SECONDS = _env_positive_int("WIKIRACE_LOCAL_RUN_TTL_SECONDS", 3600)
+LOCAL_RUN_TRACE_CLEANUP_INTERVAL_SECONDS = _env_positive_int(
+    "WIKIRACE_LOCAL_RUN_CLEANUP_INTERVAL_SECONDS", 300
+)
 WIKIRACE_WIKI_CACHE_MAX_ENTRIES = _env_positive_int("WIKIRACE_WIKI_CACHE_MAX_ENTRIES", 256)
 WIKIRACE_WIKI_CACHE_TTL_SECONDS = _env_positive_int("WIKIRACE_WIKI_CACHE_TTL_SECONDS", 900)
 WIKIRACE_RESOLVE_ARTICLE_CACHE_TTL_SECONDS = _env_positive_int(
@@ -690,70 +765,49 @@ def _extract_answer(response: str, maximum_answer: int) -> tuple[Optional[int], 
     return value, None
 
 
-def _usage_payload_from_response(response: Any) -> Optional[dict[str, Any]]:
-    raw_usage = getattr(response, "usage", None)
-    if not raw_usage:
-        return None
-
-    try:
-        if isinstance(raw_usage, dict):
-            return raw_usage
-        if hasattr(raw_usage, "model_dump"):
-            return raw_usage.model_dump()
-        if hasattr(raw_usage, "dict"):
-            return raw_usage.dict()
-        return dict(raw_usage)
-    except Exception:
-        return None
-
-
-def _llm_kwargs(
+async def _call_llm(
+    prompt: str,
     *,
     model: str,
-    prompt: str,
     max_tokens: Optional[int],
     api_base: Optional[str],
-    reasoning_effort: Optional[str],
-) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-
-    if isinstance(max_tokens, int) and max_tokens > 0:
-        kwargs["max_tokens"] = max_tokens
-
-    if reasoning_effort is not None:
-        effort = reasoning_effort.strip()
-        if effort:
-            kwargs["reasoning_effort"] = effort
-
-    if api_base:
-        kwargs["api_base"] = api_base
-        if "/" not in model or model.startswith(("openai/", "hosted_vllm/")):
-            kwargs["api_key"] = os.getenv("OPENAI_API_KEY") or "EMPTY"
-
-    return kwargs
-
-
-async def _call_llm(prompt: str, *, model: str, max_tokens: Optional[int], api_base: Optional[str], reasoning_effort: Optional[str]):
+    openai_api_mode: Optional[str],
+    openai_reasoning_effort: Optional[str],
+    openai_reasoning_summary: Optional[str],
+    anthropic_thinking_budget_tokens: Optional[int],
+    google_thinking_config: Optional[dict[str, Any]],
+) -> tuple[str, Optional[dict[str, int]]]:
     async with LLM_CALL_SEMAPHORE:
-        response = await litellm.acompletion(
-            **_llm_kwargs(
-                model=model,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                api_base=api_base,
-                reasoning_effort=reasoning_effort,
-            )
+        result = await achat(
+            model=model,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            api_base=api_base,
+            openai_api_mode=openai_api_mode,
+            openai_reasoning_effort=openai_reasoning_effort,
+            openai_reasoning_summary=openai_reasoning_summary,
+            anthropic_thinking_budget_tokens=anthropic_thinking_budget_tokens,
+            google_thinking_config=google_thinking_config,
         )
 
-    content = _extract_llm_content(response)
-    if content is None:
-        raise RuntimeError("Model returned empty content")
+    usage_payload: Optional[dict[str, int]] = None
+    if result.usage is not None:
+        prompt_tokens = result.usage.prompt_tokens
+        completion_tokens = result.usage.completion_tokens
+        total_tokens = result.usage.total_tokens
 
-    usage_payload = _usage_payload_from_response(response)
-    return content, usage_payload
+        usage_payload = {}
+        if isinstance(prompt_tokens, int):
+            usage_payload["prompt_tokens"] = prompt_tokens
+        if isinstance(completion_tokens, int):
+            usage_payload["completion_tokens"] = completion_tokens
+        if isinstance(total_tokens, int):
+            usage_payload["total_tokens"] = total_tokens
+
+        if not usage_payload:
+            usage_payload = None
+
+    return result.content, usage_payload
 
 
 async def _choose_llm_link(
@@ -766,7 +820,11 @@ async def _choose_llm_link(
     max_tries: int,
     max_tokens: Optional[int],
     api_base: Optional[str],
-    reasoning_effort: Optional[str],
+    openai_api_mode: Optional[str],
+    openai_reasoning_effort: Optional[str],
+    openai_reasoning_summary: Optional[str],
+    anthropic_thinking_budget_tokens: Optional[int],
+    google_thinking_config: Optional[dict[str, Any]],
 ) -> tuple[Optional[int], dict[str, Any]]:
     base_prompt = _build_llm_prompt(current_article, target_article, path_so_far, links)
     prompt = base_prompt
@@ -791,19 +849,19 @@ async def _choose_llm_link(
             model=model,
             max_tokens=max_tokens,
             api_base=api_base,
-            reasoning_effort=reasoning_effort,
+            openai_api_mode=openai_api_mode,
+            openai_reasoning_effort=openai_reasoning_effort,
+            openai_reasoning_summary=openai_reasoning_summary,
+            anthropic_thinking_budget_tokens=anthropic_thinking_budget_tokens,
+            google_thinking_config=google_thinking_config,
         )
 
         llm_outputs.append(response_text)
         last_output = response_text
 
         if isinstance(usage_payload, dict):
-            prompt_tokens = usage_payload.get("prompt_tokens") or usage_payload.get(
-                "input_tokens"
-            )
-            completion_tokens = usage_payload.get("completion_tokens") or usage_payload.get(
-                "output_tokens"
-            )
+            prompt_tokens = usage_payload.get("prompt_tokens")
+            completion_tokens = usage_payload.get("completion_tokens")
             total_tokens = usage_payload.get("total_tokens")
 
             if isinstance(prompt_tokens, int):
@@ -894,219 +952,329 @@ def _path_so_far(room: dict[str, Any], steps: list[dict[str, Any]]) -> list[str]
 async def _run_llm_room_task(room_id: str, run_id: str) -> None:
     room_id = _normalize_room_id(room_id)
 
-    try:
-        while True:
-            lock = ROOM_LOCKS.get(room_id)
-            room = ROOMS.get(room_id)
-            if not lock or not room:
-                return
+    configure_observability()
 
-            async with lock:
-                if room.get("status") != "running":
+    lock = ROOM_LOCKS.get(room_id)
+    room = ROOMS.get(room_id)
+    if not lock or not room:
+        return
+
+    span_model: Optional[str] = None
+    span_openai_reasoning_effort: Optional[str] = None
+
+    async with lock:
+        if room.get("status") != "running":
+            return
+
+        run = _room_run_by_id(room, run_id)
+        if not run:
+            return
+
+        if run.get("kind") != "llm" or run.get("status") != "running":
+            return
+
+        model = run.get("model")
+        model_value = model.strip() if isinstance(model, str) else ""
+        span_model = model_value or None
+
+        openai_reasoning_effort = run.get("openai_reasoning_effort")
+        span_openai_reasoning_effort = (
+            openai_reasoning_effort
+            if isinstance(openai_reasoning_effort, str)
+            and openai_reasoning_effort.strip()
+            else None
+        )
+
+    provider_tag = (
+        span_model.split(":", 1)[0]
+        if isinstance(span_model, str) and ":" in span_model
+        else None
+    )
+    tags = ["wikirace", "attempt", "multiplayer"]
+    if provider_tag:
+        tags.append(provider_tag)
+
+    span_name = run_span_name(
+        model=span_model or "unknown",
+        openai_reasoning_effort=span_openai_reasoning_effort,
+    )
+
+    with logfire.span(
+        span_name,
+        _span_name=span_name,
+        _tags=tags,
+        room_id=room_id,
+        run_id=run_id,
+        model=span_model,
+        openai_reasoning_effort=span_openai_reasoning_effort,
+    ):
+
+        try:
+            while True:
+                lock = ROOM_LOCKS.get(room_id)
+                room = ROOMS.get(room_id)
+                if not lock or not room:
                     return
 
-                run = _room_run_by_id(room, run_id)
-                if not run:
-                    return
-
-                if run.get("kind") != "llm" or run.get("status") != "running":
-                    return
-
-                steps = run.get("steps") or []
-                if not isinstance(steps, list):
-                    steps = []
-                steps = [s for s in steps if isinstance(s, dict)]
-
-                current_article = steps[-1].get("article") if steps else None
-                if not isinstance(current_article, str) or not current_article:
-                    current_article = room.get("start_article")
-                if not isinstance(current_article, str) or not current_article:
-                    return
-
-                destination_article = room.get("destination_article")
-                if not isinstance(destination_article, str) or not destination_article:
-                    return
-
-                current_hops = max(0, len(steps) - 1)
-                next_hops = current_hops + 1
-
-                max_steps = run.get("max_steps")
-                if not isinstance(max_steps, int) or max_steps <= 0:
-                    max_steps = room.get("rules", {}).get("max_hops")
-                if not isinstance(max_steps, int) or max_steps <= 0:
-                    max_steps = 20
-
-                max_links = run.get("max_links")
-                if not isinstance(max_links, int) or max_links <= 0:
-                    max_links = None
-
-                max_tokens = run.get("max_tokens")
-                if not isinstance(max_tokens, int) or max_tokens <= 0:
-                    max_tokens = None
-
-                model = run.get("model")
-                model_value = model.strip() if isinstance(model, str) else ""
-
-                api_base = run.get("api_base")
-                api_base = api_base if isinstance(api_base, str) and api_base.strip() else None
-
-                reasoning_effort = run.get("reasoning_effort")
-                reasoning_effort = (
-                    reasoning_effort
-                    if isinstance(reasoning_effort, str) and reasoning_effort.strip()
-                    else None
-                )
-
-                snapshot_steps = steps
-                snapshot_current = current_article
-                snapshot_destination = destination_article
-                snapshot_next_hops = next_hops
-                snapshot_max_steps = max_steps
-                snapshot_model = model_value or None
-                snapshot_api_base = api_base
-                snapshot_reasoning_effort = reasoning_effort
-                snapshot_max_links = max_links
-                snapshot_max_tokens = max_tokens
-                snapshot_path = _path_so_far(room, snapshot_steps)
-
-            if snapshot_model is None:
-                await _fail_llm_run(
-                    room_id,
-                    run_id,
-                    snapshot_current,
-                    reason="llm_error",
-                    error="Missing model",
-                )
-                return
-
-            reached_destination = _titles_match(snapshot_current, snapshot_destination)
-            if not reached_destination:
-                canonical_current = db.canonical_title(snapshot_current)
-                canonical_target = db.canonical_title(snapshot_destination)
-                if canonical_current and canonical_target and _titles_match(
-                    canonical_current, canonical_target
-                ):
-                    reached_destination = True
-
-            if reached_destination:
-                finished_at = _now_iso()
                 async with lock:
-                    room = ROOMS.get(room_id)
-                    if not room:
-                        return
                     if room.get("status") != "running":
                         return
+
                     run = _room_run_by_id(room, run_id)
-                    if not run or run.get("status") != "running":
+                    if not run:
                         return
 
-                    run_steps = run.get("steps") or []
-                    run_steps = [s for s in run_steps if isinstance(s, dict)]
-                    run["steps"] = [
-                        *run_steps,
-                        {"type": "win", "article": snapshot_destination, "at": finished_at},
-                    ]
-                    run["status"] = "finished"
-                    run["result"] = "win"
-                    run["finished_at"] = finished_at
-                    room["updated_at"] = finished_at
-                    # Keep the room open for additional players/runs even if
-                    # all current runs have finished.
-                await _broadcast_room(room_id)
-                return
+                    if run.get("kind") != "llm" or run.get("status") != "running":
+                        return
 
-            try:
-                title, links = db.get_article_with_links(snapshot_current)
-            except Exception as exc:
-                await _fail_llm_run(room_id, run_id, snapshot_current, reason="llm_error", error=str(exc))
-                return
+                    steps = run.get("steps") or []
+                    if not isinstance(steps, list):
+                        steps = []
+                    steps = [s for s in steps if isinstance(s, dict)]
 
-            if not title:
-                await _fail_llm_run(room_id, run_id, snapshot_current, reason="llm_error", error="Article not found")
-                return
+                    current_article = steps[-1].get("article") if steps else None
+                    if not isinstance(current_article, str) or not current_article:
+                        current_article = room.get("start_article")
+                    if not isinstance(current_article, str) or not current_article:
+                        return
 
-            if isinstance(snapshot_max_links, int) and snapshot_max_links > 0:
-                links = links[: snapshot_max_links]
+                    destination_article = room.get("destination_article")
+                    if not isinstance(destination_article, str) or not destination_article:
+                        return
 
-            if not links:
-                await _fail_llm_run(room_id, run_id, snapshot_current, reason="no_links")
-                return
+                    current_hops = max(0, len(steps) - 1)
+                    next_hops = current_hops + 1
 
-            max_tries = 3
-            chosen_index, llm_metadata = await _choose_llm_link(
-                model=snapshot_model,
-                current_article=snapshot_current,
-                target_article=snapshot_destination,
-                path_so_far=snapshot_path,
-                links=links,
-                max_tries=max_tries,
-                max_tokens=snapshot_max_tokens,
-                api_base=snapshot_api_base,
-                reasoning_effort=snapshot_reasoning_effort,
-            )
+                    max_steps = run.get("max_steps")
+                    if not isinstance(max_steps, int) or max_steps <= 0:
+                        max_steps = room.get("rules", {}).get("max_hops")
+                    if not isinstance(max_steps, int) or max_steps <= 0:
+                        max_steps = 20
 
-            if chosen_index is None:
-                await _finish_llm_run(
-                    room_id,
-                    run_id,
-                    snapshot_current,
-                    step_type="lose",
-                    metadata={"reason": "bad_answer", **llm_metadata},
-                    expected_current=snapshot_current,
+                    max_links = run.get("max_links")
+                    if not isinstance(max_links, int) or max_links <= 0:
+                        max_links = None
+
+                    max_tokens = run.get("max_tokens")
+                    if not isinstance(max_tokens, int) or max_tokens <= 0:
+                        max_tokens = None
+
+                    model = run.get("model")
+                    model_value = model.strip() if isinstance(model, str) else ""
+
+                    api_base = run.get("api_base")
+                    api_base = api_base if isinstance(api_base, str) and api_base.strip() else None
+
+                    openai_api_mode = run.get("openai_api_mode")
+                    openai_api_mode = (
+                        openai_api_mode
+                        if isinstance(openai_api_mode, str) and openai_api_mode.strip()
+                        else None
+                    )
+
+                    openai_reasoning_effort = run.get("openai_reasoning_effort")
+                    openai_reasoning_effort = (
+                        openai_reasoning_effort
+                        if isinstance(openai_reasoning_effort, str)
+                        and openai_reasoning_effort.strip()
+                        else None
+                    )
+
+                    openai_reasoning_summary = run.get("openai_reasoning_summary")
+                    openai_reasoning_summary = (
+                        openai_reasoning_summary
+                        if isinstance(openai_reasoning_summary, str)
+                        and openai_reasoning_summary.strip()
+                        else None
+                    )
+
+                    anthropic_thinking_budget_tokens = run.get(
+                        "anthropic_thinking_budget_tokens"
+                    )
+                    anthropic_thinking_budget_tokens = (
+                        anthropic_thinking_budget_tokens
+                        if isinstance(anthropic_thinking_budget_tokens, int)
+                        and anthropic_thinking_budget_tokens > 0
+                        else None
+                    )
+
+                    google_thinking_config = run.get("google_thinking_config")
+                    google_thinking_config = (
+                        google_thinking_config
+                        if isinstance(google_thinking_config, dict) and google_thinking_config
+                        else None
+                    )
+
+                    snapshot_steps = steps
+                    snapshot_current = current_article
+                    snapshot_destination = destination_article
+                    snapshot_next_hops = next_hops
+                    snapshot_max_steps = max_steps
+                    snapshot_model = model_value or None
+                    snapshot_api_base = api_base
+                    snapshot_openai_api_mode = openai_api_mode
+                    snapshot_openai_reasoning_effort = openai_reasoning_effort
+                    snapshot_openai_reasoning_summary = openai_reasoning_summary
+                    snapshot_anthropic_thinking_budget_tokens = anthropic_thinking_budget_tokens
+                    snapshot_google_thinking_config = google_thinking_config
+                    snapshot_max_links = max_links
+                    snapshot_max_tokens = max_tokens
+                    snapshot_path = _path_so_far(room, snapshot_steps)
+
+                if snapshot_model is None:
+                    await _fail_llm_run(
+                        room_id,
+                        run_id,
+                        snapshot_current,
+                        reason="llm_error",
+                        error="Missing model",
+                    )
+                    return
+
+                reached_destination = _titles_match(snapshot_current, snapshot_destination)
+                if not reached_destination:
+                    canonical_current = db.canonical_title(snapshot_current)
+                    canonical_target = db.canonical_title(snapshot_destination)
+                    if canonical_current and canonical_target and _titles_match(
+                        canonical_current, canonical_target
+                    ):
+                        reached_destination = True
+
+                if reached_destination:
+                    finished_at = _now_iso()
+                    async with lock:
+                        room = ROOMS.get(room_id)
+                        if not room:
+                            return
+                        if room.get("status") != "running":
+                            return
+                        run = _room_run_by_id(room, run_id)
+                        if not run or run.get("status") != "running":
+                            return
+
+                        run_steps = run.get("steps") or []
+                        run_steps = [s for s in run_steps if isinstance(s, dict)]
+                        run["steps"] = [
+                            *run_steps,
+                            {"type": "win", "article": snapshot_destination, "at": finished_at},
+                        ]
+                        run["status"] = "finished"
+                        run["result"] = "win"
+                        run["finished_at"] = finished_at
+                        room["updated_at"] = finished_at
+                        # Keep the room open for additional players/runs even if
+                        # all current runs have finished.
+                    await _broadcast_room(room_id)
+                    return
+
+                try:
+                    title, links = db.get_article_with_links(snapshot_current)
+                except Exception as exc:
+                    await _fail_llm_run(
+                        room_id,
+                        run_id,
+                        snapshot_current,
+                        reason="llm_error",
+                        error=str(exc),
+                    )
+                    return
+
+                if not title:
+                    await _fail_llm_run(
+                        room_id,
+                        run_id,
+                        snapshot_current,
+                        reason="llm_error",
+                        error="Article not found",
+                    )
+                    return
+
+                if isinstance(snapshot_max_links, int) and snapshot_max_links > 0:
+                    links = links[: snapshot_max_links]
+
+                if not links:
+                    await _fail_llm_run(room_id, run_id, snapshot_current, reason="no_links")
+                    return
+
+                max_tries = 3
+                chosen_index, llm_metadata = await _choose_llm_link(
+                    model=snapshot_model,
+                    current_article=snapshot_current,
+                    target_article=snapshot_destination,
+                    path_so_far=snapshot_path,
+                    links=links,
+                    max_tries=max_tries,
+                    max_tokens=snapshot_max_tokens,
+                    api_base=snapshot_api_base,
+                    openai_api_mode=snapshot_openai_api_mode,
+                    openai_reasoning_effort=snapshot_openai_reasoning_effort,
+                    openai_reasoning_summary=snapshot_openai_reasoning_summary,
+                    anthropic_thinking_budget_tokens=snapshot_anthropic_thinking_budget_tokens,
+                    google_thinking_config=snapshot_google_thinking_config,
                 )
-                return
 
-            selected = links[chosen_index - 1]
-            reached_target = _titles_match(selected, snapshot_destination)
-            if not reached_target:
-                canonical_selected = db.canonical_title(selected)
-                canonical_target = db.canonical_title(snapshot_destination)
-                if canonical_selected and canonical_target and _titles_match(
-                    canonical_selected, canonical_target
-                ):
-                    reached_target = True
+                if chosen_index is None:
+                    await _finish_llm_run(
+                        room_id,
+                        run_id,
+                        snapshot_current,
+                        step_type="lose",
+                        metadata={"reason": "bad_answer", **llm_metadata},
+                        expected_current=snapshot_current,
+                    )
+                    return
 
-            if reached_target:
+                selected = links[chosen_index - 1]
+                reached_target = _titles_match(selected, snapshot_destination)
+                if not reached_target:
+                    canonical_selected = db.canonical_title(selected)
+                    canonical_target = db.canonical_title(snapshot_destination)
+                    if canonical_selected and canonical_target and _titles_match(
+                        canonical_selected, canonical_target
+                    ):
+                        reached_target = True
+
+                if reached_target:
+                    await _finish_llm_run(
+                        room_id,
+                        run_id,
+                        selected,
+                        step_type="win",
+                        metadata={"selected_index": chosen_index, **llm_metadata},
+                        forced_article=snapshot_destination,
+                        expected_current=snapshot_current,
+                    )
+                    return
+
+                if snapshot_next_hops >= snapshot_max_steps:
+                    await _finish_llm_run(
+                        room_id,
+                        run_id,
+                        selected,
+                        step_type="lose",
+                        metadata={
+                            "reason": "max_steps",
+                            "max_steps": snapshot_max_steps,
+                            "selected_index": chosen_index,
+                            **llm_metadata,
+                        },
+                        expected_current=snapshot_current,
+                    )
+                    return
+
                 await _finish_llm_run(
                     room_id,
                     run_id,
                     selected,
-                    step_type="win",
+                    step_type="move",
                     metadata={"selected_index": chosen_index, **llm_metadata},
-                    forced_article=snapshot_destination,
                     expected_current=snapshot_current,
                 )
-                return
 
-            if snapshot_next_hops >= snapshot_max_steps:
-                await _finish_llm_run(
-                    room_id,
-                    run_id,
-                    selected,
-                    step_type="lose",
-                    metadata={
-                        "reason": "max_steps",
-                        "max_steps": snapshot_max_steps,
-                        "selected_index": chosen_index,
-                        **llm_metadata,
-                    },
-                    expected_current=snapshot_current,
-                )
-                return
-
-            await _finish_llm_run(
-                room_id,
-                run_id,
-                selected,
-                step_type="move",
-                metadata={"selected_index": chosen_index, **llm_metadata},
-                expected_current=snapshot_current,
-            )
-
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        await _fail_llm_run(room_id, run_id, None, reason="llm_error", error=str(exc))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await _fail_llm_run(room_id, run_id, None, reason="llm_error", error=str(exc))
 
 
 async def _finish_llm_run(
@@ -1316,10 +1484,53 @@ async def _start_room_cleanup_task():
     asyncio.create_task(_cleanup_loop())
 
 
+@app.on_event("startup")
+async def _start_local_run_trace_cleanup_task():
+    async def _cleanup_loop():
+        while True:
+            await asyncio.sleep(LOCAL_RUN_TRACE_CLEANUP_INTERVAL_SECONDS)
+            if LOCAL_RUN_TRACE_IDLE_TTL_SECONDS <= 0:
+                continue
+
+            now = time.time()
+            to_end: list[Span] = []
+
+            with LOCAL_RUN_TRACES_LOCK:
+                for key, trace_entry in list(LOCAL_RUN_TRACES.items()):
+                    age = now - trace_entry.last_seen
+                    if age <= LOCAL_RUN_TRACE_IDLE_TTL_SECONDS:
+                        continue
+                    LOCAL_RUN_TRACES.pop(key, None)
+                    to_end.append(trace_entry.span)
+
+            for span in to_end:
+                try:
+                    span.end()
+                except Exception:
+                    pass
+
+    asyncio.create_task(_cleanup_loop())
+
+
 @app.on_event("shutdown")
 async def _shutdown_room_tasks():
     for room_id in list(ROOM_TASKS.keys()):
         _cancel_room_tasks(room_id)
+
+
+@app.on_event("shutdown")
+async def _shutdown_local_run_traces() -> None:
+    to_end: list[Span] = []
+    with LOCAL_RUN_TRACES_LOCK:
+        for key, trace_entry in list(LOCAL_RUN_TRACES.items()):
+            LOCAL_RUN_TRACES.pop(key, None)
+            to_end.append(trace_entry.span)
+
+    for span in to_end:
+        try:
+            span.end()
+        except Exception:
+            pass
 
 
 @app.on_event("shutdown")
@@ -2341,8 +2552,32 @@ async def add_llm_run(room_id: str, body: AddLlmRunRequest):
 
         player_name = body.player_name.strip() if isinstance(body.player_name, str) else ""
         api_base = body.api_base.strip() if isinstance(body.api_base, str) else ""
-        reasoning_effort = (
-            body.reasoning_effort.strip() if isinstance(body.reasoning_effort, str) else ""
+
+        openai_api_mode = (
+            body.openai_api_mode.strip() if isinstance(body.openai_api_mode, str) else ""
+        )
+        openai_reasoning_effort = (
+            body.openai_reasoning_effort.strip()
+            if isinstance(body.openai_reasoning_effort, str)
+            else ""
+        )
+        openai_reasoning_summary = (
+            body.openai_reasoning_summary.strip()
+            if isinstance(body.openai_reasoning_summary, str)
+            else ""
+        )
+
+        anthropic_thinking_budget_tokens = (
+            body.anthropic_thinking_budget_tokens
+            if isinstance(body.anthropic_thinking_budget_tokens, int)
+            and body.anthropic_thinking_budget_tokens > 0
+            else None
+        )
+
+        google_thinking_config = (
+            body.google_thinking_config
+            if isinstance(body.google_thinking_config, dict) and body.google_thinking_config
+            else None
         )
 
         run: dict[str, Any] = {
@@ -2351,7 +2586,11 @@ async def add_llm_run(room_id: str, body: AddLlmRunRequest):
             "player_name": player_name or None,
             "model": model,
             "api_base": api_base or None,
-            "reasoning_effort": reasoning_effort or None,
+            "openai_api_mode": openai_api_mode or None,
+            "openai_reasoning_effort": openai_reasoning_effort or None,
+            "openai_reasoning_summary": openai_reasoning_summary or None,
+            "anthropic_thinking_budget_tokens": anthropic_thinking_budget_tokens,
+            "google_thinking_config": google_thinking_config,
             "max_steps": max_steps,
             "max_links": max_links,
             "max_tokens": max_tokens,
@@ -2773,240 +3012,295 @@ async def wiki_proxy(article_title: str):
         )
 
 
-def _get_field(obj: Any, key: str) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(key)
-    return getattr(obj, key, None)
+@app.post("/llm/local_run/start", response_model=LocalRunTraceStartResponse)
+async def llm_local_run_start(request: LocalRunTraceStartRequest):
+    configure_observability()
+
+    session_id = request.session_id.strip() if isinstance(request.session_id, str) else ""
+    run_id = request.run_id.strip() if isinstance(request.run_id, str) else ""
+    model = request.model.strip() if isinstance(request.model, str) else ""
+    if not session_id or not run_id or not model:
+        raise HTTPException(status_code=400, detail="Missing session_id/run_id/model")
+
+    openai_reasoning_effort = (
+        request.openai_reasoning_effort.strip()
+        if isinstance(request.openai_reasoning_effort, str) and request.openai_reasoning_effort.strip()
+        else None
+    )
+    api_base = (
+        request.api_base.strip()
+        if isinstance(request.api_base, str) and request.api_base.strip()
+        else None
+    )
+    openai_api_mode = (
+        request.openai_api_mode.strip()
+        if isinstance(request.openai_api_mode, str) and request.openai_api_mode.strip()
+        else None
+    )
+    openai_reasoning_summary = (
+        request.openai_reasoning_summary.strip()
+        if isinstance(request.openai_reasoning_summary, str)
+        and request.openai_reasoning_summary.strip()
+        else None
+    )
+    anthropic_thinking_budget_tokens = (
+        request.anthropic_thinking_budget_tokens
+        if isinstance(request.anthropic_thinking_budget_tokens, int)
+        and request.anthropic_thinking_budget_tokens > 0
+        else None
+    )
+    google_thinking_config = (
+        request.google_thinking_config
+        if isinstance(request.google_thinking_config, dict)
+        and request.google_thinking_config
+        else None
+    )
+
+    key = _local_run_trace_key(session_id, run_id)
+    now = time.time()
+
+    with LOCAL_RUN_TRACES_LOCK:
+        existing = LOCAL_RUN_TRACES.get(key)
+        if existing is not None:
+            existing.last_seen = now
+            return LocalRunTraceStartResponse(traceparent=existing.traceparent, span_name=existing.span_name)
+
+        span_name = run_span_name(model=model, openai_reasoning_effort=openai_reasoning_effort)
+        provider_tag = model.split(":", 1)[0] if ":" in model else None
+        tags = ["wikirace", "attempt", "local"]
+        if provider_tag:
+            tags.append(provider_tag)
+
+        attributes: dict[str, object] = {
+            "logfire.msg": span_name,
+            "logfire.tags": tags,
+            "wikirace.mode": "local",
+            "session_id": session_id,
+            "run_id": run_id,
+            "model": model,
+        }
+        if openai_reasoning_effort:
+            attributes["openai_reasoning_effort"] = openai_reasoning_effort
+        if api_base:
+            attributes["api_base"] = api_base
+        if openai_api_mode:
+            attributes["openai_api_mode"] = openai_api_mode
+        if openai_reasoning_summary:
+            attributes["openai_reasoning_summary"] = openai_reasoning_summary
+        if anthropic_thinking_budget_tokens:
+            attributes["anthropic_thinking_budget_tokens"] = anthropic_thinking_budget_tokens
+        if google_thinking_config:
+            attributes["google_thinking_config"] = google_thinking_config
+
+        tracer = trace.get_tracer("wikirace.local")
+        span = tracer.start_span(
+            span_name,
+            context=set_span_in_context(INVALID_SPAN),
+            attributes=attributes,
+        )
+
+        carrier: dict[str, str] = {}
+        inject(carrier, context=set_span_in_context(span))
+        traceparent = carrier.get("traceparent")
+        if not isinstance(traceparent, str) or not traceparent:
+            span.end()
+            raise HTTPException(status_code=500, detail="Failed to generate trace context")
+
+        LOCAL_RUN_TRACES[key] = LocalRunTrace(
+            span=span,
+            traceparent=traceparent,
+            span_name=span_name,
+            started_at=now,
+            last_seen=now,
+        )
+
+    return LocalRunTraceStartResponse(traceparent=traceparent, span_name=span_name)
 
 
-def _coerce_llm_text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
+@app.post("/llm/local_run/end")
+async def llm_local_run_end(request: LocalRunTraceEndRequest):
+    session_id = request.session_id.strip() if isinstance(request.session_id, str) else ""
+    run_id = request.run_id.strip() if isinstance(request.run_id, str) else ""
+    if not session_id or not run_id:
+        raise HTTPException(status_code=400, detail="Missing session_id/run_id")
 
-    if isinstance(value, str):
-        return value
+    key = _local_run_trace_key(session_id, run_id)
+    trace_entry: Optional[LocalRunTrace]
+    with LOCAL_RUN_TRACES_LOCK:
+        trace_entry = LOCAL_RUN_TRACES.pop(key, None)
 
-    # Some providers/models return structured content blocks (e.g. OpenAI)
-    # where the "content" field is a list of {type, text, ...} objects.
-    if isinstance(value, list):
-        parts: list[str] = []
-        for item in value:
-            if isinstance(item, str):
-                if item:
-                    parts.append(item)
-                continue
+    if trace_entry is not None:
+        try:
+            trace_entry.span.end()
+        except Exception:
+            pass
 
-            if isinstance(item, dict):
-                for key in ("text", "content", "value"):
-                    candidate = item.get(key)
-                    if isinstance(candidate, str) and candidate:
-                        parts.append(candidate)
-                        break
-                continue
-
-            candidate = getattr(item, "text", None)
-            if isinstance(candidate, str) and candidate:
-                parts.append(candidate)
-
-        combined = "".join(parts)
-        return combined if combined.strip() else None
-
-    if isinstance(value, dict):
-        for key in ("text", "content", "value"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate:
-                return candidate
-        return None
-
-    candidate = getattr(value, "text", None)
-    if isinstance(candidate, str) and candidate:
-        return candidate
-
-    return None
-
-
-def _extract_llm_content(response: Any) -> Optional[str]:
-    # Chat completions: response.choices[0].message.content
-    choices = _get_field(response, "choices")
-    if isinstance(choices, list) and choices:
-        choice0 = choices[0]
-        message = _get_field(choice0, "message")
-        if message is not None:
-            content = _coerce_llm_text(_get_field(message, "content"))
-            if content is not None and content.strip():
-                return content
-
-        # Text completion fallback: response.choices[0].text
-        text = _coerce_llm_text(_get_field(choice0, "text"))
-        if text is not None and text.strip():
-            return text
-
-    # Responses API: response.output_text (LiteLLM sometimes provides this).
-    output_text = _coerce_llm_text(_get_field(response, "output_text"))
-    if output_text is not None and output_text.strip():
-        return output_text
-
-    # Responses API: response.output[].content[].text
-    output = _get_field(response, "output")
-    if isinstance(output, list) and output:
-        parts: list[str] = []
-        for item in output:
-            role = _get_field(item, "role")
-            if role is not None and role != "assistant":
-                continue
-            content = _coerce_llm_text(_get_field(item, "content"))
-            if content is not None:
-                parts.append(content)
-        combined = "".join(parts)
-        return combined if combined.strip() else None
-
-    return None
+    return {"ok": True}
 
 
 @app.post("/llm/choose_link", response_model=LLMChooseLinkResponse)
-async def llm_choose_link(request: LLMChooseLinkRequest):
-    model = request.model.strip() if isinstance(request.model, str) else ""
-    if not model:
-        raise HTTPException(status_code=400, detail="Missing model")
+async def llm_choose_link(payload: LLMChooseLinkRequest, http_request: Request):
+    trace_session_id = (http_request.headers.get("x-wikirace-session-id") or "").strip()
+    trace_run_id = (http_request.headers.get("x-wikirace-run-id") or "").strip()
+    if trace_session_id and trace_run_id:
+        _touch_local_run_trace(trace_session_id, trace_run_id)
 
-    current_article = (
-        request.current_article.strip() if isinstance(request.current_article, str) else ""
-    )
-    target_article = (
-        request.target_article.strip() if isinstance(request.target_article, str) else ""
-    )
-    if not current_article or not target_article:
-        raise HTTPException(status_code=400, detail="Missing current/target article")
+    configure_observability()
 
-    links = [
-        link.strip()
-        for link in (request.links or [])
-        if isinstance(link, str) and link.strip()
-    ]
-    if not links:
-        raise HTTPException(status_code=400, detail="Missing links")
+    token = otel_context.attach(extract(http_request.headers))
+    try:
+        request = payload
+        model = request.model.strip() if isinstance(request.model, str) else ""
+        if not model:
+            raise HTTPException(status_code=400, detail="Missing model")
 
-    path = [
-        article.strip()
-        for article in (request.path_so_far or [])
-        if isinstance(article, str) and article.strip()
-    ]
-    if not path:
-        path = [current_article]
+        current_article = (
+            request.current_article.strip() if isinstance(request.current_article, str) else ""
+        )
+        target_article = (
+            request.target_article.strip() if isinstance(request.target_article, str) else ""
+        )
+        if not current_article or not target_article:
+            raise HTTPException(status_code=400, detail="Missing current/target article")
 
-    max_tries = (
-        request.max_tries
-        if isinstance(request.max_tries, int) and request.max_tries > 0
-        else 3
-    )
-    max_tries = min(max_tries, 10)
+        links = [
+            link.strip()
+            for link in (request.links or [])
+            if isinstance(link, str) and link.strip()
+        ]
+        if not links:
+            raise HTTPException(status_code=400, detail="Missing links")
 
-    max_tokens = (
-        request.max_tokens
-        if isinstance(request.max_tokens, int) and request.max_tokens > 0
-        else None
-    )
-    api_base = request.api_base.strip() if isinstance(request.api_base, str) and request.api_base.strip() else None
-    reasoning_effort = (
-        request.reasoning_effort.strip()
-        if isinstance(request.reasoning_effort, str) and request.reasoning_effort.strip()
-        else None
-    )
+        path = [
+            article.strip()
+            for article in (request.path_so_far or [])
+            if isinstance(article, str) and article.strip()
+        ]
+        if not path:
+            path = [current_article]
 
-    selected_index, metadata = await _choose_llm_link(
-        model=model,
-        current_article=current_article,
-        target_article=target_article,
-        path_so_far=path,
-        links=links,
-        max_tries=max_tries,
-        max_tokens=max_tokens,
-        api_base=api_base,
-        reasoning_effort=reasoning_effort,
-    )
+        max_tries = (
+            request.max_tries
+            if isinstance(request.max_tries, int) and request.max_tries > 0
+            else 3
+        )
+        max_tries = min(max_tries, 10)
 
-    return LLMChooseLinkResponse(selected_index=selected_index, **metadata)
+        max_tokens = (
+            request.max_tokens
+            if isinstance(request.max_tokens, int) and request.max_tokens > 0
+            else None
+        )
+        api_base = (
+            request.api_base.strip()
+            if isinstance(request.api_base, str) and request.api_base.strip()
+            else None
+        )
+        openai_api_mode = (
+            request.openai_api_mode.strip()
+            if isinstance(request.openai_api_mode, str) and request.openai_api_mode.strip()
+            else None
+        )
+        openai_reasoning_effort = (
+            request.openai_reasoning_effort.strip()
+            if isinstance(request.openai_reasoning_effort, str)
+            and request.openai_reasoning_effort.strip()
+            else None
+        )
+        openai_reasoning_summary = (
+            request.openai_reasoning_summary.strip()
+            if isinstance(request.openai_reasoning_summary, str)
+            and request.openai_reasoning_summary.strip()
+            else None
+        )
+        anthropic_thinking_budget_tokens = (
+            request.anthropic_thinking_budget_tokens
+            if isinstance(request.anthropic_thinking_budget_tokens, int)
+            and request.anthropic_thinking_budget_tokens > 0
+            else None
+        )
+        google_thinking_config = (
+            request.google_thinking_config
+            if isinstance(request.google_thinking_config, dict)
+            and request.google_thinking_config
+            else None
+        )
+
+        provider_tag = model.split(":", 1)[0] if ":" in model else None
+        tags = ["wikirace", "choose_link", "local"]
+        if provider_tag:
+            tags.append(provider_tag)
+
+        with logfire.span(
+            "choose_link",
+            _span_name="wikirace.choose_link",
+            _tags=tags,
+            session_id=trace_session_id or None,
+            run_id=trace_run_id or None,
+            model=model,
+            api_base=api_base,
+            openai_api_mode=openai_api_mode,
+            openai_reasoning_effort=openai_reasoning_effort,
+            current_article=current_article,
+            target_article=target_article,
+            links_count=len(links),
+            max_tokens=max_tokens,
+        ):
+            selected_index, metadata = await _choose_llm_link(
+                model=model,
+                current_article=current_article,
+                target_article=target_article,
+                path_so_far=path,
+                links=links,
+                max_tries=max_tries,
+                max_tokens=max_tokens,
+                api_base=api_base,
+                openai_api_mode=openai_api_mode,
+                openai_reasoning_effort=openai_reasoning_effort,
+                openai_reasoning_summary=openai_reasoning_summary,
+                anthropic_thinking_budget_tokens=anthropic_thinking_budget_tokens,
+                google_thinking_config=google_thinking_config,
+            )
+
+        return LLMChooseLinkResponse(selected_index=selected_index, **metadata)
+    finally:
+        otel_context.detach(token)
 
 
 @app.post("/llm/chat", response_model=LLMChatResponse)
 async def llm_chat(request: LLMChatRequest):
-    """LLM chat endpoint backed by LiteLLM.
+    """LLM chat endpoint backed by PydanticAI.
 
-    The frontend uses this to generate the agent's next move.
-
-    Configure provider keys via environment variables (e.g. OPENAI_API_KEY,
-    ANTHROPIC_API_KEY, etc.). For local OpenAI-compatible servers (vLLM, etc.),
-    pass `api_base` and optionally set `OPENAI_API_KEY=EMPTY`.
+    The frontend uses this to generate an agent move.
     """
 
-    kwargs: dict = {
-        "model": request.model,
-        "messages": [{"role": "user", "content": request.prompt}],
-    }
-    if request.max_tokens is not None and request.max_tokens > 0:
-        kwargs["max_tokens"] = request.max_tokens
-
-    if request.temperature is not None:
-        kwargs["temperature"] = request.temperature
-
-    reasoning_effort = request.reasoning_effort or request.effort
-    if reasoning_effort is not None:
-        reasoning_effort = reasoning_effort.strip()
-        if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
-
-    if request.api_base:
-        kwargs["api_base"] = request.api_base
-        # Many OpenAI-compatible local servers ignore auth, but LiteLLM still
-        # expects a key for OpenAI-style providers.
-        if "/" not in request.model or request.model.startswith(
-            ("openai/", "hosted_vllm/")
-        ):
-            kwargs["api_key"] = os.getenv("OPENAI_API_KEY") or "EMPTY"
+    model = request.model.strip() if isinstance(request.model, str) else ""
+    if not model:
+        raise HTTPException(status_code=400, detail="Missing model")
 
     try:
-        response = await litellm.acompletion(**kwargs)
-
-        content = _extract_llm_content(response)
-        if content is None:
-            raise RuntimeError("Model returned empty content")
-
-        usage_payload = None
-        raw_usage = getattr(response, "usage", None)
-        if raw_usage:
-            try:
-                if isinstance(raw_usage, dict):
-                    usage_payload = raw_usage
-                elif hasattr(raw_usage, "model_dump"):
-                    usage_payload = raw_usage.model_dump()
-                elif hasattr(raw_usage, "dict"):
-                    usage_payload = raw_usage.dict()
-                else:
-                    usage_payload = dict(raw_usage)
-            except Exception:
-                usage_payload = None
+        result = await achat(
+            model=model,
+            prompt=request.prompt,
+            max_tokens=request.max_tokens if isinstance(request.max_tokens, int) else None,
+            temperature=request.temperature,
+            api_base=request.api_base,
+            openai_api_mode=request.openai_api_mode,
+            openai_reasoning_effort=request.openai_reasoning_effort,
+            openai_reasoning_summary=request.openai_reasoning_summary,
+            anthropic_thinking_budget_tokens=request.anthropic_thinking_budget_tokens,
+            google_thinking_config=request.google_thinking_config,
+        )
 
         usage = None
-        if isinstance(usage_payload, dict):
-            prompt_tokens = usage_payload.get("prompt_tokens") or usage_payload.get("input_tokens")
-            completion_tokens = usage_payload.get("completion_tokens") or usage_payload.get(
-                "output_tokens"
-            )
-            total_tokens = usage_payload.get("total_tokens")
-
+        if result.usage is not None:
             usage = LLMUsage(
-                prompt_tokens=prompt_tokens
-                if isinstance(prompt_tokens, int)
-                else None,
-                completion_tokens=completion_tokens
-                if isinstance(completion_tokens, int)
-                else None,
-                total_tokens=total_tokens
-                if isinstance(total_tokens, int)
-                else None,
+                prompt_tokens=result.usage.prompt_tokens,
+                completion_tokens=result.usage.completion_tokens,
+                total_tokens=result.usage.total_tokens,
             )
 
-        return LLMChatResponse(content=content, usage=usage)
+        return LLMChatResponse(content=result.content, usage=usage)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

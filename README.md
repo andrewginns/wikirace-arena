@@ -33,7 +33,7 @@ Race from one Wikipedia article to another using only hyperlinks — either as a
   - **Design system**: Tailwind v4 + shadcn/ui primitives, with theme tokens in `src/index.css` (colors, radius, shadows, fonts)
 - **Backend**: FastAPI app in `api.py`
   - Serves article + link data from a local SQLite DB (`wikihop.db`)
-  - Optional LLM move generation via LiteLLM (`POST /llm/chat`)
+  - Optional LLM move generation via PydanticAI (`POST /llm/chat`)
 - **Evaluation tooling**: `parallel_eval/` for running batch evals and producing viewer JSON
 - **UX audit tooling**: `docs/ux-audit/` + a Playwright script to regenerate screenshots
 
@@ -105,7 +105,7 @@ The API serves graph endpoints used by the web app.
 WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db uv run uvicorn api:app --reload --port 8000
 ```
 
-If you want **LLM participants** to make moves in the web UI, also export a provider key for LiteLLM, e.g.:
+If you want **LLM participants** to make moves in the web UI, export a provider key (used by PydanticAI), e.g.:
 
 ```bash
 export OPENAI_API_KEY=sk_...
@@ -119,7 +119,7 @@ Endpoints you’ll care about:
 - `GET /health`
 - `GET /get_all_articles`
 - `GET /get_article_with_links/{title}`
-- `POST /llm/chat` (AI move generation via LiteLLM)
+- `POST /llm/chat` (AI move generation via PydanticAI)
 
 ### 5) Start the web app
 
@@ -190,19 +190,21 @@ Notes:
 - Rooms are stored **in memory** (server restart clears rooms).
 - Run with a single uvicorn worker (`--workers 1`) for consistent room state.
 
-### LiteLLM provider cheat sheet
+### PydanticAI model cheat sheet
 
 These env vars must be set in the shell where you run the API server.
 
 | Provider | Example `model` string | Key / config env var(s) | Notes |
 | --- | --- | --- | --- |
-| OpenAI | `gpt-5.2` | `OPENAI_API_KEY` | Uses OpenAI’s hosted API. |
-| Anthropic | `anthropic/claude-opus-4-5` | `ANTHROPIC_API_KEY` | Prefix the model with `anthropic/`. |
-| Google AI Studio (Gemini) | `gemini/gemini-3-pro-preview` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Prefix the model with `gemini/`. |
-| Google Vertex AI (Gemini) | `vertex_ai/gemini-2.5-pro` | `VERTEXAI_PROJECT`, `VERTEXAI_LOCATION`, credentials (e.g. `GOOGLE_APPLICATION_CREDENTIALS`) | Useful for org/GCP deployments. |
-| Local OpenAI-compatible server (vLLM, etc.) | (your server’s model name) | `OPENAI_API_KEY=EMPTY` (often) | Set `api_base` in a model participant’s “Provider overrides (advanced)”. |
+| OpenAI (hosted, Responses API) | `openai-responses:gpt-5.2` | `OPENAI_API_KEY` | Default for OpenAI in this repo. |
+| OpenAI (Chat Completions) | `openai:gpt-5.2` | `OPENAI_API_KEY` | Useful for OpenAI-compatible servers. |
+| Anthropic | `anthropic:claude-3-haiku-20240307` | `ANTHROPIC_API_KEY` | Uses Anthropic’s hosted API. |
+| Google AI Studio (Gemini) | `google-gla:gemini-2.0-flash` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Gemini via Google AI Studio (Generative Language API). |
+| Google Vertex AI (Gemini) | `google-vertex:gemini-2.5-pro` | Vertex credentials/config | Useful for org/GCP deployments. |
+| OpenRouter | `openrouter:anthropic/claude-3.5-sonnet` | `OPENROUTER_API_KEY` | Token usage is opt-in (handled automatically by the server). |
+| Local OpenAI-compatible server (vLLM, etc.) | `openai:<model>` | `OPENAI_API_KEY=EMPTY` (often) | Set `api_base` in a model participant’s “Provider overrides (advanced)”. |
 
-LiteLLM supports many more providers; as long as LiteLLM recognizes the `model` string + the corresponding env vars are set, the web UI will work.
+PydanticAI supports many more providers; as long as PydanticAI recognizes the `model` string + the corresponding env vars are set, the web UI will work.
 
 ### In the CLI
 

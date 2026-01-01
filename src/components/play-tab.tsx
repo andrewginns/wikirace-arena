@@ -41,10 +41,10 @@ export default function PlayTab({
   const [playMode, setPlayMode] = useState<PlayMode>(loadStoredPlayMode);
   const [isServerConnected, setIsServerConnected] = useState<boolean>(false);
   const [modelList] = useState<string[]>([
-    "gpt-5.2",
-    "gpt-5.1",
-    "gpt-5-mini",
-    "gpt-5-nano",
+    "openai-responses:gpt-5.2",
+    "openai-responses:gpt-5.1",
+    "openai-responses:gpt-5-mini",
+    "openai-responses:gpt-5-nano",
   ]);
   const [allArticles, setAllArticles] = useState<string[]>([]);
   const [setupCollapsed, setSetupCollapsed] = useState<boolean>(false);
@@ -151,7 +151,11 @@ export default function PlayTab({
           model,
           playerName: name.length > 0 && name !== model ? name : undefined,
           apiBase: p.apiBase,
-          reasoningEffort: p.reasoningEffort,
+          openaiApiMode: p.openaiApiMode,
+          openaiReasoningEffort: p.openaiReasoningEffort,
+          openaiReasoningSummary: p.openaiReasoningSummary,
+          anthropicThinkingBudgetTokens: p.anthropicThinkingBudgetTokens,
+          googleThinkingConfig: p.googleThinkingConfig,
           maxSteps: config.rules.maxHops,
           maxLinks: config.rules.maxLinks,
           maxTokens: config.rules.maxTokens,

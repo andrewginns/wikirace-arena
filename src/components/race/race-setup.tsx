@@ -64,7 +64,7 @@ function participantKey(p: RaceParticipantDraft) {
     const normalized = p.name.trim().toLowerCase();
     return `human:${normalized || "human"}`;
   }
-  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.reasoningEffort || ""}`;
+  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.openaiApiMode || ""}:${p.openaiReasoningEffort || ""}:${p.anthropicThinkingBudgetTokens || ""}`;
 }
 
 function normalizedHumanName(name: string) {
@@ -75,10 +75,17 @@ function normalizedHumanName(name: string) {
 function participantDuplicateLabel(p: RaceParticipantDraft) {
   if (p.kind === "human") return normalizedHumanName(p.name);
   const model = p.model || "llm";
-  const effort = p.reasoningEffort?.trim();
+  const openaiEffort = p.openaiReasoningEffort?.trim();
   const apiBase = p.apiBase?.trim();
+  const openaiApiMode = p.openaiApiMode?.trim();
+  const anthropicBudget =
+    typeof p.anthropicThinkingBudgetTokens === "number"
+      ? p.anthropicThinkingBudgetTokens
+      : null;
   const parts: string[] = [];
-  if (effort) parts.push(`effort: ${effort}`);
+  if (openaiEffort) parts.push(`openai_effort: ${openaiEffort}`);
+  if (openaiApiMode) parts.push(`openai_api_mode: ${openaiApiMode}`);
+  if (anthropicBudget) parts.push(`anthropic_thinking: ${anthropicBudget}`);
   if (apiBase) parts.push(`api_base: ${apiBase}`);
   return parts.length > 0 ? `${model} (${parts.join(" • ")})` : model;
 }
@@ -165,13 +172,15 @@ export default function RaceSetup({
     if (initialTargetPage) setTargetPage(initialTargetPage);
   }, [initialTargetPage]);
 
+  const preferredModel = "openai-responses:gpt-5-mini";
+
   const [participants, setParticipants] = useState<RaceParticipantDraft[]>([
     { id: makeId("p"), kind: "human", name: "You" },
     {
       id: makeId("p"),
       kind: "llm",
       name: "",
-      model: modelList.includes("gpt-5-mini") ? "gpt-5-mini" : modelList[0],
+      model: modelList.includes(preferredModel) ? preferredModel : modelList[0],
     },
   ]);
 
@@ -279,9 +288,22 @@ export default function RaceSetup({
   const applyParticipantPreset = (
     presetId: "you_vs_fast" | "you_vs_two" | "model_showdown" | "hotseat"
   ) => {
-    const fastModel = pickModel("gpt-5-mini", "gpt-5-nano", modelList[0]);
-    const secondModel = pickModel("gpt-5-nano", "gpt-5.2", modelList[1], modelList[0]);
-    const bigModel = pickModel("gpt-5.2", "gpt-5.1", modelList[0]);
+    const fastModel = pickModel(
+      "openai-responses:gpt-5-mini",
+      "openai-responses:gpt-5-nano",
+      modelList[0]
+    );
+    const secondModel = pickModel(
+      "openai-responses:gpt-5-nano",
+      "openai-responses:gpt-5.2",
+      modelList[1],
+      modelList[0]
+    );
+    const bigModel = pickModel(
+      "openai-responses:gpt-5.2",
+      "openai-responses:gpt-5.1",
+      modelList[0]
+    );
 
     if (presetId === "you_vs_fast") {
       setParticipants([
@@ -359,7 +381,7 @@ export default function RaceSetup({
   };
 
   const addLlm = () => {
-    const model = modelList.includes("gpt-5-mini") ? "gpt-5-mini" : modelList[0];
+    const model = modelList.includes(preferredModel) ? preferredModel : modelList[0];
     setParticipants((prev) => [
       ...prev,
       {
@@ -401,13 +423,12 @@ export default function RaceSetup({
   };
 
   const addGpt52ReasoningSweep = () => {
-    const model = "gpt-5.2";
-    const variants: Array<{ label: string; reasoningEffort?: string }> = [
-      { label: "none" },
-      { label: "low", reasoningEffort: "low" },
-      { label: "medium", reasoningEffort: "medium" },
-      { label: "high", reasoningEffort: "high" },
-      { label: "xhigh", reasoningEffort: "xhigh" },
+    const model = "openai-responses:gpt-5.2";
+    const variants: Array<{ label: string; openaiReasoningEffort?: string }> = [
+      { label: "default" },
+      { label: "low", openaiReasoningEffort: "low" },
+      { label: "medium", openaiReasoningEffort: "medium" },
+      { label: "high", openaiReasoningEffort: "high" },
     ];
     addParticipantDrafts(
       variants.map((variant) => ({
@@ -415,7 +436,7 @@ export default function RaceSetup({
         kind: "llm",
         name: `${model} (${variant.label})`,
         model,
-        reasoningEffort: variant.reasoningEffort,
+        openaiReasoningEffort: variant.openaiReasoningEffort,
       }))
     );
   };
@@ -1114,11 +1135,42 @@ export default function RaceSetup({
 	                  </div>
 	                ) : (
 	                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-	                    {participants.map((p) => {
-	                      const isDuplicate = duplicateParticipants.duplicateIds.has(p.id);
+							{participants.map((p) => {
+							  const isDuplicate = duplicateParticipants.duplicateIds.has(p.id);
+							  const optionDetails: string[] = [];
+							  if (p.kind === "llm") {
+							    const effort = p.openaiReasoningEffort?.trim();
+							    const apiMode = p.openaiApiMode?.trim();
+							    const apiBase = p.apiBase?.trim();
+							    const summary = p.openaiReasoningSummary?.trim();
+							    const anthropicBudget =
+							      typeof p.anthropicThinkingBudgetTokens === "number"
+							        ? p.anthropicThinkingBudgetTokens
+							        : null;
+							    const googleConfig = p.googleThinkingConfig;
 
-	                      return (
-	                        <div
+							    if (effort) optionDetails.push(`openai_reasoning_effort: ${effort}`);
+							    if (apiMode) optionDetails.push(`openai_api_mode: ${apiMode}`);
+							    if (summary) optionDetails.push(`openai_reasoning_summary: ${summary}`);
+							    if (anthropicBudget) {
+							      optionDetails.push(
+							        `anthropic_thinking_budget_tokens: ${anthropicBudget}`
+							      );
+							    }
+							    if (apiBase) optionDetails.push(`api_base: ${apiBase}`);
+							    if (googleConfig && Object.keys(googleConfig).length > 0) {
+							      try {
+							        optionDetails.push(
+							          `google_thinking_config: ${JSON.stringify(googleConfig)}`
+							        );
+							      } catch {
+							        optionDetails.push("google_thinking_config: (set)");
+							      }
+							    }
+							  }
+
+							  return (
+							    <div
 	                          key={p.id}
 	                          className={cn(
 	                            "rounded-lg border p-3 bg-card flex flex-col gap-3",
@@ -1139,14 +1191,14 @@ export default function RaceSetup({
 	                                {isDuplicate && (
 	                                  <StatusChip status="error">Duplicate</StatusChip>
 	                                )}
-	                                {p.kind === "llm" && p.reasoningEffort?.trim() && (
+	                                {p.kind === "llm" && p.openaiReasoningEffort?.trim() && (
 	                                  <Badge variant="outline" className="text-[11px]">
-	                                    effort: {p.reasoningEffort.trim()}
+	                                    openai_effort: {p.openaiReasoningEffort.trim()}
 	                                  </Badge>
 	                                )}
 	                              </div>
-	                            </div>
-	                            <Button
+							        </div>
+							        <Button
 	                              variant="ghost"
 	                              size="icon"
 	                              className="text-muted-foreground"
@@ -1155,10 +1207,38 @@ export default function RaceSetup({
 	                              disabled={participants.length <= 1}
 	                            >
 	                              <Trash2 className="h-4 w-4" />
-	                            </Button>
-	                          </div>
+							        </Button>
+							      </div>
 
-	                          <div className="grid grid-cols-1 gap-3">
+							      {p.kind === "llm" && optionDetails.length > 0 && (
+							        <TooltipProvider>
+							          <Tooltip>
+							            <TooltipTrigger asChild>
+							              <button
+							                type="button"
+							                className="inline-flex items-center gap-1 text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2"
+							              >
+							                <Settings2 className="h-3 w-3" aria-hidden="true" />
+							                Options set ({optionDetails.length})
+							              </button>
+							            </TooltipTrigger>
+							            <TooltipContent side="top" align="start" className="max-w-sm">
+							              <div className="space-y-1">
+							                <div className="text-xs font-medium">Model options</div>
+							                <div className="space-y-0.5">
+							                  {optionDetails.map((detail, idx) => (
+							                    <div key={`${idx}-${detail}`} className="text-xs">
+							                      {detail}
+							                    </div>
+							                  ))}
+							                </div>
+							              </div>
+							            </TooltipContent>
+							          </Tooltip>
+							        </TooltipProvider>
+							      )}
+
+							      <div className="grid grid-cols-1 gap-3">
 	                            {p.kind === "human" && (
 	                              <div className="space-y-2">
 	                                <Label className="text-xs text-muted-foreground">
@@ -1184,7 +1264,7 @@ export default function RaceSetup({
 	                                      updateParticipant(p.id, { model: v })
 	                                    }
 	                                    options={modelList}
-	                                    description="Pick from the list or type a LiteLLM model string."
+	                                    description="Pick from the list or type a PydanticAI model id."
 	                                  />
 	                                </div>
 
@@ -1223,16 +1303,54 @@ export default function RaceSetup({
 	                                    </div>
 	                                    <div className="space-y-2">
 	                                      <Label className="text-xs text-muted-foreground">
-	                                        `reasoning_effort` (optional)
+	                                        `openai_api_mode` (optional)
 	                                      </Label>
 	                                      <Input
-	                                        value={p.reasoningEffort || ""}
+	                                        value={p.openaiApiMode || ""}
 	                                        onChange={(e) =>
 	                                          updateParticipant(p.id, {
-	                                            reasoningEffort: e.target.value || undefined,
+	                                            openaiApiMode: e.target.value || undefined,
 	                                          })
 	                                        }
-	                                        placeholder="e.g. low / medium / high"
+	                                        placeholder="chat / responses"
+	                                      />
+	                                    </div>
+	                                    <div className="space-y-2">
+	                                      <Label className="text-xs text-muted-foreground">
+	                                        `openai_reasoning_effort` (optional)
+	                                      </Label>
+	                                      <Input
+	                                        value={p.openaiReasoningEffort || ""}
+	                                        onChange={(e) =>
+	                                          updateParticipant(p.id, {
+	                                            openaiReasoningEffort: e.target.value || undefined,
+	                                          })
+	                                        }
+	                                        placeholder="low / medium / high / xhigh"
+	                                      />
+	                                    </div>
+	                                    <div className="space-y-2">
+	                                      <Label className="text-xs text-muted-foreground">
+	                                        `anthropic_thinking_budget_tokens` (optional)
+	                                      </Label>
+	                                      <Input
+	                                        value={
+	                                          typeof p.anthropicThinkingBudgetTokens === "number"
+	                                            ? String(p.anthropicThinkingBudgetTokens)
+	                                            : ""
+	                                        }
+	                                        onChange={(e) => {
+	                                          const raw = e.target.value.trim();
+	                                          const parsed = raw.length > 0 ? Number(raw) : NaN;
+	                                          updateParticipant(p.id, {
+	                                            anthropicThinkingBudgetTokens:
+	                                              Number.isFinite(parsed) && parsed > 0
+	                                                ? parsed
+	                                                : undefined,
+	                                          });
+	                                        }}
+	                                        inputMode="numeric"
+	                                        placeholder="e.g. 1024"
 	                                      />
 	                                    </div>
 	                                  </div>

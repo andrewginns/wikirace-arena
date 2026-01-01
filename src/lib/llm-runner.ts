@@ -8,7 +8,16 @@ type RunLlmRaceArgs = {
   destinationArticle: string
   model: string
   apiBase?: string
-  reasoningEffort?: string
+  openaiApiMode?: string
+  openaiReasoningEffort?: string
+  openaiReasoningSummary?: string
+  anthropicThinkingBudgetTokens?: number
+  googleThinkingConfig?: Record<string, unknown>
+  traceContext?: {
+    sessionId: string
+    runId: string
+    traceparent: string
+  }
   resumeFromSteps?: StepV1[]
   maxSteps: number
   maxLinks: number | null
@@ -51,7 +60,12 @@ async function chooseLink({
   links,
   maxTokens,
   apiBase,
-  reasoningEffort,
+  openaiApiMode,
+  openaiReasoningEffort,
+  openaiReasoningSummary,
+  anthropicThinkingBudgetTokens,
+  googleThinkingConfig,
+  traceContext,
   signal,
 }: {
   model: string
@@ -61,7 +75,16 @@ async function chooseLink({
   links: string[]
   maxTokens: number | null
   apiBase?: string
-  reasoningEffort?: string
+  openaiApiMode?: string
+  openaiReasoningEffort?: string
+  openaiReasoningSummary?: string
+  anthropicThinkingBudgetTokens?: number
+  googleThinkingConfig?: Record<string, unknown>
+  traceContext?: {
+    sessionId: string
+    runId: string
+    traceparent: string
+  }
   signal?: AbortSignal
 }) {
   const payload: Record<string, unknown> = {
@@ -73,12 +96,24 @@ async function chooseLink({
     max_tries: 3,
     max_tokens: typeof maxTokens === 'number' && maxTokens > 0 ? maxTokens : null,
     api_base: apiBase || null,
-    reasoning_effort: reasoningEffort || null,
+    openai_api_mode: openaiApiMode || null,
+    openai_reasoning_effort: openaiReasoningEffort || null,
+    openai_reasoning_summary: openaiReasoningSummary || null,
+    anthropic_thinking_budget_tokens:
+      typeof anthropicThinkingBudgetTokens === 'number' && anthropicThinkingBudgetTokens > 0
+        ? anthropicThinkingBudgetTokens
+        : null,
+    google_thinking_config: googleThinkingConfig || null,
   }
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (traceContext?.traceparent) headers.traceparent = traceContext.traceparent
+  if (traceContext?.sessionId) headers['x-wikirace-session-id'] = traceContext.sessionId
+  if (traceContext?.runId) headers['x-wikirace-run-id'] = traceContext.runId
 
   const response = await fetch(`${API_BASE}/llm/choose_link`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
     signal,
   })
@@ -96,7 +131,12 @@ export async function runLlmRace({
   destinationArticle,
   model,
   apiBase,
-  reasoningEffort,
+  openaiApiMode,
+  openaiReasoningEffort,
+  openaiReasoningSummary,
+  anthropicThinkingBudgetTokens,
+  googleThinkingConfig,
+  traceContext,
   resumeFromSteps,
   maxSteps,
   maxLinks,
@@ -162,7 +202,12 @@ export async function runLlmRace({
       links,
       maxTokens,
       apiBase,
-      reasoningEffort,
+      openaiApiMode,
+      openaiReasoningEffort,
+      openaiReasoningSummary,
+      anthropicThinkingBudgetTokens,
+      googleThinkingConfig,
+      traceContext,
       signal,
     })
 

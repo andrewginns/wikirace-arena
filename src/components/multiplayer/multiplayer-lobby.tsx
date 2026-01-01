@@ -12,6 +12,7 @@ import { Separator } from "@/components/ui/separator";
 import ModelPicker from "@/components/model-picker";
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import { addLlmParticipant, cancelRun, restartRun, startRoom } from "@/lib/multiplayer-store";
+import { llmDisplayNameOverride, llmModelLabel, llmSettingsSubtext } from "@/lib/llm-display";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { AlertTriangle } from "lucide-react";
 
@@ -53,7 +54,8 @@ export default function MultiplayerLobby({
   const [aiModel, setAiModel] = useState(() => modelList[0] || "");
   const [aiName, setAiName] = useState("");
   const [aiApiBase, setAiApiBase] = useState("");
-  const [aiReasoningEffort, setAiReasoningEffort] = useState("");
+  const [aiOpenaiApiMode, setAiOpenaiApiMode] = useState("");
+  const [aiOpenaiReasoningEffort, setAiOpenaiReasoningEffort] = useState("");
   const [aiMaxSteps, setAiMaxSteps] = useState("");
   const [aiMaxLinks, setAiMaxLinks] = useState("");
   const [aiMaxTokens, setAiMaxTokens] = useState("");
@@ -90,15 +92,21 @@ export default function MultiplayerLobby({
       model: string;
       player_name?: string;
       api_base?: string;
-      reasoning_effort?: string;
+      openai_api_mode?: string;
+      openai_reasoning_effort?: string;
+      openai_reasoning_summary?: string;
+      anthropic_thinking_budget_tokens?: number;
+      google_thinking_config?: Record<string, unknown>;
     }>
   ) => {
     const keyForDraft = (draft: {
       model: string;
       api_base?: string;
-      reasoning_effort?: string;
+      openai_api_mode?: string;
+      openai_reasoning_effort?: string;
+      anthropic_thinking_budget_tokens?: number;
     }) => {
-      return `llm:${draft.model}:${draft.api_base || ""}:${draft.reasoning_effort || ""}`;
+      return `llm:${draft.model}:${draft.api_base || ""}:${draft.openai_api_mode || ""}:${draft.openai_reasoning_effort || ""}:${draft.anthropic_thinking_budget_tokens || ""}`;
     };
 
     const existingKeys = new Set(
@@ -108,7 +116,9 @@ export default function MultiplayerLobby({
           keyForDraft({
             model: run.model || "",
             api_base: run.api_base || undefined,
-            reasoning_effort: run.reasoning_effort || undefined,
+            openai_api_mode: run.openai_api_mode || undefined,
+            openai_reasoning_effort: run.openai_reasoning_effort || undefined,
+            anthropic_thinking_budget_tokens: run.anthropic_thinking_budget_tokens,
           })
         )
     );
@@ -122,7 +132,9 @@ export default function MultiplayerLobby({
         const key = keyForDraft({
           model,
           api_base: draft.api_base,
-          reasoning_effort: draft.reasoning_effort,
+          openai_api_mode: draft.openai_api_mode,
+          openai_reasoning_effort: draft.openai_reasoning_effort,
+          anthropic_thinking_budget_tokens: draft.anthropic_thinking_budget_tokens,
         });
         if (existingKeys.has(key)) continue;
 
@@ -130,7 +142,11 @@ export default function MultiplayerLobby({
           model,
           player_name: draft.player_name,
           api_base: draft.api_base,
-          reasoning_effort: draft.reasoning_effort,
+          openai_api_mode: draft.openai_api_mode,
+          openai_reasoning_effort: draft.openai_reasoning_effort,
+          openai_reasoning_summary: draft.openai_reasoning_summary,
+          anthropic_thinking_budget_tokens: draft.anthropic_thinking_budget_tokens,
+          google_thinking_config: draft.google_thinking_config,
         });
         if (!result) break;
 
@@ -250,56 +266,84 @@ export default function MultiplayerLobby({
                   No AI racers yet.
                 </div>
               ) : (
-                llmRuns.map((run) => (
-                  <div
-                    key={run.id}
-                    className="flex items-center justify-between gap-3 rounded-md border bg-background/60 px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">
-                        {run.player_name || run.model || "AI"}
-                      </div>
-                      <div className="truncate text-[11px] text-muted-foreground">
-                        {run.model || "(no model)"} • {run.status}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <StatusChip
-                        status={
-                          run.status === "running"
-                            ? "running"
-                            : run.status === "finished"
-                              ? run.result === "win"
-                                ? "finished"
-                                : run.result === "lose"
-                                  ? "error"
-                                  : "neutral"
-                              : "neutral"
-                        }
-                      >
-                        {run.status === "finished"
-                          ? run.result || "finished"
-                          : run.status.replaceAll("_", " ")}
-                      </StatusChip>
+                llmRuns.map((run) => {
+                  const modelLabel = llmModelLabel({
+                    model: run.model,
+                    openaiReasoningEffort: run.openai_reasoning_effort,
+                    anthropicThinkingBudgetTokens: run.anthropic_thinking_budget_tokens,
+                  });
+                  const customName = llmDisplayNameOverride({
+                    playerName: run.player_name,
+                    model: run.model,
+                  });
+                  const title = customName || modelLabel || run.model || "AI";
 
-                      {isHost && !isMobile ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            if (run.status === "finished") {
-                              void restartRun(run.id);
-                              return;
-                            }
-                            void cancelRun(run.id);
-                          }}
+                  const settingsLine = llmSettingsSubtext({
+                    apiBase: run.api_base,
+                    openaiApiMode: run.openai_api_mode,
+                  });
+
+                  const subtitleParts: string[] = [];
+                  if (customName && modelLabel && customName !== modelLabel) {
+                    subtitleParts.push(modelLabel);
+                  }
+                  subtitleParts.push(run.status);
+                  const subtitle = subtitleParts.join(" • ");
+
+                  return (
+                    <div
+                      key={run.id}
+                      className="flex items-center justify-between gap-3 rounded-md border bg-background/60 px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{title}</div>
+                        <div className="truncate text-[11px] text-muted-foreground">
+                          {subtitle}
+                        </div>
+                        {settingsLine ? (
+                          <div className="truncate text-[11px] text-muted-foreground">
+                            {settingsLine}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <StatusChip
+                          status={
+                            run.status === "running"
+                              ? "running"
+                              : run.status === "finished"
+                                ? run.result === "win"
+                                  ? "finished"
+                                  : run.result === "lose"
+                                    ? "error"
+                                    : "neutral"
+                                : "neutral"
+                          }
                         >
-                          {run.status === "finished" ? "Restart" : "Remove"}
-                        </Button>
-                      ) : null}
+                          {run.status === "finished"
+                            ? run.result || "finished"
+                            : run.status.replaceAll("_", " ")}
+                        </StatusChip>
+
+                        {isHost && !isMobile ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              if (run.status === "finished") {
+                                void restartRun(run.id);
+                                return;
+                              }
+                              void cancelRun(run.id);
+                            }}
+                          >
+                            {run.status === "finished" ? "Restart" : "Remove"}
+                          </Button>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 
@@ -333,27 +377,6 @@ export default function MultiplayerLobby({
                         }}
                       >
                         Add {modelList[0]}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={addAiLoading}
-                        onClick={() => {
-                          const model = modelList[0];
-                          if (!model) return;
-                          setAddAiLoading(true);
-                          void (async () => {
-                            try {
-                              await addLlmParticipant({ model, player_name: "AI #1" });
-                              await addLlmParticipant({ model, player_name: "AI #2" });
-                            } finally {
-                              setAddAiLoading(false);
-                            }
-                          })();
-                        }}
-                      >
-                        Add 2 AIs
                       </Button>
                     </>
                   ) : null}
@@ -390,23 +413,22 @@ export default function MultiplayerLobby({
                         disabled={addAiLoading}
                         onClick={() => {
                           setAiPresetsOpen(false);
-                          const model = "gpt-5.2";
+                          const model = "openai-responses:gpt-5.2";
                           const variants: Array<{
                             label: string;
-                            reasoning_effort?: string;
+                            openai_reasoning_effort?: string;
                           }> = [
-                            { label: "none" },
-                            { label: "low", reasoning_effort: "low" },
-                            { label: "medium", reasoning_effort: "medium" },
-                            { label: "high", reasoning_effort: "high" },
-                            { label: "xhigh", reasoning_effort: "xhigh" },
+                            { label: "default" },
+                            { label: "low", openai_reasoning_effort: "low" },
+                            { label: "medium", openai_reasoning_effort: "medium" },
+                            { label: "high", openai_reasoning_effort: "high" },
                           ];
 
                           void addAiPreset(
                             variants.map((variant) => ({
                               model,
                               player_name: `${model} (${variant.label})`,
-                              reasoning_effort: variant.reasoning_effort,
+                              openai_reasoning_effort: variant.openai_reasoning_effort,
                             }))
                           );
                         }}
@@ -424,7 +446,7 @@ export default function MultiplayerLobby({
                       value={aiModel}
                       onValueChange={setAiModel}
                       options={modelList}
-                      placeholder="Type any LiteLLM model string"
+                      placeholder="Type any PydanticAI model id"
                     />
                   </div>
                   <div>
@@ -437,20 +459,29 @@ export default function MultiplayerLobby({
                     />
                   </div>
                   <div>
-                    <Label className="text-xs">Reasoning effort (optional)</Label>
+                    <Label className="text-xs">OpenAI reasoning effort (optional)</Label>
                     <Input
-                      value={aiReasoningEffort}
-                      onChange={(e) => setAiReasoningEffort(e.target.value)}
-                      placeholder="low / medium / high"
+                      value={aiOpenaiReasoningEffort}
+                      onChange={(e) => setAiOpenaiReasoningEffort(e.target.value)}
+                      placeholder="low / medium / high / xhigh"
                       className="mt-1"
                     />
                   </div>
-                  <div className="sm:col-span-2">
+                  <div>
                     <Label className="text-xs">API base override (optional)</Label>
                     <Input
                       value={aiApiBase}
                       onChange={(e) => setAiApiBase(e.target.value)}
                       placeholder="http://localhost:8001/v1"
+                      className="mt-1"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">OpenAI API mode (optional)</Label>
+                    <Input
+                      value={aiOpenaiApiMode}
+                      onChange={(e) => setAiOpenaiApiMode(e.target.value)}
+                      placeholder="chat / responses"
                       className="mt-1"
                     />
                   </div>
@@ -510,14 +541,17 @@ export default function MultiplayerLobby({
                           model: aiModel.trim(),
                           player_name: aiName.trim() || undefined,
                           api_base: aiApiBase.trim() || undefined,
-                          reasoning_effort: aiReasoningEffort.trim() || undefined,
+                          openai_api_mode: aiOpenaiApiMode.trim() || undefined,
+                          openai_reasoning_effort:
+                            aiOpenaiReasoningEffort.trim() || undefined,
                           max_steps: toOptionalPositiveInt(aiMaxSteps),
                           max_links: toOptionalPositiveInt(aiMaxLinks),
                           max_tokens: toOptionalPositiveInt(aiMaxTokens),
                         });
                         setAiName("");
                         setAiApiBase("");
-                        setAiReasoningEffort("");
+                        setAiOpenaiApiMode("");
+                        setAiOpenaiReasoningEffort("");
                         setAiMaxSteps("");
                         setAiMaxLinks("");
                         setAiMaxTokens("");

@@ -41,7 +41,7 @@ function participantKey(p: RaceParticipantDraft) {
     const normalized = p.name.trim().toLowerCase();
     return `human:${normalized || "human"}`;
   }
-  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.reasoningEffort || ""}`;
+  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.openaiApiMode || ""}:${p.openaiReasoningEffort || ""}:${p.anthropicThinkingBudgetTokens || ""}`;
 }
 
 function normalizedHumanName(name: string) {
@@ -52,10 +52,17 @@ function normalizedHumanName(name: string) {
 function participantDuplicateLabel(p: RaceParticipantDraft) {
   if (p.kind === "human") return normalizedHumanName(p.name);
   const model = p.model || "llm";
-  const effort = p.reasoningEffort?.trim();
+  const openaiEffort = p.openaiReasoningEffort?.trim();
   const apiBase = p.apiBase?.trim();
+  const openaiApiMode = p.openaiApiMode?.trim();
+  const anthropicBudget =
+    typeof p.anthropicThinkingBudgetTokens === "number"
+      ? p.anthropicThinkingBudgetTokens
+      : null;
   const parts: string[] = [];
-  if (effort) parts.push(`effort: ${effort}`);
+  if (openaiEffort) parts.push(`openai_effort: ${openaiEffort}`);
+  if (openaiApiMode) parts.push(`openai_api_mode: ${openaiApiMode}`);
+  if (anthropicBudget) parts.push(`anthropic_thinking: ${anthropicBudget}`);
   if (apiBase) parts.push(`api_base: ${apiBase}`);
   return parts.length > 0 ? `${model} (${parts.join(" • ")})` : model;
 }
@@ -140,7 +147,9 @@ export default function AddChallengersDialog({
   };
 
   const addLlm = () => {
-    const model = modelList.includes("gpt-5-mini") ? "gpt-5-mini" : modelList[0] || "llm";
+    const preferredModel = "openai-responses:gpt-5-mini";
+    const model =
+      modelList.includes(preferredModel) ? preferredModel : modelList[0] || "llm";
     setParticipants((prev) => [
       ...prev,
       { id: makeId("p"), kind: "llm", name: "", model },
@@ -177,13 +186,12 @@ export default function AddChallengersDialog({
   };
 
   const addGpt52ReasoningSweep = () => {
-    const model = "gpt-5.2";
-    const variants: Array<{ label: string; reasoningEffort?: string }> = [
-      { label: "none" },
-      { label: "low", reasoningEffort: "low" },
-      { label: "medium", reasoningEffort: "medium" },
-      { label: "high", reasoningEffort: "high" },
-      { label: "xhigh", reasoningEffort: "xhigh" },
+    const model = "openai-responses:gpt-5.2";
+    const variants: Array<{ label: string; openaiReasoningEffort?: string }> = [
+      { label: "default" },
+      { label: "low", openaiReasoningEffort: "low" },
+      { label: "medium", openaiReasoningEffort: "medium" },
+      { label: "high", openaiReasoningEffort: "high" },
     ];
     addParticipantDrafts(
       variants.map((variant) => ({
@@ -191,7 +199,7 @@ export default function AddChallengersDialog({
         kind: "llm",
         name: `${model} (${variant.label})`,
         model,
-        reasoningEffort: variant.reasoningEffort,
+        openaiReasoningEffort: variant.openaiReasoningEffort,
       }))
     );
   };
@@ -244,7 +252,11 @@ export default function AddChallengersDialog({
           model,
           playerName: name.length > 0 && name !== model ? name : undefined,
           apiBase: p.apiBase,
-          reasoningEffort: p.reasoningEffort,
+          openaiApiMode: p.openaiApiMode,
+          openaiReasoningEffort: p.openaiReasoningEffort,
+          openaiReasoningSummary: p.openaiReasoningSummary,
+          anthropicThinkingBudgetTokens: p.anthropicThinkingBudgetTokens,
+          googleThinkingConfig: p.googleThinkingConfig,
           maxSteps: rules.max_hops,
           maxLinks: rules.max_links,
           maxTokens: rules.max_tokens,
@@ -387,9 +399,9 @@ export default function AddChallengersDialog({
                       {isDuplicate && (
                         <StatusChip status="error">Duplicate</StatusChip>
                       )}
-                      {p.kind === "llm" && p.reasoningEffort?.trim() && (
+                      {p.kind === "llm" && p.openaiReasoningEffort?.trim() && (
                         <Badge variant="outline" className="text-[11px]">
-                          effort: {p.reasoningEffort.trim()}
+                          openai_effort: {p.openaiReasoningEffort.trim()}
                         </Badge>
                       )}
                     </div>
@@ -424,7 +436,7 @@ export default function AddChallengersDialog({
                             value={p.model}
                             onValueChange={(v) => updateParticipant(p.id, { model: v })}
                             options={modelList}
-                            description="Pick from the list or type any LiteLLM model string."
+                            description="Pick from the list or type any PydanticAI model id."
                           />
                         </div>
 
@@ -459,16 +471,54 @@ export default function AddChallengersDialog({
                             </div>
                             <div className="space-y-2">
                               <Label className="text-xs text-muted-foreground">
-                                `reasoning_effort` (optional)
+                                `openai_api_mode` (optional)
                               </Label>
                               <Input
-                                value={p.reasoningEffort || ""}
+                                value={p.openaiApiMode || ""}
                                 onChange={(e) =>
                                   updateParticipant(p.id, {
-                                    reasoningEffort: e.target.value || undefined,
+                                    openaiApiMode: e.target.value || undefined,
                                   })
                                 }
-                                placeholder="e.g. low / medium / high"
+                                placeholder="chat / responses"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-xs text-muted-foreground">
+                                `openai_reasoning_effort` (optional)
+                              </Label>
+                              <Input
+                                value={p.openaiReasoningEffort || ""}
+                                onChange={(e) =>
+                                  updateParticipant(p.id, {
+                                    openaiReasoningEffort: e.target.value || undefined,
+                                  })
+                                }
+                                placeholder="low / medium / high / xhigh"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-xs text-muted-foreground">
+                                `anthropic_thinking_budget_tokens` (optional)
+                              </Label>
+                              <Input
+                                value={
+                                  typeof p.anthropicThinkingBudgetTokens === "number"
+                                    ? String(p.anthropicThinkingBudgetTokens)
+                                    : ""
+                                }
+                                onChange={(e) => {
+                                  const raw = e.target.value.trim();
+                                  const parsed = raw.length > 0 ? Number(raw) : NaN;
+                                  updateParticipant(p.id, {
+                                    anthropicThinkingBudgetTokens:
+                                      Number.isFinite(parsed) && parsed > 0
+                                        ? parsed
+                                        : undefined,
+                                  });
+                                }}
+                                inputMode="numeric"
+                                placeholder="e.g. 1024"
                               />
                             </div>
                           </div>

@@ -326,7 +326,11 @@ export function startLlmRun({
   model,
   playerName,
   apiBase,
-  reasoningEffort,
+  openaiApiMode,
+  openaiReasoningEffort,
+  openaiReasoningSummary,
+  anthropicThinkingBudgetTokens,
+  googleThinkingConfig,
   maxSteps,
   maxLinks,
   maxTokens,
@@ -337,7 +341,11 @@ export function startLlmRun({
   model: string
   playerName?: string
   apiBase?: string
-  reasoningEffort?: string
+  openaiApiMode?: string
+  openaiReasoningEffort?: string
+  openaiReasoningSummary?: string
+  anthropicThinkingBudgetTokens?: number
+  googleThinkingConfig?: Record<string, unknown>
   maxSteps?: number
   maxLinks?: number | null
   maxTokens?: number | null
@@ -355,7 +363,14 @@ export function startLlmRun({
     player_name: playerName?.trim() ? playerName.trim() : undefined,
     model,
     api_base: apiBase || undefined,
-    reasoning_effort: reasoningEffort || undefined,
+    openai_api_mode: openaiApiMode || undefined,
+    openai_reasoning_effort: openaiReasoningEffort || undefined,
+    openai_reasoning_summary: openaiReasoningSummary || undefined,
+    anthropic_thinking_budget_tokens:
+      typeof anthropicThinkingBudgetTokens === 'number'
+        ? anthropicThinkingBudgetTokens
+        : undefined,
+    google_thinking_config: googleThinkingConfig || undefined,
     max_steps: typeof maxSteps === 'number' ? maxSteps : undefined,
     max_links: typeof maxLinks === 'number' ? maxLinks : undefined,
     max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined,

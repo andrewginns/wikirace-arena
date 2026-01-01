@@ -524,7 +524,8 @@ export default function RaceArena({
   const [aiModel, setAiModel] = useState<string>("");
   const [aiName, setAiName] = useState<string>("");
   const [aiApiBase, setAiApiBase] = useState<string>("");
-  const [aiReasoningEffort, setAiReasoningEffort] = useState<string>("");
+  const [aiOpenaiApiMode, setAiOpenaiApiMode] = useState<string>("");
+  const [aiOpenaiReasoningEffort, setAiOpenaiReasoningEffort] = useState<string>("");
   const [aiMaxSteps, setAiMaxSteps] = useState<string>("");
   const [aiMaxLinks, setAiMaxLinks] = useState<string>("");
   const [aiMaxTokens, setAiMaxTokens] = useState<string>("");
@@ -1786,7 +1787,11 @@ export default function RaceArena({
       model: string;
       player_name?: string;
       api_base?: string;
-      reasoning_effort?: string;
+      openai_api_mode?: string;
+      openai_reasoning_effort?: string;
+      openai_reasoning_summary?: string;
+      anthropic_thinking_budget_tokens?: number;
+      google_thinking_config?: Record<string, unknown>;
     }>
   ) => {
     if (!driverValue?.addAi) return;
@@ -1795,9 +1800,11 @@ export default function RaceArena({
     const keyForDraft = (draft: {
       model: string;
       api_base?: string;
-      reasoning_effort?: string;
+      openai_api_mode?: string;
+      openai_reasoning_effort?: string;
+      anthropic_thinking_budget_tokens?: number;
     }) => {
-      return `llm:${draft.model}:${draft.api_base || ""}:${draft.reasoning_effort || ""}`;
+      return `llm:${draft.model}:${draft.api_base || ""}:${draft.openai_api_mode || ""}:${draft.openai_reasoning_effort || ""}:${draft.anthropic_thinking_budget_tokens || ""}`;
     };
 
     const existingKeys = new Set(
@@ -1807,7 +1814,9 @@ export default function RaceArena({
           keyForDraft({
             model: run.model || "",
             api_base: run.api_base || undefined,
-            reasoning_effort: run.reasoning_effort || undefined,
+            openai_api_mode: run.openai_api_mode || undefined,
+            openai_reasoning_effort: run.openai_reasoning_effort || undefined,
+            anthropic_thinking_budget_tokens: run.anthropic_thinking_budget_tokens,
           })
         )
     );
@@ -1822,7 +1831,9 @@ export default function RaceArena({
         const key = keyForDraft({
           model,
           api_base: draft.api_base,
-          reasoning_effort: draft.reasoning_effort,
+          openai_api_mode: draft.openai_api_mode,
+          openai_reasoning_effort: draft.openai_reasoning_effort,
+          anthropic_thinking_budget_tokens: draft.anthropic_thinking_budget_tokens,
         });
         if (existingKeys.has(key)) continue;
 
@@ -1830,7 +1841,11 @@ export default function RaceArena({
           model,
           player_name: draft.player_name,
           api_base: draft.api_base,
-          reasoning_effort: draft.reasoning_effort,
+          openai_api_mode: draft.openai_api_mode,
+          openai_reasoning_effort: draft.openai_reasoning_effort,
+          openai_reasoning_summary: draft.openai_reasoning_summary,
+          anthropic_thinking_budget_tokens: draft.anthropic_thinking_budget_tokens,
+          google_thinking_config: draft.google_thinking_config,
         });
 
         if (!ok) break;
@@ -1967,23 +1982,23 @@ export default function RaceArena({
 	                          disabled={addAiLoading}
 	                          onClick={() => {
 	                            setAddAiPresetsOpen(false);
-	                            const model = "gpt-5.2";
+	                            const model = "openai-responses:gpt-5.2";
 	                            const variants: Array<{
 	                              label: string;
-	                              reasoning_effort?: string;
+	                              openai_reasoning_effort?: string;
 	                            }> = [
-	                              { label: "none" },
-	                              { label: "low", reasoning_effort: "low" },
-	                              { label: "medium", reasoning_effort: "medium" },
-	                              { label: "high", reasoning_effort: "high" },
-	                              { label: "xhigh", reasoning_effort: "xhigh" },
+	                              { label: "default" },
+	                              { label: "low", openai_reasoning_effort: "low" },
+	                              { label: "medium", openai_reasoning_effort: "medium" },
+	                              { label: "high", openai_reasoning_effort: "high" },
 	                            ];
 
 	                            void addAiPreset(
 	                              variants.map((variant) => ({
 	                                model,
 	                                player_name: `${model} (${variant.label})`,
-	                                reasoning_effort: variant.reasoning_effort,
+	                                openai_reasoning_effort:
+	                                  variant.openai_reasoning_effort,
 	                              }))
 	                            );
 	                          }}
@@ -1998,7 +2013,7 @@ export default function RaceArena({
 	                      value={aiModel}
 	                      onValueChange={setAiModel}
 	                      options={modelList}
-	                      placeholder="Type any LiteLLM model string"
+	                      placeholder="Type any PydanticAI model id"
 	                    />
 
 	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -2012,20 +2027,29 @@ export default function RaceArena({
 	                        />
 	                      </div>
 	                      <div>
-	                        <Label className="text-xs">Reasoning effort (optional)</Label>
+	                        <Label className="text-xs">OpenAI reasoning effort (optional)</Label>
 	                        <Input
-	                          value={aiReasoningEffort}
-	                          onChange={(e) => setAiReasoningEffort(e.target.value)}
-	                          placeholder="low / medium / high"
+	                          value={aiOpenaiReasoningEffort}
+	                          onChange={(e) => setAiOpenaiReasoningEffort(e.target.value)}
+	                          placeholder="low / medium / high / xhigh"
 	                          className="mt-1"
 	                        />
 	                      </div>
-	                      <div className="sm:col-span-2">
+	                      <div>
 	                        <Label className="text-xs">API base override (optional)</Label>
 	                        <Input
 	                          value={aiApiBase}
 	                          onChange={(e) => setAiApiBase(e.target.value)}
 	                          placeholder="http://localhost:8001/v1"
+	                          className="mt-1"
+	                        />
+	                      </div>
+	                      <div>
+	                        <Label className="text-xs">OpenAI API mode (optional)</Label>
+	                        <Input
+	                          value={aiOpenaiApiMode}
+	                          onChange={(e) => setAiOpenaiApiMode(e.target.value)}
+	                          placeholder="chat / responses"
 	                          className="mt-1"
 	                        />
 	                      </div>
@@ -2089,7 +2113,9 @@ export default function RaceArena({
 	                              model: aiModel.trim(),
 	                              player_name: aiName.trim() || undefined,
 	                              api_base: aiApiBase.trim() || undefined,
-	                              reasoning_effort: aiReasoningEffort.trim() || undefined,
+	                              openai_api_mode: aiOpenaiApiMode.trim() || undefined,
+	                              openai_reasoning_effort:
+	                                aiOpenaiReasoningEffort.trim() || undefined,
 	                              max_steps: toOptionalPositiveInt(aiMaxSteps),
 	                              max_links: toOptionalPositiveInt(aiMaxLinks),
 	                              max_tokens: toOptionalPositiveInt(aiMaxTokens),
@@ -2097,7 +2123,8 @@ export default function RaceArena({
 	                            if (!ok) return;
 	                            setAiName("");
 	                            setAiApiBase("");
-	                            setAiReasoningEffort("");
+	                            setAiOpenaiApiMode("");
+	                            setAiOpenaiReasoningEffort("");
 	                            setAiMaxSteps("");
 	                            setAiMaxLinks("");
 	                            setAiMaxTokens("");
@@ -3401,12 +3428,20 @@ export default function RaceArena({
 		                                : "—"}
 		                            </div>
 		                          </div>
-		                          <div>
-		                            <div className="text-xs text-muted-foreground">LiteLLM params</div>
-		                            <div className="mt-0.5 text-xs text-muted-foreground">
-		                              api_base: {selectedRun.api_base || "(default)"}
+	                          <div>
+	                            <div className="text-xs text-muted-foreground">Model settings</div>
+	                            <div className="mt-0.5 text-xs text-muted-foreground">
+	                              api_base: {selectedRun.api_base || "(default)"}
 	                              {" • "}
-	                              reasoning_effort: {selectedRun.reasoning_effort || "(default)"}
+	                              openai_api_mode: {selectedRun.openai_api_mode || "(default)"}
+	                              {" • "}
+	                              openai_reasoning_effort:{" "}
+	                              {selectedRun.openai_reasoning_effort || "(default)"}
+	                              {" • "}
+	                              anthropic_thinking_budget_tokens:{" "}
+	                              {typeof selectedRun.anthropic_thinking_budget_tokens === "number"
+	                                ? selectedRun.anthropic_thinking_budget_tokens
+	                                : "(default)"}
 	                              {" • "}
 	                              max_tokens:{" "}
 	                              {typeof selectedRun.max_tokens === "number"

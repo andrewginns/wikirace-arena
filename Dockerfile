@@ -1,4 +1,4 @@
-FROM python:3.9
+FROM python:3.12
 
 # install nodejs and npm
 ENV PYTHONUNBUFFERED 1

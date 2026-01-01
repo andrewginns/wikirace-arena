@@ -1,11 +1,12 @@
 from typing import List, Tuple, Dict, Optional
 import sqlite3
 import json
-import litellm
 import re
 import asyncio
 import argparse
 from functools import lru_cache
+
+from llm_client import achat
 class SQLiteDB:
     def __init__(self, db_path: str):
         """Initialize the database with path to SQLite database"""
@@ -53,12 +54,13 @@ class AgentPlayer(Player):
     def __init__(
         self,
         model: str,
-        api_base: str,
+        api_base: Optional[str],
         verbose: bool = True,
         max_links=None,
         max_tries=10,
         target_article = None,
-        seed = None
+        openai_api_mode: Optional[str] = None,
+        openai_reasoning_effort: Optional[str] = None,
     ):
         super().__init__(model)
         self.model = model
@@ -67,40 +69,52 @@ class AgentPlayer(Player):
         self.max_links = max_links
         self.max_tries = max_tries
         self.target_article = target_article
-        self.seed = seed
+        self.openai_api_mode = openai_api_mode
+        self.openai_reasoning_effort = openai_reasoning_effort
 
     async def get_move(self, game_state: List[Dict]) -> Tuple[str, Dict]:
         prompt = self.construct_prompt(game_state)
-
-        conversation = [
-            {"role": "user", "content": prompt}
-        ]
+        llm_outputs: list[str] = []
 
         for try_number in range(self.max_tries):
-            response = await litellm.acompletion(
+            result = await achat(
                 model=self.model,
+                prompt=prompt,
                 api_base=self.api_base,
-                messages=conversation,
-                seed=self.seed
+                openai_api_mode=self.openai_api_mode,
+                openai_reasoning_effort=self.openai_reasoning_effort,
             )
-            response = response.choices[0].message.content
+            response_text = result.content
+            llm_outputs.append(response_text)
 
-            conversation.append({"role": "assistant", "content": response})
-
-            answer, message = self._attempt_to_extract_answer(response, maximum_answer=len(game_state[-1]["links"]))
+            answer, message = self._attempt_to_extract_answer(
+                response_text, maximum_answer=len(game_state[-1]["links"])
+            )
 
             # there was a problem with the answer so give the model another chance
             if answer == -1:
-                conversation.append({"role": "user", "content": message})
+                prompt = f"{prompt}\n\nIMPORTANT: {message}"
                 continue
 
             assert answer >= 1 and answer <= len(game_state[-1]["links"]), f"Answer {answer} is out of range"
 
             # we found an answer so we can return it
-            return game_state[-1]["links"][answer-1], {"tries": try_number, "conversation": conversation}
+            metadata: Dict[str, object] = {
+                "tries": try_number,
+                "llm_output": response_text,
+            }
+            if len(llm_outputs) > 1:
+                metadata["llm_outputs"] = llm_outputs
+            return game_state[-1]["links"][answer-1], metadata
 
         # we tried the max number of times and still didn't find an answer
-        return -1, {"tries": self.max_tries, "conversation": conversation}
+        metadata: Dict[str, object] = {
+            "tries": self.max_tries,
+            "llm_output": llm_outputs[-1] if llm_outputs else None,
+        }
+        if len(llm_outputs) > 1:
+            metadata["llm_outputs"] = llm_outputs
+        return -1, metadata
 
     def construct_prompt(self, game_state: List[Dict]) -> str:
         current = game_state[-1]["article"]
@@ -263,12 +277,32 @@ if __name__ == "__main__":
     parser.add_argument("--max-steps", type=int, default=10, help="Maximum number of steps allowed (default: 10)")
     
     # Agent parameters (only used with --agent)
-    parser.add_argument("--model", type=str, default="gpt-4o", help="Model to use for the agent (default: gpt-4o)")
-    parser.add_argument("--api-base", type=str, default="https://api.openai.com/v1", 
-                        help="API base URL (default: https://api.openai.com/v1)")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="openai-responses:gpt-5-mini",
+        help="PydanticAI model id for the agent (default: openai-responses:gpt-5-mini)",
+    )
+    parser.add_argument(
+        "--api-base",
+        type=str,
+        default=None,
+        help="Optional OpenAI-compatible base URL override (e.g. http://localhost:8001/v1)",
+    )
+    parser.add_argument(
+        "--openai-api-mode",
+        type=str,
+        default=None,
+        help="When --api-base is set: 'chat' (default) or 'responses'",
+    )
+    parser.add_argument(
+        "--openai-reasoning-effort",
+        type=str,
+        default=None,
+        help="OpenAI reasoning effort: low / medium / high / xhigh",
+    )
     parser.add_argument("--max-links", type=int, default=200, help="Maximum number of links to consider (default: 200)")
     parser.add_argument("--max-tries", type=int, default=3, help="Maximum number of tries for the agent (default: 3)")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     
     args = parser.parse_args()
 
@@ -286,7 +320,8 @@ if __name__ == "__main__":
             max_links=args.max_links,
             max_tries=args.max_tries,
             target_article=args.end,
-            seed=args.seed
+            openai_api_mode=args.openai_api_mode,
+            openai_reasoning_effort=args.openai_reasoning_effort,
         )
 
     # Create and run the game
