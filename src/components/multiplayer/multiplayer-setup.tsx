@@ -7,9 +7,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { VirtualizedCombobox } from "@/components/ui/virtualized-combobox";
+import { ErrorCallout, ServerOfflineCallout } from "@/components/ui/callouts";
 import WikiArticlePreview from "@/components/wiki-article-preview";
+import { pickRandom, pickRandomDistinctPair } from "@/lib/matchup-random";
+import { parseOptionalPositiveInt } from "@/lib/number-utils";
+import {
+  RACE_PRESETS,
+  type RacePresetBudgets,
+  type RacePresetId,
+} from "@/lib/race-presets";
 import { cn } from "@/lib/utils";
-import { AlertTriangle, ArrowLeftRight, Shuffle, WifiOff } from "lucide-react";
+import { ArrowLeftRight, Shuffle } from "lucide-react";
 import {
   createRoom,
   joinRoom,
@@ -18,47 +26,18 @@ import {
 import popularNodes from "../../../results/popular_nodes.json";
 
 type Preset = {
-  id: "sprint" | "classic" | "marathon";
+  id: RacePresetId;
   name: string;
   description: string;
-  rules: { maxHops: number; maxLinks: number | null; maxTokens: number | null };
+  rules: RacePresetBudgets;
 };
 
-const PRESETS: Preset[] = [
-  {
-    id: "sprint",
-    name: "Sprint",
-    description: "Fast rounds. Great for humans.",
-    rules: { maxHops: 12, maxLinks: 200, maxTokens: 1500 },
-  },
-  {
-    id: "classic",
-    name: "Classic",
-    description: "Balanced default.",
-    rules: { maxHops: 20, maxLinks: null, maxTokens: null },
-  },
-  {
-    id: "marathon",
-    name: "Marathon",
-    description: "More hops + more thinking time.",
-    rules: { maxHops: 35, maxLinks: null, maxTokens: null },
-  },
-];
-
-function toOptionalPositiveInt(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed)) return null;
-  const asInt = Math.floor(parsed);
-  return asInt > 0 ? asInt : null;
-}
-
-function pickRandom(items: string[]) {
-  if (items.length === 0) return null;
-  const idx = Math.floor(Math.random() * items.length);
-  return items[idx] || null;
-}
+const PRESETS: Preset[] = RACE_PRESETS.map((preset) => ({
+  id: preset.id,
+  name: preset.name,
+  description: preset.description,
+  rules: preset.budgets,
+}));
 
 export default function MultiplayerSetup({
   allArticles,
@@ -84,9 +63,9 @@ export default function MultiplayerSetup({
   const [disableLinksView, setDisableLinksView] = useState<boolean>(false);
 
   const matchedPreset = useMemo(() => {
-    const hops = toOptionalPositiveInt(maxHops) ?? 20;
-    const links = toOptionalPositiveInt(maxLinks);
-    const tokens = toOptionalPositiveInt(maxTokens);
+    const hops = parseOptionalPositiveInt(maxHops, "null") ?? 20;
+    const links = parseOptionalPositiveInt(maxLinks, "null");
+    const tokens = parseOptionalPositiveInt(maxTokens, "null");
     return (
       PRESETS.find(
         (p) =>
@@ -125,19 +104,10 @@ export default function MultiplayerSetup({
   };
 
   const selectRandomMatchup = () => {
-    const start = pickRandom(randomPool);
-    if (!start) return;
-    let target = pickRandom(randomPool);
-    if (!target) return;
-    let tries = 0;
-    while (target === start && tries < 10) {
-      target = pickRandom(randomPool);
-      if (!target) return;
-      tries += 1;
-    }
-
-    setStartPage(start);
-    setTargetPage(target);
+    const matchup = pickRandomDistinctPair(randomPool);
+    if (!matchup) return;
+    setStartPage(matchup.start);
+    setTargetPage(matchup.target);
   };
 
   const swapPages = () => {
@@ -159,21 +129,17 @@ export default function MultiplayerSetup({
     joinName.trim().length > 0 &&
     !joinLoading;
 
-  return (
-    <div className="space-y-4">
-      {error && (
-        <div className="flex items-start gap-2 rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
-          <div>{error}</div>
-        </div>
-      )}
+	  return (
+	    <div className="space-y-4">
+	      {error && (
+	        <ErrorCallout>{error}</ErrorCallout>
+	      )}
 
-      {!isServerConnected && (
-        <div className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-          <WifiOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          <div>Server not connected. Start the API server first.</div>
-        </div>
-      )}
+	      {!isServerConnected && (
+	        <ServerOfflineCallout>
+	          Server not connected. Start the API server first.
+	        </ServerOfflineCallout>
+	      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card className="p-4">
@@ -397,9 +363,9 @@ export default function MultiplayerSetup({
                       title: roomTitle.trim() || undefined,
                       owner_name: ownerName.trim() || undefined,
                       rules: {
-                        max_hops: toOptionalPositiveInt(maxHops) ?? 20,
-                        max_links: toOptionalPositiveInt(maxLinks),
-                        max_tokens: toOptionalPositiveInt(maxTokens),
+                        max_hops: parseOptionalPositiveInt(maxHops, "null") ?? 20,
+                        max_links: parseOptionalPositiveInt(maxLinks, "null"),
+                        max_tokens: parseOptionalPositiveInt(maxTokens, "null"),
                         include_image_links: includeImageLinks,
                         disable_links_view: disableLinksView,
                       },

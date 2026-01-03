@@ -242,6 +242,39 @@ class MoveRoomRequest(BaseModel):
     to_article: str
 
 
+class ValidateMoveRequest(BaseModel):
+    current_article: str
+    to_article: str
+    destination_article: str
+    current_hops: int
+    max_hops: int
+
+
+class ValidateMoveResponse(BaseModel):
+    noop: bool = False
+    step: Optional[RoomStepV1] = None
+
+
+class LocalLlmStepRequest(BaseModel):
+    start_article: str
+    destination_article: str
+    model: str
+    steps: List[RoomStepV1]
+    api_base: Optional[str] = None
+    openai_api_mode: Optional[str] = None
+    openai_reasoning_effort: Optional[str] = None
+    openai_reasoning_summary: Optional[str] = None
+    anthropic_thinking_budget_tokens: Optional[int] = None
+    google_thinking_config: Optional[dict[str, Any]] = None
+    max_steps: int
+    max_links: Optional[int] = None
+    max_tokens: Optional[int] = None
+
+
+class LocalLlmStepResponse(BaseModel):
+    step: RoomStepV1
+
+
 class AddLlmRunRequest(BaseModel):
     model: str
     player_name: Optional[str] = None
@@ -462,6 +495,13 @@ def _parse_iso(value: str) -> datetime:
 
 def _titles_match(a: str, b: str) -> bool:
     return a.replace("_", " ").strip().lower() == b.replace("_", " ").strip().lower()
+
+
+def _strip_wiki_fragment(title: str) -> str:
+    if not title:
+        return title
+    base = title.split("#", 1)[0]
+    return base
 
 
 def _normalize_room_id(room_id: str) -> str:
@@ -925,7 +965,7 @@ async def _choose_llm_link(
     return chosen_index, metadata
 
 
-def _path_so_far(room: dict[str, Any], steps: list[dict[str, Any]]) -> list[str]:
+def _path_so_far(start_article: str, steps: list[dict[str, Any]]) -> list[str]:
     path: list[str] = []
     for step in steps:
         if not isinstance(step, dict):
@@ -937,16 +977,92 @@ def _path_so_far(room: dict[str, Any], steps: list[dict[str, Any]]) -> list[str]
             continue
         path.append(article)
 
-    start_article = room.get("start_article")
+    start_value = start_article.strip() if isinstance(start_article, str) else ""
     if not path:
-        if isinstance(start_article, str) and start_article:
-            return [start_article]
-        return []
+        return [start_value] if start_value else []
 
-    if isinstance(start_article, str) and start_article and path[0] != start_article:
-        path.insert(0, start_article)
+    if start_value and path[0] != start_value:
+        path.insert(0, start_value)
 
     return path
+
+
+async def _compute_llm_next_step(
+    *,
+    current_article: str,
+    destination_article: str,
+    path_so_far: list[str],
+    next_hops: int,
+    max_steps: int,
+    model: str,
+    api_base: Optional[str],
+    openai_api_mode: Optional[str],
+    openai_reasoning_effort: Optional[str],
+    openai_reasoning_summary: Optional[str],
+    anthropic_thinking_budget_tokens: Optional[int],
+    google_thinking_config: Optional[dict[str, Any]],
+    max_links: Optional[int],
+    max_tokens: Optional[int],
+) -> tuple[str, str, Optional[dict[str, Any]]]:
+    reached_destination = _titles_match(current_article, destination_article)
+    if not reached_destination:
+        canonical_current = db.canonical_title(current_article)
+        canonical_target = db.canonical_title(destination_article)
+        if canonical_current and canonical_target and _titles_match(canonical_current, canonical_target):
+            reached_destination = True
+
+    if reached_destination:
+        return "win", destination_article, None
+
+    title, links = db.get_article_with_links(current_article)
+    if not title:
+        raise ValueError("Article not found")
+
+    if isinstance(max_links, int) and max_links > 0:
+        links = links[:max_links]
+
+    if not links:
+        return "lose", current_article, {"reason": "no_links"}
+
+    chosen_index, llm_metadata = await _choose_llm_link(
+        model=model,
+        current_article=current_article,
+        target_article=destination_article,
+        path_so_far=path_so_far,
+        links=links,
+        max_tries=3,
+        max_tokens=max_tokens,
+        api_base=api_base,
+        openai_api_mode=openai_api_mode,
+        openai_reasoning_effort=openai_reasoning_effort,
+        openai_reasoning_summary=openai_reasoning_summary,
+        anthropic_thinking_budget_tokens=anthropic_thinking_budget_tokens,
+        google_thinking_config=google_thinking_config,
+    )
+
+    if chosen_index is None:
+        return "lose", current_article, {"reason": "bad_answer", **llm_metadata}
+
+    selected = links[chosen_index - 1]
+    reached_target = _titles_match(selected, destination_article)
+    if not reached_target:
+        canonical_selected = db.canonical_title(selected)
+        canonical_target = db.canonical_title(destination_article)
+        if canonical_selected and canonical_target and _titles_match(canonical_selected, canonical_target):
+            reached_target = True
+
+    if reached_target:
+        return "win", destination_article, {"selected_index": chosen_index, **llm_metadata}
+
+    if next_hops >= max_steps:
+        return "lose", selected, {
+            "reason": "max_steps",
+            "max_steps": max_steps,
+            "selected_index": chosen_index,
+            **llm_metadata,
+        }
+
+    return "move", selected, {"selected_index": chosen_index, **llm_metadata}
 
 
 async def _run_llm_room_task(room_id: str, run_id: str) -> None:
@@ -1119,7 +1235,10 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
                     snapshot_google_thinking_config = google_thinking_config
                     snapshot_max_links = max_links
                     snapshot_max_tokens = max_tokens
-                    snapshot_path = _path_so_far(room, snapshot_steps)
+                    snapshot_start_article = room.get("start_article")
+                    if not isinstance(snapshot_start_article, str) or not snapshot_start_article:
+                        return
+                    snapshot_path = _path_so_far(snapshot_start_article, snapshot_steps)
 
                 if snapshot_model is None:
                     await _fail_llm_run(
@@ -1131,44 +1250,23 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
                     )
                     return
 
-                reached_destination = _titles_match(snapshot_current, snapshot_destination)
-                if not reached_destination:
-                    canonical_current = db.canonical_title(snapshot_current)
-                    canonical_target = db.canonical_title(snapshot_destination)
-                    if canonical_current and canonical_target and _titles_match(
-                        canonical_current, canonical_target
-                    ):
-                        reached_destination = True
-
-                if reached_destination:
-                    finished_at = _now_iso()
-                    async with lock:
-                        room = ROOMS.get(room_id)
-                        if not room:
-                            return
-                        if room.get("status") != "running":
-                            return
-                        run = _room_run_by_id(room, run_id)
-                        if not run or run.get("status") != "running":
-                            return
-
-                        run_steps = run.get("steps") or []
-                        run_steps = [s for s in run_steps if isinstance(s, dict)]
-                        run["steps"] = [
-                            *run_steps,
-                            {"type": "win", "article": snapshot_destination, "at": finished_at},
-                        ]
-                        run["status"] = "finished"
-                        run["result"] = "win"
-                        run["finished_at"] = finished_at
-                        room["updated_at"] = finished_at
-                        # Keep the room open for additional players/runs even if
-                        # all current runs have finished.
-                    await _broadcast_room(room_id)
-                    return
-
                 try:
-                    title, links = db.get_article_with_links(snapshot_current)
+                    step_type, article, metadata = await _compute_llm_next_step(
+                        current_article=snapshot_current,
+                        destination_article=snapshot_destination,
+                        path_so_far=snapshot_path,
+                        next_hops=snapshot_next_hops,
+                        max_steps=snapshot_max_steps,
+                        model=snapshot_model,
+                        api_base=snapshot_api_base,
+                        openai_api_mode=snapshot_openai_api_mode,
+                        openai_reasoning_effort=snapshot_openai_reasoning_effort,
+                        openai_reasoning_summary=snapshot_openai_reasoning_summary,
+                        anthropic_thinking_budget_tokens=snapshot_anthropic_thinking_budget_tokens,
+                        google_thinking_config=snapshot_google_thinking_config,
+                        max_links=snapshot_max_links,
+                        max_tokens=snapshot_max_tokens,
+                    )
                 except Exception as exc:
                     await _fail_llm_run(
                         room_id,
@@ -1179,97 +1277,18 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
                     )
                     return
 
-                if not title:
-                    await _fail_llm_run(
-                        room_id,
-                        run_id,
-                        snapshot_current,
-                        reason="llm_error",
-                        error="Article not found",
-                    )
-                    return
-
-                if isinstance(snapshot_max_links, int) and snapshot_max_links > 0:
-                    links = links[: snapshot_max_links]
-
-                if not links:
-                    await _fail_llm_run(room_id, run_id, snapshot_current, reason="no_links")
-                    return
-
-                max_tries = 3
-                chosen_index, llm_metadata = await _choose_llm_link(
-                    model=snapshot_model,
-                    current_article=snapshot_current,
-                    target_article=snapshot_destination,
-                    path_so_far=snapshot_path,
-                    links=links,
-                    max_tries=max_tries,
-                    max_tokens=snapshot_max_tokens,
-                    api_base=snapshot_api_base,
-                    openai_api_mode=snapshot_openai_api_mode,
-                    openai_reasoning_effort=snapshot_openai_reasoning_effort,
-                    openai_reasoning_summary=snapshot_openai_reasoning_summary,
-                    anthropic_thinking_budget_tokens=snapshot_anthropic_thinking_budget_tokens,
-                    google_thinking_config=snapshot_google_thinking_config,
-                )
-
-                if chosen_index is None:
-                    await _finish_llm_run(
-                        room_id,
-                        run_id,
-                        snapshot_current,
-                        step_type="lose",
-                        metadata={"reason": "bad_answer", **llm_metadata},
-                        expected_current=snapshot_current,
-                    )
-                    return
-
-                selected = links[chosen_index - 1]
-                reached_target = _titles_match(selected, snapshot_destination)
-                if not reached_target:
-                    canonical_selected = db.canonical_title(selected)
-                    canonical_target = db.canonical_title(snapshot_destination)
-                    if canonical_selected and canonical_target and _titles_match(
-                        canonical_selected, canonical_target
-                    ):
-                        reached_target = True
-
-                if reached_target:
-                    await _finish_llm_run(
-                        room_id,
-                        run_id,
-                        selected,
-                        step_type="win",
-                        metadata={"selected_index": chosen_index, **llm_metadata},
-                        forced_article=snapshot_destination,
-                        expected_current=snapshot_current,
-                    )
-                    return
-
-                if snapshot_next_hops >= snapshot_max_steps:
-                    await _finish_llm_run(
-                        room_id,
-                        run_id,
-                        selected,
-                        step_type="lose",
-                        metadata={
-                            "reason": "max_steps",
-                            "max_steps": snapshot_max_steps,
-                            "selected_index": chosen_index,
-                            **llm_metadata,
-                        },
-                        expected_current=snapshot_current,
-                    )
-                    return
-
                 await _finish_llm_run(
                     room_id,
                     run_id,
-                    selected,
-                    step_type="move",
-                    metadata={"selected_index": chosen_index, **llm_metadata},
+                    article,
+                    step_type=step_type,
+                    metadata=metadata,
+                    forced_article=snapshot_destination if step_type == "win" else None,
                     expected_current=snapshot_current,
                 )
+
+                if step_type in ("win", "lose"):
+                    return
 
         except asyncio.CancelledError:
             raise
@@ -2372,6 +2391,89 @@ async def new_round(room_id: str, body: NewRoundRequest):
     return room
 
 
+def _validate_human_move(
+    *,
+    current_article: str,
+    to_article: str,
+    destination_article: str,
+    current_hops: int,
+    max_hops: int,
+    at: str,
+) -> tuple[bool, Optional[dict[str, Any]]]:
+    to_raw = _strip_wiki_fragment(to_article).replace("_", " ").strip()
+    if not to_raw:
+        raise HTTPException(status_code=400, detail="to_article is required")
+
+    resolved = db.resolve_title(to_raw)
+    if not resolved:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    canonical_next = db.canonical_title(resolved) or resolved
+
+    destination_raw = destination_article.replace("_", " ").strip()
+    if not destination_raw:
+        raise HTTPException(status_code=400, detail="destination_article is required")
+
+    current_raw = _strip_wiki_fragment(current_article).replace("_", " ").strip()
+    if not current_raw:
+        raise HTTPException(status_code=400, detail="current_article is required")
+
+    current_resolved = db.resolve_title(current_raw) or current_raw
+    canonical_current = db.canonical_title(current_resolved) or current_resolved
+
+    if _titles_match(canonical_current, canonical_next):
+        return True, None
+
+    current_hops_int = current_hops if isinstance(current_hops, int) and current_hops > 0 else 0
+    next_hops = current_hops_int + 1
+    max_hops_int = max_hops if isinstance(max_hops, int) and max_hops > 0 else 20
+
+    try:
+        title, links = db.get_article_with_links(canonical_current)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not title:
+        raise HTTPException(
+            status_code=400, detail=f"Current article not found ({canonical_current})"
+        )
+
+    if resolved not in links and canonical_next not in links:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid move: '{resolved}' is not a link from '{title}'",
+        )
+
+    reached_target = False
+    if canonical_next and destination_raw and _titles_match(canonical_next, destination_raw):
+        reached_target = True
+    if not reached_target:
+        canonical_target = db.canonical_title(destination_raw)
+        if canonical_next and canonical_target and _titles_match(canonical_next, canonical_target):
+            reached_target = True
+
+    step_type: str
+    step_article: str
+    metadata: Optional[dict[str, Any]] = None
+
+    if reached_target:
+        step_type = "win"
+        step_article = destination_raw
+    elif next_hops >= max_hops_int:
+        step_type = "lose"
+        step_article = canonical_next
+        metadata = {"reason": "max_hops", "max_hops": max_hops_int}
+    else:
+        step_type = "move"
+        step_article = canonical_next
+
+    step: dict[str, Any] = {"type": step_type, "article": step_article, "at": at}
+    if metadata:
+        step["metadata"] = metadata
+
+    return False, step
+
+
 @app.post("/rooms/{room_id}/move", response_model=RoomStateV1)
 async def room_move(room_id: str, body: MoveRoomRequest):
     room_id = _normalize_room_id(room_id)
@@ -2385,16 +2487,6 @@ async def room_move(room_id: str, body: MoveRoomRequest):
                 "if the server restarted/reloaded, create a new room."
             ),
         )
-
-    to_raw = body.to_article.replace("_", " ").strip()
-    if not to_raw:
-        raise HTTPException(status_code=400, detail="to_article is required")
-
-    resolved = db.resolve_title(to_raw)
-    if not resolved:
-        raise HTTPException(status_code=404, detail="Article not found")
-
-    canonical_next = db.canonical_title(resolved) or resolved
 
     updated_at = _now_iso()
     changed = False
@@ -2416,59 +2508,28 @@ async def room_move(room_id: str, body: MoveRoomRequest):
         if not isinstance(current_article, str) or not current_article:
             current_article = room.get("start_article")
 
-        if (
-            isinstance(current_article, str)
-            and current_article.replace("_", " ").strip()
-            == canonical_next.replace("_", " ").strip()
-        ):
-            return room
-
         current_hops = max(0, len(steps) - 1)
-        next_hops = current_hops + 1
         max_hops = room.get("rules", {}).get("max_hops")
         max_hops = max_hops if isinstance(max_hops, int) and max_hops > 0 else 20
-
-        step_metadata: Optional[dict[str, Any]] = None
         destination_article = room.get("destination_article")
         if not isinstance(destination_article, str) or not destination_article:
             raise HTTPException(status_code=500, detail="Room missing destination article")
 
-        try:
-            title, links = db.get_article_with_links(current_article)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        noop, step = _validate_human_move(
+            current_article=current_article,
+            to_article=body.to_article,
+            destination_article=destination_article,
+            current_hops=current_hops,
+            max_hops=max_hops,
+            at=updated_at,
+        )
+        if noop:
+            return room
 
-        if not title:
-            raise HTTPException(status_code=400, detail=f"Current article not found ({current_article})")
-
-        if resolved not in links and canonical_next not in links:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid move: '{resolved}' is not a link from '{title}'",
-            )
-
-        canonical_target = db.canonical_title(destination_article)
-
-        if canonical_next and canonical_target and _titles_match(canonical_next, canonical_target):
-            step_type = "win"
+        if step and step.get("type") in ("win", "lose"):
             run["status"] = "finished"
-            run["result"] = "win"
+            run["result"] = "win" if step["type"] == "win" else "lose"
             run["finished_at"] = updated_at
-            step_article = destination_article
-        elif next_hops >= max_hops:
-            step_type = "lose"
-            run["status"] = "finished"
-            run["result"] = "lose"
-            run["finished_at"] = updated_at
-            step_article = canonical_next
-            step_metadata = {"reason": "max_hops", "max_hops": max_hops}
-        else:
-            step_type = "move"
-            step_article = canonical_next
-
-        step: dict[str, Any] = {"type": step_type, "article": step_article, "at": updated_at}
-        if step_metadata:
-            step["metadata"] = step_metadata
 
         run["steps"] = [*steps, step]
         room["updated_at"] = updated_at
@@ -2480,6 +2541,28 @@ async def room_move(room_id: str, body: MoveRoomRequest):
     if changed:
         await _broadcast_room(room_id)
     return room
+
+
+@app.post("/local/validate_move", response_model=ValidateMoveResponse)
+async def local_validate_move(body: ValidateMoveRequest):
+    current_article = body.current_article.replace("_", " ").strip()
+    destination_article = body.destination_article.replace("_", " ").strip()
+    updated_at = _now_iso()
+
+    noop, step = _validate_human_move(
+        current_article=current_article,
+        to_article=body.to_article,
+        destination_article=destination_article,
+        current_hops=body.current_hops,
+        max_hops=body.max_hops,
+        at=updated_at,
+    )
+
+    if noop:
+        return ValidateMoveResponse(noop=True)
+    if not step:
+        raise HTTPException(status_code=500, detail="Failed to validate move")
+    return ValidateMoveResponse(step=RoomStepV1(**step))
 
 
 @app.post("/rooms/{room_id}/add_llm", response_model=RoomStateV1)
@@ -3136,6 +3219,118 @@ async def llm_local_run_end(request: LocalRunTraceEndRequest):
             pass
 
     return {"ok": True}
+
+
+@app.post("/llm/local_run/step", response_model=LocalLlmStepResponse)
+async def llm_local_run_step(payload: LocalLlmStepRequest, http_request: Request):
+    trace_session_id = (http_request.headers.get("x-wikirace-session-id") or "").strip()
+    trace_run_id = (http_request.headers.get("x-wikirace-run-id") or "").strip()
+    if trace_session_id and trace_run_id:
+        _touch_local_run_trace(trace_session_id, trace_run_id)
+
+    configure_observability()
+
+    token = otel_context.attach(extract(http_request.headers))
+    try:
+        request = payload
+
+        start_article = request.start_article.replace("_", " ").strip()
+        destination_article = request.destination_article.replace("_", " ").strip()
+        model = request.model.strip() if isinstance(request.model, str) else ""
+
+        if not start_article or not destination_article:
+            raise HTTPException(status_code=400, detail="Missing start/destination")
+        if not model:
+            raise HTTPException(status_code=400, detail="Missing model")
+
+        steps = [
+            {
+                "type": step.type,
+                "article": step.article,
+                "at": step.at,
+                "metadata": step.metadata,
+            }
+            for step in (request.steps or [])
+            if isinstance(step, RoomStepV1)
+        ]
+        current_article = steps[-1].get("article") if steps else start_article
+        if not isinstance(current_article, str) or not current_article.strip():
+            current_article = start_article
+
+        current_hops = max(0, len(steps) - 1)
+        next_hops = current_hops + 1
+
+        max_steps = request.max_steps if isinstance(request.max_steps, int) and request.max_steps > 0 else 20
+
+        max_links = request.max_links if isinstance(request.max_links, int) and request.max_links > 0 else None
+        max_tokens = request.max_tokens if isinstance(request.max_tokens, int) and request.max_tokens > 0 else None
+
+        api_base = request.api_base.strip() if isinstance(request.api_base, str) and request.api_base.strip() else None
+        openai_api_mode = (
+            request.openai_api_mode.strip()
+            if isinstance(request.openai_api_mode, str) and request.openai_api_mode.strip()
+            else None
+        )
+        openai_reasoning_effort = (
+            request.openai_reasoning_effort.strip()
+            if isinstance(request.openai_reasoning_effort, str)
+            and request.openai_reasoning_effort.strip()
+            else None
+        )
+        openai_reasoning_summary = (
+            request.openai_reasoning_summary.strip()
+            if isinstance(request.openai_reasoning_summary, str)
+            and request.openai_reasoning_summary.strip()
+            else None
+        )
+        anthropic_thinking_budget_tokens = (
+            request.anthropic_thinking_budget_tokens
+            if isinstance(request.anthropic_thinking_budget_tokens, int)
+            and request.anthropic_thinking_budget_tokens > 0
+            else None
+        )
+        google_thinking_config = (
+            request.google_thinking_config
+            if isinstance(request.google_thinking_config, dict) and request.google_thinking_config
+            else None
+        )
+
+        path = _path_so_far(start_article, steps)
+
+        try:
+            step_type, article, metadata = await _compute_llm_next_step(
+                current_article=current_article,
+                destination_article=destination_article,
+                path_so_far=path,
+                next_hops=next_hops,
+                max_steps=max_steps,
+                model=model,
+                api_base=api_base,
+                openai_api_mode=openai_api_mode,
+                openai_reasoning_effort=openai_reasoning_effort,
+                openai_reasoning_summary=openai_reasoning_summary,
+                anthropic_thinking_budget_tokens=anthropic_thinking_budget_tokens,
+                google_thinking_config=google_thinking_config,
+                max_links=max_links,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            step_type = "lose"
+            article = current_article
+            metadata = {"reason": "llm_error", "error": str(exc)}
+
+        updated_at = _now_iso()
+
+        if step_type in ("move", "lose"):
+            article = db.canonical_title(article) or article
+
+        step: dict[str, Any] = {"type": step_type, "article": article, "at": updated_at}
+        if metadata:
+            step["metadata"] = metadata
+
+        return LocalLlmStepResponse(step=RoomStepV1(**step))
+    finally:
+        otel_context.detach(token)
 
 
 @app.post("/llm/choose_link", response_model=LLMChooseLinkResponse)

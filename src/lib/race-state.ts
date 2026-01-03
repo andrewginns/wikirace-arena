@@ -1,7 +1,7 @@
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import type { SessionRulesV1, SessionV1 } from "@/lib/session-types";
-import { llmDisplayNameOverride, llmModelLabel, llmModelShortName } from "@/lib/llm-display";
 import { runDisplayName } from "@/lib/session-utils";
+import { formatRunDisplayName } from "@/lib/run-display";
 
 export type RaceMode = "local" | "multiplayer";
 
@@ -169,20 +169,13 @@ export function roomToRaceState(room: MultiplayerRoomV1, youPlayerId: string | n
       ? room.players.find((p) => p.id === run.player_id)
       : null;
 
-    const displayName =
-      run.kind === "human"
-        ? player?.name || run.player_name || "Human"
-        : llmDisplayNameOverride({
-            playerName: run.player_name,
-            model: run.model,
-          }) ||
-          llmModelLabel({
-            model: run.model,
-            openaiReasoningEffort: run.openai_reasoning_effort,
-            anthropicThinkingBudgetTokens: run.anthropic_thinking_budget_tokens,
-          }) ||
-          llmModelShortName(run.model) ||
-          "AI";
+    const displayName = formatRunDisplayName({
+      kind: run.kind,
+      playerName: player?.name || run.player_name,
+      model: run.model,
+      openaiReasoningEffort: run.openai_reasoning_effort,
+      anthropicThinkingBudgetTokens: run.anthropic_thinking_budget_tokens,
+    });
 
     return {
       id: run.id,

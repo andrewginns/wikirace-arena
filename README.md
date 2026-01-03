@@ -33,7 +33,7 @@ Race from one Wikipedia article to another using only hyperlinks — either as a
   - **Design system**: Tailwind v4 + shadcn/ui primitives, with theme tokens in `src/index.css` (colors, radius, shadows, fonts)
 - **Backend**: FastAPI app in `api.py`
   - Serves article + link data from a local SQLite DB (`wikihop.db`)
-  - Optional LLM move generation via PydanticAI (`POST /llm/chat`)
+  - Optional LLM move generation via PydanticAI (used by Local + Multiplayer AI runners; `POST /llm/local_run/step`)
 - **Evaluation tooling**: `parallel_eval/` for running batch evals and producing viewer JSON
 - **UX audit tooling**: `docs/ux-audit/` + a Playwright script to regenerate screenshots
 
@@ -119,7 +119,11 @@ Endpoints you’ll care about:
 - `GET /health`
 - `GET /get_all_articles`
 - `GET /get_article_with_links/{title}`
-- `POST /llm/chat` (AI move generation via PydanticAI)
+- `GET /wiki/{title}` (Wikipedia iframe proxy)
+- `POST /local/validate_move` (human move validation; Local)
+- `POST /llm/local_run/start` + `POST /llm/local_run/step` (local AI runs)
+- Multiplayer rooms: `POST /rooms` + `/rooms/*` (REST + websocket)
+- `POST /llm/chat` (direct PydanticAI chat; mostly for debugging)
 
 ### 5) Start the web app
 
@@ -137,6 +141,27 @@ VITE_API_BASE=http://localhost:8000 yarn dev
 
 Open the printed Vite URL (typically `http://localhost:5173`).
 
+### Playwright (for regression tests + screenshots)
+
+Playwright is used by:
+
+- `make play-game-regression`
+- `make ux-audit`
+
+Install browsers:
+
+```bash
+yarn playwright install chromium
+```
+
+Or:
+
+```bash
+make playwright-install
+```
+
+(`make play-game-regression` and `make ux-audit` will run `make playwright-install` automatically.)
+
 Optional (single-server / production-like):
 
 ```bash
@@ -145,6 +170,20 @@ WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db uv run uvicorn api:app --port 800
 ```
 
 When `dist/` exists, `api.py` serves it automatically.
+
+## Regression testing (Play Game)
+
+This repo includes a deterministic Playwright smoke suite for the **Play Game** tab (Local + Multiplayer).
+
+- One-shot (recommended): `make play-game-regression` (starts API + UI, runs assertions, shuts down)
+- If servers are already running: `yarn play:regression`
+  - Optional: `PLAY_GAME_REGRESSION_BASE_URL=http://localhost:5173 yarn play:regression`
+
+Notes:
+
+- The suite uses a deterministic win path: `Capybara → Rodent` (1 hop).
+- Runner source lives in `scripts/play-game-regression-runner.mjs`.
+- The wiki iframe can fall back to an offline HTML page generated from the SQLite DB links when external wiki fetches fail, so link-click gameplay remains testable offline.
 
 ## Playing the game
 
@@ -208,28 +247,97 @@ PydanticAI supports many more providers; as long as PydanticAI recognizes the `m
 
 ### In the CLI
 
-See `parallel_eval/README.md` for full usage.
+This repo includes Python tooling under `parallel_eval/` for:
 
-## Evaluating models and visualizing results
+- Playing a single race (human or LLM): `parallel_eval/game.py`
+- Running many races in parallel (batch eval): `parallel_eval/proctor.py`
 
-1) Run a batch evaluation with `parallel_eval/proctor.py`.
+All Python commands are intended to be run via `uv`.
 
-It produces:
+Models use PydanticAI model identifiers (the same provider-prefixed strings used by the web UI).
+For OpenAI-compatible endpoints (vLLM, etc.), both scripts support `--api-base` and (optionally) `--openai-api-mode`.
+
+Prereqs:
+
+- Build `parallel_eval/wikihop.db` (see “Build the `wikihop.db` database” above).
+
+### Play a single game
+
+Human (interactive):
+
+```bash
+uv run python parallel_eval/game.py --human --start 'Saint Lucia' --end 'Italy' --db parallel_eval/wikihop.db
+```
+
+Agent (LLM):
+
+```bash
+export OPENAI_API_KEY=sk_...
+uv run python parallel_eval/game.py --agent --start 'Saint Lucia' --end 'Italy' --db parallel_eval/wikihop.db --model openai-responses:gpt-5-mini --max-steps 20
+```
+
+### Run a parallel evaluation (many games)
+
+`parallel_eval/proctor.py` runs a full cross-product of `article_list × article_list` (excluding same→same), optionally with multiple trials.
+
+Path note: `--db-path`, `--article-list`, and `--output-dir` are resolved relative to the `parallel_eval/` folder.
+So when running from the repo root, pass `--db-path wikihop.db` (or omit the flag) rather than `--db-path parallel_eval/wikihop.db`.
+
+Example: evaluate an OpenAI-compatible hosted model with 200 workers:
+
+```bash
+uv run python parallel_eval/proctor.py \
+  --model 'openai:Qwen/Qwen3-30B-A3B' \
+  --api-base 'http://localhost:8000/v1' \
+  --workers 200 \
+  --db-path wikihop.db
+```
+
+Outputs (in `--output-dir`, default `parallel_eval/proctor_tmp`):
 
 - Per-run traces: `parallel_eval/proctor_tmp/run_*.json`
 - A combined summary file: `parallel_eval/proctor_tmp/<proctor-id>-final-results.json`
 
-2) Visualize/compare runs in the web UI:
+The run files are idempotent: if you re-run the same command, existing run files are skipped.
 
-- Open **View Runs**
-- Click **Upload JSON** and select your `*-final-results.json`
+### Visualize results
 
-The viewer shows success rate and hop statistics, and renders runs as a force-directed graph.
+1) Start the web app (see “Local setup” above).
+2) Open **View Runs** → **Upload JSON** and select your `*-final-results.json`.
 
 Notes:
 
 - The repo includes a couple of small, checked-in sample result files in `results/` that load by default in **View Runs**.
 - The current viewer list/graph focuses on successful runs (`result === "win"`) while still reporting overall success rate.
+
+### Shrinking large JSON files
+
+If your results include full LLM conversations in `step.metadata.conversation`, files can get large.
+You can strip the conversation payloads while keeping everything needed for visualization:
+
+```bash
+jq '{
+  article_list: .article_list,
+  num_trials: .num_trials,
+  num_workers: .num_workers,
+  max_steps: .max_steps,
+  agent_settings: .agent_settings,
+  runs: [.runs[] | {
+    model: .model,
+    api_base: .api_base,
+    max_links: .max_links,
+    max_tries: .max_tries,
+    result: .result,
+    start_article: .start_article,
+    destination_article: .destination_article,
+    steps: [.steps[] | {
+      type: .type,
+      article: .article,
+      metadata: (if (.metadata | has("conversation")) then (.metadata | del(.conversation)) else .metadata end)
+    }]
+  }]
+}' parallel_eval/proctor_tmp/proctor_1-final-results.json > cleaned_data.json
+```
 
 ## What is `index.html`?
 
@@ -250,7 +358,10 @@ The repo includes a UX audit folder at `docs/ux-audit/` with Playwright-generate
 To regenerate screenshots (requires Playwright browsers):
 
 ```bash
-npx playwright install chromium
+yarn playwright install chromium
+
+# or:
+make playwright-install
 
 # One-shot (starts API + UI, runs Playwright, then shuts down)
 make ux-audit

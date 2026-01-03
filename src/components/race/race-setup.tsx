@@ -8,6 +8,7 @@ import { StatusChip } from "@/components/ui/status-chip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { ErrorCallout, ServerOfflineCallout } from "@/components/ui/callouts";
 import {
   Dialog,
   DialogClose,
@@ -28,10 +29,22 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { VirtualizedCombobox } from "@/components/ui/virtualized-combobox";
 import ModelPicker from "@/components/model-picker";
 import WikiArticlePreview from "@/components/wiki-article-preview";
+import { pickRandom, pickRandomDistinctPair } from "@/lib/matchup-random";
+import {
+  allPresetModelDrafts,
+  DEFAULT_MODEL_ID,
+  gpt52ReasoningSweepDrafts,
+} from "@/lib/model-presets";
 import { prefersReducedMotion } from "@/lib/motion";
+import { RACE_PRESETS, type RacePresetId } from "@/lib/race-presets";
+import {
+  computeDuplicateSummary,
+  participantKey,
+  removeDuplicateDrafts,
+} from "@/lib/race-participants";
+import { makeId } from "@/lib/session-utils";
 import { cn } from "@/lib/utils";
 import {
-  AlertTriangle,
   ArrowLeftRight,
   Bot,
   HelpCircle,
@@ -41,100 +54,32 @@ import {
   Trash2,
   Trophy,
   Users,
-  WifiOff,
 } from "lucide-react";
 import popularNodes from "../../../results/popular_nodes.json";
 import type { RaceConfig, RaceParticipantDraft, RaceRules } from "./race-types";
 import { RaceSetupStickyBar } from "./race-setup-sticky-bar";
 
-function makeId(prefix: string) {
-  const randomId =
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return `${prefix}_${randomId}`;
-}
-
 function rulesEqual(a: RaceRules, b: RaceRules) {
   return a.maxHops === b.maxHops && a.maxLinks === b.maxLinks && a.maxTokens === b.maxTokens;
 }
 
-function participantKey(p: RaceParticipantDraft) {
-  if (p.kind === "human") {
-    const normalized = p.name.trim().toLowerCase();
-    return `human:${normalized || "human"}`;
-  }
-  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.openaiApiMode || ""}:${p.openaiReasoningEffort || ""}:${p.anthropicThinkingBudgetTokens || ""}`;
-}
-
-function normalizedHumanName(name: string) {
-  const trimmed = name.trim();
-  return trimmed.length > 0 ? trimmed : "Human";
-}
-
-function participantDuplicateLabel(p: RaceParticipantDraft) {
-  if (p.kind === "human") return normalizedHumanName(p.name);
-  const model = p.model || "llm";
-  const openaiEffort = p.openaiReasoningEffort?.trim();
-  const apiBase = p.apiBase?.trim();
-  const openaiApiMode = p.openaiApiMode?.trim();
-  const anthropicBudget =
-    typeof p.anthropicThinkingBudgetTokens === "number"
-      ? p.anthropicThinkingBudgetTokens
-      : null;
-  const parts: string[] = [];
-  if (openaiEffort) parts.push(`openai_effort: ${openaiEffort}`);
-  if (openaiApiMode) parts.push(`openai_api_mode: ${openaiApiMode}`);
-  if (anthropicBudget) parts.push(`anthropic_thinking: ${anthropicBudget}`);
-  if (apiBase) parts.push(`api_base: ${apiBase}`);
-  return parts.length > 0 ? `${model} (${parts.join(" • ")})` : model;
-}
-
 type Preset = {
-  id: "sprint" | "classic" | "marathon";
+  id: RacePresetId;
   name: string;
   description: string;
   rules: RaceRules;
 };
 
-const PRESETS: Preset[] = [
-  {
-    id: "sprint",
-    name: "Sprint",
-    description: "Fast rounds. Great for humans.",
-    rules: {
-      maxHops: 12,
-      maxLinks: 200,
-      maxTokens: 1500,
-      includeImageLinks: false,
-      disableLinksView: false,
-    },
+const PRESETS: Preset[] = RACE_PRESETS.map((preset) => ({
+  id: preset.id,
+  name: preset.name,
+  description: preset.description,
+  rules: {
+    ...preset.budgets,
+    includeImageLinks: false,
+    disableLinksView: false,
   },
-  {
-    id: "classic",
-    name: "Classic",
-    description: "Balanced default.",
-    rules: {
-      maxHops: 20,
-      maxLinks: null,
-      maxTokens: null,
-      includeImageLinks: false,
-      disableLinksView: false,
-    },
-  },
-  {
-    id: "marathon",
-    name: "Marathon",
-    description: "More hops + more thinking time.",
-    rules: {
-      maxHops: 35,
-      maxLinks: null,
-      maxTokens: null,
-      includeImageLinks: false,
-      disableLinksView: false,
-    },
-  },
-];
+}));
 
 export default function RaceSetup({
   initialStartPage,
@@ -172,7 +117,7 @@ export default function RaceSetup({
     if (initialTargetPage) setTargetPage(initialTargetPage);
   }, [initialTargetPage]);
 
-  const preferredModel = "openai-responses:gpt-5-mini";
+  const preferredModel = DEFAULT_MODEL_ID;
 
   const [participants, setParticipants] = useState<RaceParticipantDraft[]>([
     { id: makeId("p"), kind: "human", name: "You" },
@@ -210,46 +155,17 @@ export default function RaceSetup({
     targetPage.trim().length > 0 &&
     startPage.trim() !== targetPage.trim();
 
+  const randomPool = useMemo(() => {
+    if (popularNodes.length > 0) return popularNodes;
+    if (allArticles.length > 0) return allArticles;
+    return [startPage, targetPage];
+  }, [allArticles, startPage, targetPage]);
+
   const duplicateParticipants = useMemo(() => {
-    const counts = new Map<string, number>();
-    const firstByKey = new Map<string, RaceParticipantDraft>();
-
-    for (const p of participants) {
-      const key = participantKey(p);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-      if (!firstByKey.has(key)) firstByKey.set(key, p);
-    }
-
-    const duplicateKeys = new Set<string>();
-    const duplicateIds = new Set<string>();
-    const labels: Array<{ label: string; count: number }> = [];
-
-    for (const [key, count] of counts.entries()) {
-      if (count <= 1) continue;
-      duplicateKeys.add(key);
-      const first = firstByKey.get(key);
-      labels.push({
-        label: first ? participantDuplicateLabel(first) : key,
-        count,
-      });
-    }
-
-    labels.sort((a, b) => a.label.localeCompare(b.label));
-
-    for (const p of participants) {
-      const key = participantKey(p);
-      if (duplicateKeys.has(key)) duplicateIds.add(p.id);
-    }
-
-    return { duplicateKeys, duplicateIds, labels };
+    return computeDuplicateSummary(participants);
   }, [participants]);
 
-  const duplicateSummary =
-    duplicateParticipants.duplicateKeys.size > 0
-      ? duplicateParticipants.labels
-          .map(({ label, count }) => `${label} (×${count})`)
-          .join(", ")
-      : null;
+  const duplicateSummary = duplicateParticipants.summary;
 
   const errors: string[] = [];
   if (!pagesValid) errors.push("Pick two different pages.");
@@ -289,7 +205,7 @@ export default function RaceSetup({
     presetId: "you_vs_fast" | "you_vs_two" | "model_showdown" | "hotseat"
   ) => {
     const fastModel = pickModel(
-      "openai-responses:gpt-5-mini",
+      DEFAULT_MODEL_ID,
       "openai-responses:gpt-5-nano",
       modelList[0]
     );
@@ -339,26 +255,16 @@ export default function RaceSetup({
   };
 
   const selectRandomArticle = (setter: (article: string) => void) => {
-    if (popularNodes.length > 0) {
-      const randomIndex = Math.floor(Math.random() * popularNodes.length);
-      setter(popularNodes[randomIndex]);
-    }
+    const picked = pickRandom(randomPool);
+    if (!picked) return;
+    setter(picked);
   };
 
   const selectRandomMatchup = () => {
-    if (popularNodes.length === 0) return;
-    const pick = () => popularNodes[Math.floor(Math.random() * popularNodes.length)];
-
-    const start = pick();
-    let target = pick();
-    let tries = 0;
-    while (target === start && tries < 10) {
-      target = pick();
-      tries += 1;
-    }
-
-    setStartPage(start);
-    setTargetPage(target);
+    const matchup = pickRandomDistinctPair(randomPool);
+    if (!matchup) return;
+    setStartPage(matchup.start);
+    setTargetPage(matchup.target);
   };
 
   const applyRecommendedPlayers = (
@@ -411,32 +317,24 @@ export default function RaceSetup({
   };
 
   const addAllPresetModels = () => {
-    const models = Array.from(new Set(modelList)).filter(Boolean);
     addParticipantDrafts(
-      models.map((model) => ({
+      allPresetModelDrafts(modelList).map((draft) => ({
         id: makeId("p"),
         kind: "llm",
         name: "",
-        model,
+        model: draft.model,
       }))
     );
   };
 
   const addGpt52ReasoningSweep = () => {
-    const model = "openai-responses:gpt-5.2";
-    const variants: Array<{ label: string; openaiReasoningEffort?: string }> = [
-      { label: "default" },
-      { label: "low", openaiReasoningEffort: "low" },
-      { label: "medium", openaiReasoningEffort: "medium" },
-      { label: "high", openaiReasoningEffort: "high" },
-    ];
     addParticipantDrafts(
-      variants.map((variant) => ({
+      gpt52ReasoningSweepDrafts().map((draft) => ({
         id: makeId("p"),
         kind: "llm",
-        name: `${model} (${variant.label})`,
-        model,
-        openaiReasoningEffort: variant.openaiReasoningEffort,
+        name: draft.name || "",
+        model: draft.model,
+        openaiReasoningEffort: draft.openaiReasoningEffort,
       }))
     );
   };
@@ -455,15 +353,7 @@ export default function RaceSetup({
   };
 
   const removeDuplicateParticipants = () => {
-    setParticipants((prev) => {
-      const seen = new Set<string>();
-      return prev.filter((p) => {
-        const key = participantKey(p);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    });
+    setParticipants((prev) => removeDuplicateDrafts(prev));
   };
 
   const startRace = () => {
@@ -1372,43 +1262,37 @@ export default function RaceSetup({
 	                    "ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
 	                )}
 	                id="start-race-section"
-	              >
-	                {!isServerConnected && (
-	                  <div className="flex items-start gap-2 rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
-	                    <WifiOff className="mt-0.5 h-4 w-4 shrink-0 text-status-active" aria-hidden="true" />
-	                    <div>
-	                      Server connection issue. The game may be unavailable until the API
-	                      is running.
-	                    </div>
-	                  </div>
-	                )}
-
-	                {(errors.length > 0 || duplicateSummary) && (
-	                  <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground">
-	                    <div className="flex items-start gap-2">
-	                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
-	                      <div className="space-y-1">
-	                        {errors.map((err) => (
-	                          <div key={err}>{err}</div>
-	                        ))}
-	                        {duplicateSummary && (
-	                          <div className="flex flex-wrap items-center justify-between gap-2">
-	                            <div>Duplicates: {duplicateSummary}</div>
-	                            <Button
-	                              type="button"
-	                              variant="outline"
-	                              size="sm"
-	                              className="h-7"
-	                              onClick={removeDuplicateParticipants}
-	                            >
-	                              Remove duplicates
-	                            </Button>
-	                          </div>
-	                        )}
-	                      </div>
-	                    </div>
-	                  </div>
-	                )}
+		              >
+		                {!isServerConnected && (
+		                  <ServerOfflineCallout tone="active" size="xs">
+		                    Server connection issue. The game may be unavailable until the API is
+		                    running.
+		                  </ServerOfflineCallout>
+		                )}
+		
+		                {(errors.length > 0 || duplicateSummary) && (
+		                  <ErrorCallout size="xs">
+		                    <div className="space-y-1">
+		                      {errors.map((err) => (
+		                        <div key={err}>{err}</div>
+		                      ))}
+		                      {duplicateSummary && (
+		                        <div className="flex flex-wrap items-center justify-between gap-2">
+		                          <div>Duplicates: {duplicateSummary}</div>
+		                          <Button
+		                            type="button"
+		                            variant="outline"
+		                            size="sm"
+		                            className="h-7"
+		                            onClick={removeDuplicateParticipants}
+		                          >
+		                            Remove duplicates
+		                          </Button>
+		                        </div>
+		                      )}
+		                    </div>
+		                  </ErrorCallout>
+		                )}
 
 	                <div className="space-y-2">
 	                  <Button

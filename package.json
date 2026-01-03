@@ -8,6 +8,7 @@
     "build": "vite build",
     "deploy": "yarn build && huggingface-cli upload --repo-type space --private HuggingFaceTB/Wikispeedia dist",
     "lint": "eslint .",
+    "play:regression": "node scripts/play-game-regression.mjs",
     "preview": "vite preview",
     "ux:audit": "node scripts/generate-ux-audit.mjs"
   },

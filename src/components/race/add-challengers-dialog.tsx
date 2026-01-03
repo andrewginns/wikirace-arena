@@ -20,52 +20,24 @@ import { Badge } from "@/components/ui/badge";
 import { StatusChip } from "@/components/ui/status-chip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
+import { ErrorCallout, ServerOfflineCallout } from "@/components/ui/callouts";
 import { cn } from "@/lib/utils";
 import ModelPicker from "@/components/model-picker";
-import { AlertTriangle, Bot, Plus, Shuffle, Trash2, User, Users, WifiOff } from "lucide-react";
+import { Bot, Plus, Shuffle, Trash2, User, Users } from "lucide-react";
 import type { RaceParticipantDraft } from "./race-types";
+import {
+  allPresetModelDrafts,
+  DEFAULT_MODEL_ID,
+  gpt52ReasoningSweepDrafts,
+} from "@/lib/model-presets";
+import {
+  computeDuplicateSummary,
+  participantKey,
+  removeDuplicateDrafts,
+} from "@/lib/race-participants";
 import { startHumanRun, startLlmRun, useSessionsStore } from "@/lib/session-store";
-import { sessionDisplayName } from "@/lib/session-utils";
+import { makeId, sessionDisplayName } from "@/lib/session-utils";
 import type { RunV1 } from "@/lib/session-types";
-
-function makeId(prefix: string) {
-  const randomId =
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return `${prefix}_${randomId}`;
-}
-
-function participantKey(p: RaceParticipantDraft) {
-  if (p.kind === "human") {
-    const normalized = p.name.trim().toLowerCase();
-    return `human:${normalized || "human"}`;
-  }
-  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.openaiApiMode || ""}:${p.openaiReasoningEffort || ""}:${p.anthropicThinkingBudgetTokens || ""}`;
-}
-
-function normalizedHumanName(name: string) {
-  const trimmed = name.trim();
-  return trimmed.length > 0 ? trimmed : "Human";
-}
-
-function participantDuplicateLabel(p: RaceParticipantDraft) {
-  if (p.kind === "human") return normalizedHumanName(p.name);
-  const model = p.model || "llm";
-  const openaiEffort = p.openaiReasoningEffort?.trim();
-  const apiBase = p.apiBase?.trim();
-  const openaiApiMode = p.openaiApiMode?.trim();
-  const anthropicBudget =
-    typeof p.anthropicThinkingBudgetTokens === "number"
-      ? p.anthropicThinkingBudgetTokens
-      : null;
-  const parts: string[] = [];
-  if (openaiEffort) parts.push(`openai_effort: ${openaiEffort}`);
-  if (openaiApiMode) parts.push(`openai_api_mode: ${openaiApiMode}`);
-  if (anthropicBudget) parts.push(`anthropic_thinking: ${anthropicBudget}`);
-  if (apiBase) parts.push(`api_base: ${apiBase}`);
-  return parts.length > 0 ? `${model} (${parts.join(" • ")})` : model;
-}
 
 const DEFAULT_RULES = { max_hops: 20, max_links: null, max_tokens: null };
 
@@ -90,45 +62,10 @@ export default function AddChallengersDialog({
   const rules = session?.rules || DEFAULT_RULES;
 
   const duplicateParticipants = useMemo(() => {
-    const counts = new Map<string, number>();
-    const firstByKey = new Map<string, RaceParticipantDraft>();
-
-    for (const p of participants) {
-      const key = participantKey(p);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-      if (!firstByKey.has(key)) firstByKey.set(key, p);
-    }
-
-    const duplicateKeys = new Set<string>();
-    const duplicateIds = new Set<string>();
-    const labels: Array<{ label: string; count: number }> = [];
-
-    for (const [key, count] of counts.entries()) {
-      if (count <= 1) continue;
-      duplicateKeys.add(key);
-      const first = firstByKey.get(key);
-      labels.push({
-        label: first ? participantDuplicateLabel(first) : key,
-        count,
-      });
-    }
-
-    labels.sort((a, b) => a.label.localeCompare(b.label));
-
-    for (const p of participants) {
-      const key = participantKey(p);
-      if (duplicateKeys.has(key)) duplicateIds.add(p.id);
-    }
-
-    return { duplicateKeys, duplicateIds, labels };
+    return computeDuplicateSummary(participants);
   }, [participants]);
 
-  const duplicateSummary =
-    duplicateParticipants.duplicateKeys.size > 0
-      ? duplicateParticipants.labels
-          .map(({ label, count }) => `${label} (×${count})`)
-          .join(", ")
-      : null;
+  const duplicateSummary = duplicateParticipants.summary;
 
   const canStart = Boolean(session) && participants.length > 0 && duplicateSummary === null;
   const disabledReason = useMemo(() => {
@@ -147,9 +84,8 @@ export default function AddChallengersDialog({
   };
 
   const addLlm = () => {
-    const preferredModel = "openai-responses:gpt-5-mini";
     const model =
-      modelList.includes(preferredModel) ? preferredModel : modelList[0] || "llm";
+      modelList.includes(DEFAULT_MODEL_ID) ? DEFAULT_MODEL_ID : modelList[0] || "llm";
     setParticipants((prev) => [
       ...prev,
       { id: makeId("p"), kind: "llm", name: "", model },
@@ -174,32 +110,24 @@ export default function AddChallengersDialog({
   };
 
   const addAllPresetModels = () => {
-    const models = Array.from(new Set(modelList)).filter(Boolean);
     addParticipantDrafts(
-      models.map((model) => ({
+      allPresetModelDrafts(modelList).map((draft) => ({
         id: makeId("p"),
         kind: "llm",
         name: "",
-        model,
+        model: draft.model,
       }))
     );
   };
 
   const addGpt52ReasoningSweep = () => {
-    const model = "openai-responses:gpt-5.2";
-    const variants: Array<{ label: string; openaiReasoningEffort?: string }> = [
-      { label: "default" },
-      { label: "low", openaiReasoningEffort: "low" },
-      { label: "medium", openaiReasoningEffort: "medium" },
-      { label: "high", openaiReasoningEffort: "high" },
-    ];
     addParticipantDrafts(
-      variants.map((variant) => ({
+      gpt52ReasoningSweepDrafts().map((draft) => ({
         id: makeId("p"),
         kind: "llm",
-        name: `${model} (${variant.label})`,
-        model,
-        openaiReasoningEffort: variant.openaiReasoningEffort,
+        name: draft.name || "",
+        model: draft.model,
+        openaiReasoningEffort: draft.openaiReasoningEffort,
       }))
     );
   };
@@ -213,15 +141,7 @@ export default function AddChallengersDialog({
   };
 
   const removeDuplicateParticipants = () => {
-    setParticipants((prev) => {
-      const seen = new Set<string>();
-      return prev.filter((p) => {
-        const key = participantKey(p);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    });
+    setParticipants((prev) => removeDuplicateDrafts(prev));
   };
 
   const clearParticipants = () => {
@@ -530,35 +450,33 @@ export default function AddChallengersDialog({
                 );
               })}
             </div>
-          )}
+	        )}
 
-          {!isServerConnected && (
-            <div className="flex items-start gap-2 rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
-              <WifiOff className="mt-0.5 h-4 w-4 shrink-0 text-status-active" aria-hidden="true" />
-              <div>
-                Server connection issue. LLM runs may be unavailable until the API is running.
-              </div>
-            </div>
-          )}
-        </div>
+	        {!isServerConnected && (
+	          <ServerOfflineCallout tone="active" size="xs">
+	            Server connection issue. LLM runs may be unavailable until the API is running.
+	          </ServerOfflineCallout>
+	        )}
+	      </div>
 
-        {duplicateSummary && (
-          <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground flex flex-wrap items-start justify-between gap-2">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
-              <div>Duplicates: {duplicateSummary}</div>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7"
-              onClick={removeDuplicateParticipants}
-            >
-              Remove duplicates
-            </Button>
-          </div>
-        )}
+	      {duplicateSummary && (
+	        <ErrorCallout
+	          size="xs"
+	          right={
+	            <Button
+	              type="button"
+	              variant="outline"
+	              size="sm"
+	              className="h-7"
+	              onClick={removeDuplicateParticipants}
+	            >
+	              Remove duplicates
+	            </Button>
+	          }
+	        >
+	          <div>Duplicates: {duplicateSummary}</div>
+	        </ErrorCallout>
+	      )}
 
         <Separator />
 

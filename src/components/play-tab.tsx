@@ -15,6 +15,7 @@ import {
   startLlmRun,
   useSessionsStore,
 } from "@/lib/session-store";
+import { RECOMMENDED_MODELS } from "@/lib/model-presets";
 
 type PlayMode = "local" | "multiplayer";
 
@@ -40,12 +41,7 @@ export default function PlayTab({
 }) {
   const [playMode, setPlayMode] = useState<PlayMode>(loadStoredPlayMode);
   const [isServerConnected, setIsServerConnected] = useState<boolean>(false);
-  const [modelList] = useState<string[]>([
-    "openai-responses:gpt-5.2",
-    "openai-responses:gpt-5.1",
-    "openai-responses:gpt-5-mini",
-    "openai-responses:gpt-5-nano",
-  ]);
+  const [modelList] = useState<string[]>(() => [...RECOMMENDED_MODELS]);
   const [allArticles, setAllArticles] = useState<string[]>([]);
   const [setupCollapsed, setSetupCollapsed] = useState<boolean>(false);
   const [scrollTarget, setScrollTarget] = useState<"setup" | "arena" | null>(null);

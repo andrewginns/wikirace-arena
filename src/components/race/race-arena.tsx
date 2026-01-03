@@ -17,7 +17,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { StatusChip } from "@/components/ui/status-chip";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -59,8 +58,8 @@ import {
 import ForceDirectedGraph from "@/components/force-directed-graph";
 import ConfettiCanvas from "@/components/confetti-canvas";
 import WikiArticlePreview from "@/components/wiki-article-preview";
+import AddAiForm from "@/components/race/add-ai-form";
 import AddChallengersDialog from "@/components/race/add-challengers-dialog";
-import ModelPicker from "@/components/model-picker";
 import type { RaceDriver } from "@/lib/race-driver";
 import type { RaceMode, RaceRun, RaceState, RaceStep } from "@/lib/race-state";
 import {
@@ -336,15 +335,6 @@ function buildViewerDatasetFromRace({
   };
 }
 
-function toOptionalPositiveInt(value: string): number | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed)) return undefined;
-  const asInt = Math.floor(parsed);
-  return asInt > 0 ? asInt : undefined;
-}
-
 function runHops(run: RaceRun) {
   return typeof run.hops === "number" ? run.hops : computeHopsFromSteps(run.steps);
 }
@@ -516,24 +506,14 @@ export default function RaceArena({
   const [compareHop, setCompareHop] = useState(0);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
-  const [finishExportMenuOpen, setFinishExportMenuOpen] = useState(false);
-
-  const [addAiOpen, setAddAiOpen] = useState(false);
-  const [addAiPresetsOpen, setAddAiPresetsOpen] = useState(false);
-  const [addAiLoading, setAddAiLoading] = useState(false);
-  const [aiModel, setAiModel] = useState<string>("");
-  const [aiName, setAiName] = useState<string>("");
-  const [aiApiBase, setAiApiBase] = useState<string>("");
-  const [aiOpenaiApiMode, setAiOpenaiApiMode] = useState<string>("");
-  const [aiOpenaiReasoningEffort, setAiOpenaiReasoningEffort] = useState<string>("");
-  const [aiMaxSteps, setAiMaxSteps] = useState<string>("");
-  const [aiMaxLinks, setAiMaxLinks] = useState<string>("");
-  const [aiMaxTokens, setAiMaxTokens] = useState<string>("");
-  const [humanPaneMode, setHumanPaneMode] = useState<HumanPaneMode>(() =>
-    loadHumanPaneMode(
-      isMobile ? MOBILE_HUMAN_PANE_MODE_STORAGE_KEY : HUMAN_PANE_MODE_STORAGE_KEY
-    )
-  );
+	  const [finishExportMenuOpen, setFinishExportMenuOpen] = useState(false);
+	
+	  const [addAiOpen, setAddAiOpen] = useState(false);
+	  const [humanPaneMode, setHumanPaneMode] = useState<HumanPaneMode>(() =>
+	    loadHumanPaneMode(
+	      isMobile ? MOBILE_HUMAN_PANE_MODE_STORAGE_KEY : HUMAN_PANE_MODE_STORAGE_KEY
+	    )
+	  );
   const [linksSearchOpen, setLinksSearchOpen] = useState(false);
   const [arenaViewMode, setArenaViewMode] = useState<ArenaViewMode>("article");
   const [linkQuery, setLinkQuery] = useState<string>("");
@@ -1774,93 +1754,16 @@ export default function RaceArena({
   }
 
   const headerTitle = raceDisplayName(session);
-  const headerSubtitle =
-    session.title && session.title.trim().length > 0
-      ? `${session.start_article} → ${session.destination_article}`
-      : null;
-  const canAddAi = Boolean(driverValue?.addAi && driverValue.capabilities.canAddAi);
-  const defaultLayout = defaultLayoutForMode(session.mode);
-  const isMultiplayerMobile = isMobile && session.mode === "multiplayer";
-
-  const addAiPreset = async (
-    drafts: Array<{
-      model: string;
-      player_name?: string;
-      api_base?: string;
-      openai_api_mode?: string;
-      openai_reasoning_effort?: string;
-      openai_reasoning_summary?: string;
-      anthropic_thinking_budget_tokens?: number;
-      google_thinking_config?: Record<string, unknown>;
-    }>
-  ) => {
-    if (!driverValue?.addAi) return;
-
-    const fullRace = race ?? session;
-    const keyForDraft = (draft: {
-      model: string;
-      api_base?: string;
-      openai_api_mode?: string;
-      openai_reasoning_effort?: string;
-      anthropic_thinking_budget_tokens?: number;
-    }) => {
-      return `llm:${draft.model}:${draft.api_base || ""}:${draft.openai_api_mode || ""}:${draft.openai_reasoning_effort || ""}:${draft.anthropic_thinking_budget_tokens || ""}`;
-    };
-
-    const existingKeys = new Set(
-      fullRace.runs
-        .filter((run) => run.kind === "llm")
-        .map((run) =>
-          keyForDraft({
-            model: run.model || "",
-            api_base: run.api_base || undefined,
-            openai_api_mode: run.openai_api_mode || undefined,
-            openai_reasoning_effort: run.openai_reasoning_effort || undefined,
-            anthropic_thinking_budget_tokens: run.anthropic_thinking_budget_tokens,
-          })
-        )
-    );
-
-    setAddAiLoading(true);
-    try {
-      let addedAny = false;
-      for (const draft of drafts) {
-        const model = draft.model.trim();
-        if (!model) continue;
-
-        const key = keyForDraft({
-          model,
-          api_base: draft.api_base,
-          openai_api_mode: draft.openai_api_mode,
-          openai_reasoning_effort: draft.openai_reasoning_effort,
-          anthropic_thinking_budget_tokens: draft.anthropic_thinking_budget_tokens,
-        });
-        if (existingKeys.has(key)) continue;
-
-        const ok = await driverValue.addAi({
-          model,
-          player_name: draft.player_name,
-          api_base: draft.api_base,
-          openai_api_mode: draft.openai_api_mode,
-          openai_reasoning_effort: draft.openai_reasoning_effort,
-          openai_reasoning_summary: draft.openai_reasoning_summary,
-          anthropic_thinking_budget_tokens: draft.anthropic_thinking_budget_tokens,
-          google_thinking_config: draft.google_thinking_config,
-        });
-
-        if (!ok) break;
-        existingKeys.add(key);
-        addedAny = true;
-      }
-
-      if (addedAny) setAddAiOpen(false);
-    } finally {
-      setAddAiLoading(false);
-    }
-  };
-  const autoExpandRunDetails = Boolean(
-    selectedRun && selectedRun.status !== "running" && arenaViewMode === "results"
-  );
+	  const headerSubtitle =
+	    session.title && session.title.trim().length > 0
+	      ? `${session.start_article} → ${session.destination_article}`
+	      : null;
+	  const canAddAi = Boolean(driverValue?.addAi && driverValue.capabilities.canAddAi);
+	  const defaultLayout = defaultLayoutForMode(session.mode);
+	  const isMultiplayerMobile = isMobile && session.mode === "multiplayer";
+	  const autoExpandRunDetails = Boolean(
+	    selectedRun && selectedRun.status !== "running" && arenaViewMode === "results"
+	  );
   const sessionAllRunsFinished =
     session.runs.length > 0 && session.runs.every((r) => r.status !== "running");
   const mapOnTopInResults =
@@ -1934,213 +1837,35 @@ export default function RaceArena({
 	              />
 	            )}
 
-	            {canAddAi && !isMultiplayerMobile && (
-	              <Dialog open={addAiOpen} onOpenChange={setAddAiOpen}>
-	                <DialogTrigger asChild>
-	                  <Button variant="outline" size="sm">
-	                    Add AI
-	                  </Button>
-	                </DialogTrigger>
-	                <DialogContent className="sm:max-w-lg">
-	                  <DialogHeader>
-	                    <DialogTitle>Add AI racer</DialogTitle>
-	                    <DialogDescription>
-	                      The server will run this AI to completion.
-	                    </DialogDescription>
-	                  </DialogHeader>
+		            {canAddAi && !isMultiplayerMobile && (
+		              <Dialog open={addAiOpen} onOpenChange={setAddAiOpen}>
+		                <DialogTrigger asChild>
+		                  <Button variant="outline" size="sm">
+		                    Add AI
+		                  </Button>
+		                </DialogTrigger>
+		                <DialogContent className="sm:max-w-lg">
+		                  <DialogHeader>
+		                    <DialogTitle>Add AI racer</DialogTitle>
+		                    <DialogDescription>
+		                      The server will run this AI to completion.
+		                    </DialogDescription>
+		                  </DialogHeader>
 
-	                  <div className="space-y-3">
-	                    <Popover open={addAiPresetsOpen} onOpenChange={setAddAiPresetsOpen}>
-	                      <PopoverTrigger asChild>
-	                        <Button variant="outline" size="sm" disabled={addAiLoading}>
-	                          Presets
-	                        </Button>
-	                      </PopoverTrigger>
-	                      <PopoverContent className="p-1 w-72" align="start">
-	                        <div className="px-2 py-1.5 text-xs text-muted-foreground">
-	                          Add multiple AI racers at once (additive).
-	                        </div>
-	                        <Button
-	                          type="button"
-	                          variant="ghost"
-	                          className="w-full justify-start"
-	                          disabled={addAiLoading || modelList.length === 0}
-	                          onClick={() => {
-	                            setAddAiPresetsOpen(false);
-	                            const models = Array.from(
-	                              new Set(modelList.map((m) => m.trim()).filter(Boolean))
-	                            );
-	                            void addAiPreset(models.map((model) => ({ model })));
-	                          }}
-	                        >
-	                          All preset models
-	                        </Button>
-	                        <Button
-	                          type="button"
-	                          variant="ghost"
-	                          className="w-full justify-start"
-	                          disabled={addAiLoading}
-	                          onClick={() => {
-	                            setAddAiPresetsOpen(false);
-	                            const model = "openai-responses:gpt-5.2";
-	                            const variants: Array<{
-	                              label: string;
-	                              openai_reasoning_effort?: string;
-	                            }> = [
-	                              { label: "default" },
-	                              { label: "low", openai_reasoning_effort: "low" },
-	                              { label: "medium", openai_reasoning_effort: "medium" },
-	                              { label: "high", openai_reasoning_effort: "high" },
-	                            ];
-
-	                            void addAiPreset(
-	                              variants.map((variant) => ({
-	                                model,
-	                                player_name: `${model} (${variant.label})`,
-	                                openai_reasoning_effort:
-	                                  variant.openai_reasoning_effort,
-	                              }))
-	                            );
-	                          }}
-	                        >
-	                          GPT-5.2 reasoning sweep
-	                        </Button>
-	                      </PopoverContent>
-	                    </Popover>
-
-	                    <ModelPicker
-	                      label="Model"
-	                      value={aiModel}
-	                      onValueChange={setAiModel}
-	                      options={modelList}
-	                      placeholder="Type any PydanticAI model id"
-	                    />
-
-	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-	                      <div>
-	                        <Label className="text-xs">Display name (optional)</Label>
-	                        <Input
-	                          value={aiName}
-	                          onChange={(e) => setAiName(e.target.value)}
-	                          placeholder="Bot #1"
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div>
-	                        <Label className="text-xs">OpenAI reasoning effort (optional)</Label>
-	                        <Input
-	                          value={aiOpenaiReasoningEffort}
-	                          onChange={(e) => setAiOpenaiReasoningEffort(e.target.value)}
-	                          placeholder="low / medium / high / xhigh"
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div>
-	                        <Label className="text-xs">API base override (optional)</Label>
-	                        <Input
-	                          value={aiApiBase}
-	                          onChange={(e) => setAiApiBase(e.target.value)}
-	                          placeholder="http://localhost:8001/v1"
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div>
-	                        <Label className="text-xs">OpenAI API mode (optional)</Label>
-	                        <Input
-	                          value={aiOpenaiApiMode}
-	                          onChange={(e) => setAiOpenaiApiMode(e.target.value)}
-	                          placeholder="chat / responses"
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                    </div>
-
-	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-	                      <div>
-	                        <Label className="text-xs">Max steps</Label>
-	                        <Input
-	                          value={aiMaxSteps}
-	                          onChange={(e) => setAiMaxSteps(e.target.value)}
-	                          inputMode="numeric"
-	                          placeholder={`Default (${session.rules.max_hops})`}
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div>
-	                        <Label className="text-xs">Max links</Label>
-	                        <Input
-	                          value={aiMaxLinks}
-	                          onChange={(e) => setAiMaxLinks(e.target.value)}
-	                          inputMode="numeric"
-	                          placeholder={
-	                            session.rules.max_links === null
-	                              ? "Default (Unlimited)"
-	                              : `Default (${session.rules.max_links})`
-	                          }
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div>
-	                        <Label className="text-xs">Max tokens</Label>
-	                        <Input
-	                          value={aiMaxTokens}
-	                          onChange={(e) => setAiMaxTokens(e.target.value)}
-	                          inputMode="numeric"
-	                          placeholder={
-	                            session.rules.max_tokens === null
-	                              ? "Default (Unlimited)"
-	                              : `Default (${session.rules.max_tokens})`
-	                          }
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                    </div>
-	                  </div>
-
-	                  <DialogFooter>
-	                    <DialogClose asChild>
-	                      <Button variant="outline">Cancel</Button>
-	                    </DialogClose>
-	                    <Button
-	                      disabled={addAiLoading || aiModel.trim().length === 0}
-	                      onClick={() => {
-	                        if (!driverValue?.addAi) return;
-	                        if (aiModel.trim().length === 0) return;
-	                        setAddAiLoading(true);
-	                        void (async () => {
-	                          try {
-	                            const ok = await driverValue.addAi({
-	                              model: aiModel.trim(),
-	                              player_name: aiName.trim() || undefined,
-	                              api_base: aiApiBase.trim() || undefined,
-	                              openai_api_mode: aiOpenaiApiMode.trim() || undefined,
-	                              openai_reasoning_effort:
-	                                aiOpenaiReasoningEffort.trim() || undefined,
-	                              max_steps: toOptionalPositiveInt(aiMaxSteps),
-	                              max_links: toOptionalPositiveInt(aiMaxLinks),
-	                              max_tokens: toOptionalPositiveInt(aiMaxTokens),
-	                            });
-	                            if (!ok) return;
-	                            setAiName("");
-	                            setAiApiBase("");
-	                            setAiOpenaiApiMode("");
-	                            setAiOpenaiReasoningEffort("");
-	                            setAiMaxSteps("");
-	                            setAiMaxLinks("");
-	                            setAiMaxTokens("");
-	                            setAddAiOpen(false);
-	                          } finally {
-	                            setAddAiLoading(false);
-	                          }
-	                        })();
-	                      }}
-	                    >
-	                      {addAiLoading ? "Adding…" : "Add AI"}
-	                    </Button>
-	                  </DialogFooter>
-	                </DialogContent>
-	              </Dialog>
-	            )}
+		                  <AddAiForm
+		                    mode="dialog"
+		                    modelList={modelList}
+		                    defaults={session.rules}
+		                    existingRuns={race?.runs ?? session.runs}
+		                    onAddAi={async (args) => {
+		                      if (!driverValue?.addAi) return false;
+		                      return driverValue.addAi(args);
+		                    }}
+		                    onClose={() => setAddAiOpen(false)}
+		                  />
+		                </DialogContent>
+		              </Dialog>
+		            )}
 	            {onNewRace && (
 	              <Button variant="secondary" size="sm" onClick={onNewRace}>
 	                New race

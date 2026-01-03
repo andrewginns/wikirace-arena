@@ -6,18 +6,14 @@ import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { VirtualizedCombobox } from "@/components/ui/virtualized-combobox";
+import { ErrorCallout, ServerOfflineCallout } from "@/components/ui/callouts";
 import WikiArticlePreview from "@/components/wiki-article-preview";
+import { pickRandom, pickRandomDistinctPair } from "@/lib/matchup-random";
 import { setupNewRound } from "@/lib/multiplayer-store";
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import { cn } from "@/lib/utils";
-import { AlertTriangle, ArrowLeftRight, Shuffle, WifiOff } from "lucide-react";
+import { ArrowLeftRight, Shuffle } from "lucide-react";
 import popularNodes from "../../../results/popular_nodes.json";
-
-function pickRandom(items: string[]) {
-  if (items.length === 0) return null;
-  const idx = Math.floor(Math.random() * items.length);
-  return items[idx] || null;
-}
 
 export default function MultiplayerRoundSetup({
   room,
@@ -60,20 +56,10 @@ export default function MultiplayerRoundSetup({
   };
 
   const selectRandomMatchup = () => {
-    const start = pickRandom(randomPool);
-    if (!start) return;
-
-    let target = pickRandom(randomPool);
-    if (!target) return;
-    let tries = 0;
-    while (target === start && tries < 10) {
-      target = pickRandom(randomPool);
-      if (!target) return;
-      tries += 1;
-    }
-
-    setStartPage(start);
-    setTargetPage(target);
+    const matchup = pickRandomDistinctPair(randomPool);
+    if (!matchup) return;
+    setStartPage(matchup.start);
+    setTargetPage(matchup.target);
   };
 
   const swapPages = () => {
@@ -81,21 +67,17 @@ export default function MultiplayerRoundSetup({
     setTargetPage(startPage);
   };
 
-  return (
-    <div className="space-y-4">
-      {error && (
-        <div className="flex items-start gap-2 rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
-          <div>{error}</div>
-        </div>
-      )}
+	  return (
+	    <div className="space-y-4">
+	      {error && (
+	        <ErrorCallout>{error}</ErrorCallout>
+	      )}
 
-      {!isServerConnected && (
-        <div className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-          <WifiOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          <div>Server not connected. Start the API server first.</div>
-        </div>
-      )}
+	      {!isServerConnected && (
+	        <ServerOfflineCallout>
+	          Server not connected. Start the API server first.
+	        </ServerOfflineCallout>
+	      )}
 
       <Card className="p-4">
         <div className="text-sm font-medium">Start a new round</div>

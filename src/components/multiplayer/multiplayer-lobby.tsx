@@ -1,29 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { StatusChip } from "@/components/ui/status-chip";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
-import ModelPicker from "@/components/model-picker";
+import { ErrorCallout } from "@/components/ui/callouts";
+import AddAiForm from "@/components/race/add-ai-form";
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import { addLlmParticipant, cancelRun, restartRun, startRoom } from "@/lib/multiplayer-store";
 import { llmDisplayNameOverride, llmModelLabel, llmSettingsSubtext } from "@/lib/llm-display";
 import { useMediaQuery } from "@/lib/use-media-query";
-import { AlertTriangle } from "lucide-react";
-
-function toOptionalPositiveInt(value: string): number | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed)) return undefined;
-  const asInt = Math.floor(parsed);
-  return asInt > 0 ? asInt : undefined;
-}
 
 export default function MultiplayerLobby({
   room,
@@ -48,25 +36,8 @@ export default function MultiplayerLobby({
     "idle"
   );
   const [startLoading, setStartLoading] = useState(false);
-  const [addAiLoading, setAddAiLoading] = useState(false);
-  const [aiPresetsOpen, setAiPresetsOpen] = useState(false);
-
-  const [aiModel, setAiModel] = useState(() => modelList[0] || "");
-  const [aiName, setAiName] = useState("");
-  const [aiApiBase, setAiApiBase] = useState("");
-  const [aiOpenaiApiMode, setAiOpenaiApiMode] = useState("");
-  const [aiOpenaiReasoningEffort, setAiOpenaiReasoningEffort] = useState("");
-  const [aiMaxSteps, setAiMaxSteps] = useState("");
-  const [aiMaxLinks, setAiMaxLinks] = useState("");
-  const [aiMaxTokens, setAiMaxTokens] = useState("");
 
   const isMobile = useMediaQuery("(max-width: 639px)");
-
-  useEffect(() => {
-    if (aiModel.trim().length > 0) return;
-    if (modelList.length === 0) return;
-    setAiModel(modelList[0] || "");
-  }, [aiModel, modelList]);
 
   const isHost = playerId && playerId === room.owner_player_id;
 
@@ -87,84 +58,11 @@ export default function MultiplayerLobby({
     return room.runs.filter((r) => r.kind === "llm");
   }, [room.runs]);
 
-  const addAiPreset = async (
-    drafts: Array<{
-      model: string;
-      player_name?: string;
-      api_base?: string;
-      openai_api_mode?: string;
-      openai_reasoning_effort?: string;
-      openai_reasoning_summary?: string;
-      anthropic_thinking_budget_tokens?: number;
-      google_thinking_config?: Record<string, unknown>;
-    }>
-  ) => {
-    const keyForDraft = (draft: {
-      model: string;
-      api_base?: string;
-      openai_api_mode?: string;
-      openai_reasoning_effort?: string;
-      anthropic_thinking_budget_tokens?: number;
-    }) => {
-      return `llm:${draft.model}:${draft.api_base || ""}:${draft.openai_api_mode || ""}:${draft.openai_reasoning_effort || ""}:${draft.anthropic_thinking_budget_tokens || ""}`;
-    };
-
-    const existingKeys = new Set(
-      room.runs
-        .filter((run) => run.kind === "llm")
-        .map((run) =>
-          keyForDraft({
-            model: run.model || "",
-            api_base: run.api_base || undefined,
-            openai_api_mode: run.openai_api_mode || undefined,
-            openai_reasoning_effort: run.openai_reasoning_effort || undefined,
-            anthropic_thinking_budget_tokens: run.anthropic_thinking_budget_tokens,
-          })
-        )
-    );
-
-    setAddAiLoading(true);
-    try {
-      for (const draft of drafts) {
-        const model = draft.model.trim();
-        if (!model) continue;
-
-        const key = keyForDraft({
-          model,
-          api_base: draft.api_base,
-          openai_api_mode: draft.openai_api_mode,
-          openai_reasoning_effort: draft.openai_reasoning_effort,
-          anthropic_thinking_budget_tokens: draft.anthropic_thinking_budget_tokens,
-        });
-        if (existingKeys.has(key)) continue;
-
-        const result = await addLlmParticipant({
-          model,
-          player_name: draft.player_name,
-          api_base: draft.api_base,
-          openai_api_mode: draft.openai_api_mode,
-          openai_reasoning_effort: draft.openai_reasoning_effort,
-          openai_reasoning_summary: draft.openai_reasoning_summary,
-          anthropic_thinking_budget_tokens: draft.anthropic_thinking_budget_tokens,
-          google_thinking_config: draft.google_thinking_config,
-        });
-        if (!result) break;
-
-        existingKeys.add(key);
-      }
-    } finally {
-      setAddAiLoading(false);
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      {error && (
-        <div className="flex items-start gap-2 rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
-          <div>{error}</div>
-        </div>
-      )}
+	  return (
+	    <div className="space-y-4">
+	      {error && (
+	        <ErrorCallout>{error}</ErrorCallout>
+	      )}
 
       <Card className="p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -354,215 +252,13 @@ export default function MultiplayerLobby({
                   Server runs AI moves; everyone watches live.
                 </div>
 
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <div className="text-[11px] text-muted-foreground">Quick add:</div>
-                  {modelList.length > 0 ? (
-                    <>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={addAiLoading}
-                        onClick={() => {
-                          const model = modelList[0];
-                          if (!model) return;
-                          setAddAiLoading(true);
-                          void (async () => {
-                            try {
-                              await addLlmParticipant({ model });
-                            } finally {
-                              setAddAiLoading(false);
-                            }
-                          })();
-                        }}
-                      >
-                        Add {modelList[0]}
-                      </Button>
-                    </>
-                  ) : null}
-
-                  <Popover open={aiPresetsOpen} onOpenChange={setAiPresetsOpen}>
-                    <PopoverTrigger asChild>
-                      <Button type="button" variant="outline" size="sm" disabled={addAiLoading}>
-                        Presets
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="p-1 w-72" align="start">
-                      <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                        Add multiple AI racers at once (additive).
-                      </div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className="w-full justify-start"
-                        disabled={addAiLoading || modelList.length === 0}
-                        onClick={() => {
-                          setAiPresetsOpen(false);
-                          const models = Array.from(
-                            new Set(modelList.map((m) => m.trim()).filter(Boolean))
-                          );
-                          void addAiPreset(models.map((model) => ({ model })));
-                        }}
-                      >
-                        All preset models
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className="w-full justify-start"
-                        disabled={addAiLoading}
-                        onClick={() => {
-                          setAiPresetsOpen(false);
-                          const model = "openai-responses:gpt-5.2";
-                          const variants: Array<{
-                            label: string;
-                            openai_reasoning_effort?: string;
-                          }> = [
-                            { label: "default" },
-                            { label: "low", openai_reasoning_effort: "low" },
-                            { label: "medium", openai_reasoning_effort: "medium" },
-                            { label: "high", openai_reasoning_effort: "high" },
-                          ];
-
-                          void addAiPreset(
-                            variants.map((variant) => ({
-                              model,
-                              player_name: `${model} (${variant.label})`,
-                              openai_reasoning_effort: variant.openai_reasoning_effort,
-                            }))
-                          );
-                        }}
-                      >
-                        GPT-5.2 reasoning sweep
-                      </Button>
-                    </PopoverContent>
-                  </Popover>
-                </div>
-
-                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="sm:col-span-2">
-                    <ModelPicker
-                      label="Model"
-                      value={aiModel}
-                      onValueChange={setAiModel}
-                      options={modelList}
-                      placeholder="Type any PydanticAI model id"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">Display name (optional)</Label>
-                    <Input
-                      value={aiName}
-                      onChange={(e) => setAiName(e.target.value)}
-                      placeholder="e.g. Bot #1"
-                      className="mt-1"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">OpenAI reasoning effort (optional)</Label>
-                    <Input
-                      value={aiOpenaiReasoningEffort}
-                      onChange={(e) => setAiOpenaiReasoningEffort(e.target.value)}
-                      placeholder="low / medium / high / xhigh"
-                      className="mt-1"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">API base override (optional)</Label>
-                    <Input
-                      value={aiApiBase}
-                      onChange={(e) => setAiApiBase(e.target.value)}
-                      placeholder="http://localhost:8001/v1"
-                      className="mt-1"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">OpenAI API mode (optional)</Label>
-                    <Input
-                      value={aiOpenaiApiMode}
-                      onChange={(e) => setAiOpenaiApiMode(e.target.value)}
-                      placeholder="chat / responses"
-                      className="mt-1"
-                    />
-                  </div>
-                </div>
-
-                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <div>
-                    <Label className="text-xs">Max steps</Label>
-                    <Input
-                      value={aiMaxSteps}
-                      onChange={(e) => setAiMaxSteps(e.target.value)}
-                      inputMode="numeric"
-                      placeholder={`Default (${room.rules.max_hops})`}
-                      className="mt-1"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">Max links</Label>
-                    <Input
-                      value={aiMaxLinks}
-                      onChange={(e) => setAiMaxLinks(e.target.value)}
-                      inputMode="numeric"
-                      placeholder={
-                        room.rules.max_links === null
-                          ? "Default (Unlimited)"
-                          : `Default (${room.rules.max_links})`
-                      }
-                      className="mt-1"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">Max tokens</Label>
-                    <Input
-                      value={aiMaxTokens}
-                      onChange={(e) => setAiMaxTokens(e.target.value)}
-                      inputMode="numeric"
-                      placeholder={
-                        room.rules.max_tokens === null
-                          ? "Default (Unlimited)"
-                          : `Default (${room.rules.max_tokens})`
-                      }
-                      className="mt-1"
-                    />
-                  </div>
-                </div>
-
-                <Button
-                  size="sm"
-                  className="mt-3"
-                  disabled={addAiLoading || aiModel.trim().length === 0}
-                  onClick={() => {
-                    if (aiModel.trim().length === 0) return;
-                    setAddAiLoading(true);
-                    void (async () => {
-                      try {
-                        await addLlmParticipant({
-                          model: aiModel.trim(),
-                          player_name: aiName.trim() || undefined,
-                          api_base: aiApiBase.trim() || undefined,
-                          openai_api_mode: aiOpenaiApiMode.trim() || undefined,
-                          openai_reasoning_effort:
-                            aiOpenaiReasoningEffort.trim() || undefined,
-                          max_steps: toOptionalPositiveInt(aiMaxSteps),
-                          max_links: toOptionalPositiveInt(aiMaxLinks),
-                          max_tokens: toOptionalPositiveInt(aiMaxTokens),
-                        });
-                        setAiName("");
-                        setAiApiBase("");
-                        setAiOpenaiApiMode("");
-                        setAiOpenaiReasoningEffort("");
-                        setAiMaxSteps("");
-                        setAiMaxLinks("");
-                        setAiMaxTokens("");
-                      } finally {
-                        setAddAiLoading(false);
-                      }
-                    })();
-                  }}
-                >
-                  {addAiLoading ? "Adding…" : "Add AI"}
-                </Button>
+                <AddAiForm
+                  mode="inline"
+                  modelList={modelList}
+                  defaults={room.rules}
+                  existingRuns={room.runs}
+                  onAddAi={addLlmParticipant}
+                />
               </div>
             ) : null}
           </div>

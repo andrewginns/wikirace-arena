@@ -4,10 +4,10 @@ import { useMemo } from "react";
 import RaceArena from "@/components/race/race-arena";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ErrorCallout } from "@/components/ui/callouts";
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import { createMultiplayerRaceDriver } from "@/lib/multiplayer-race-driver";
 import { roomToRaceState } from "@/lib/race-state";
-import { AlertTriangle } from "lucide-react";
 
 export default function MultiplayerArena({
   room,
@@ -42,10 +42,7 @@ export default function MultiplayerArena({
   return (
     <div className="space-y-4">
       {error && (
-        <div className="flex items-start gap-2 rounded-md border border-status-error/30 bg-status-error/10 p-3 text-sm text-foreground">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
-          <div>{error}</div>
-        </div>
+        <ErrorCallout>{error}</ErrorCallout>
       )}
 
       <RaceArena
