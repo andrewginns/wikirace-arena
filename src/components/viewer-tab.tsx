@@ -1,11 +1,8 @@
-"use client";
-
-import q3Results from "../../results/qwen3.json"
-import q3_30B_A3B_Results from "../../results/qwen3-30B-A3-results.json"
+import q3ResultsUrl from "../../results/qwen3.json?url";
+import q3_30B_A3B_ResultsUrl from "../../results/qwen3-30B-A3-results.json?url";
 // import mockResults from "../../qwen3-final-results.json"
-import { useMemo, useState, useEffect, useRef } from "react";
+import { Suspense, lazy, useMemo, useState, useEffect, useRef } from "react";
 import { Card } from "@/components/ui/card";
-import ForceDirectedGraph from "@/components/force-directed-graph";
 import RunsList from "@/components/runs-list";
 import { cn } from "@/lib/utils";
 import { 
@@ -38,10 +35,15 @@ import { addViewerDataset, removeViewerDataset, useViewerDatasetsStore } from "@
 import { formatHops, viewerRunHops } from "@/lib/hops";
 import { getChartPalette } from "@/lib/theme-colors";
 
-const defaultModels = {
-  "Qwen3-14B": q3Results,
-  "Qwen3-30B-A3B": q3_30B_A3B_Results,
-}
+const ForceDirectedGraph = lazy(() => import("@/components/force-directed-graph"));
+
+const DEFAULT_DATASETS = {
+  "Qwen3-14B": { url: q3ResultsUrl },
+  "Qwen3-30B-A3B": { url: q3_30B_A3B_ResultsUrl },
+} as const;
+
+type DefaultDatasetName = keyof typeof DEFAULT_DATASETS;
+type DefaultDatasetLoadStatus = "idle" | "loading" | "loaded" | "error";
 
 // Use the type expected by RunsList
 interface Run {
@@ -96,7 +98,17 @@ export default function ViewerTab({
   );
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareHop, setCompareHop] = useState(0);
-  
+  const [defaultDatasetData, setDefaultDatasetData] = useState<Record<string, unknown>>(
+    () => ({})
+  );
+  const [defaultDatasetStatus, setDefaultDatasetStatus] = useState<
+    Record<string, DefaultDatasetLoadStatus>
+  >(() => ({}));
+  const [defaultDatasetErrors, setDefaultDatasetErrors] = useState<Record<string, string>>(
+    () => ({})
+  );
+  const [defaultDatasetLoadToken, setDefaultDatasetLoadToken] = useState(0);
+
   const savedModels = useMemo(() => {
     const obj: Record<string, unknown> = {};
     for (const dataset of datasets) {
@@ -104,13 +116,40 @@ export default function ViewerTab({
     }
     return obj;
   }, [datasets]);
-  
+
+  const modelOptions = useMemo(() => {
+    return [...Object.keys(DEFAULT_DATASETS), ...Object.keys(savedModels)];
+  }, [savedModels]);
+
   const models = useMemo(() => {
     return {
-      ...defaultModels,
+      ...defaultDatasetData,
       ...savedModels,
     };
-  }, [savedModels]);
+  }, [defaultDatasetData, savedModels]);
+
+  const isDefaultModel = selectedModel in DEFAULT_DATASETS;
+  const selectedDefaultStatus = defaultDatasetStatus[selectedModel] ?? "idle";
+  const selectedDefaultError = defaultDatasetErrors[selectedModel] ?? null;
+
+  const retrySelectedDefaultDataset = () => {
+    if (!isDefaultModel) return;
+    setDefaultDatasetData((prev) => {
+      if (!(selectedModel in prev)) return prev;
+      const next = { ...prev };
+      delete next[selectedModel];
+      return next;
+    });
+    setDefaultDatasetStatus((prev) => ({ ...prev, [selectedModel]: "idle" }));
+    setDefaultDatasetErrors((prev) => {
+      if (!(selectedModel in prev)) return prev;
+      const next = { ...prev };
+      delete next[selectedModel];
+      return next;
+    });
+    setDefaultDatasetLoadToken((prev) => prev + 1);
+  };
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const comparePalette = useMemo(() => getChartPalette(), []);
@@ -139,15 +178,95 @@ export default function ViewerTab({
 
   useEffect(() => {
     // Keep selected model valid as models change.
-    if (!(selectedModel in models)) {
-      const first = Object.keys(models)[0];
+    if (!modelOptions.includes(selectedModel)) {
+      const first = modelOptions[0];
       if (first) setSelectedModel(first);
     }
-  }, [models, selectedModel]);
+  }, [modelOptions, selectedModel]);
+
+  useEffect(() => {
+    if (!(selectedModel in DEFAULT_DATASETS)) return;
+
+    const defaultModel = selectedModel as DefaultDatasetName;
+    const url = DEFAULT_DATASETS[defaultModel].url;
+
+    let controller: AbortController | null = null;
+    let shouldLoad = false;
+    let settled = false;
+
+    setDefaultDatasetStatus((prev) => {
+      const current = prev[defaultModel] ?? "idle";
+      // Keep errors sticky until the user explicitly retries.
+      if (current !== "idle") return prev;
+
+      controller = new AbortController();
+      shouldLoad = true;
+      return { ...prev, [defaultModel]: "loading" };
+    });
+
+    if (!shouldLoad || !controller) return;
+
+    // Clear any previous error for this dataset once we actually retry a load.
+    setDefaultDatasetErrors((prev) => {
+      if (!(defaultModel in prev)) return prev;
+      const next = { ...prev };
+      delete next[defaultModel];
+      return next;
+    });
+
+    void (async () => {
+      try {
+        const response = await fetch(url, { signal: controller!.signal });
+        if (!response.ok) {
+          throw new Error(`Failed to load dataset (${response.status})`);
+        }
+
+        const data = (await response.json()) as unknown;
+        if (controller!.signal.aborted) return;
+
+        settled = true;
+        setDefaultDatasetData((prev) => ({ ...prev, [defaultModel]: data }));
+        setDefaultDatasetStatus((prev) => ({ ...prev, [defaultModel]: "loaded" }));
+      } catch (err) {
+        if (controller!.signal.aborted) return;
+
+        const message = err instanceof Error ? err.message : String(err);
+        settled = true;
+        setDefaultDatasetStatus((prev) => ({ ...prev, [defaultModel]: "error" }));
+        setDefaultDatasetErrors((prev) => ({ ...prev, [defaultModel]: message }));
+      }
+    })();
+
+    return () => {
+      controller!.abort();
+      // If we aborted mid-load (e.g. user switched datasets), allow future retries.
+      if (!settled) {
+        setDefaultDatasetStatus((prev) => {
+          if ((prev[defaultModel] ?? "idle") !== "loading") return prev;
+          return { ...prev, [defaultModel]: "idle" };
+        });
+      }
+    };
+  }, [defaultDatasetLoadToken, selectedModel]);
 
   useEffect(() => {
     // Convert the model data to the format expected by RunsList
-    const convertedRuns: Run[] = models[selectedModel]?.runs?.map((run: {
+    const modelData = models[selectedModel] as {
+      runs?: {
+        start_article: string;
+        destination_article: string;
+        steps: { type: string; article: string }[];
+        result: string;
+      }[];
+    } | null;
+
+    if (!modelData || !Array.isArray(modelData.runs)) {
+      setRuns([]);
+      setModelStats(null);
+      return;
+    }
+
+    const convertedRuns: Run[] = modelData.runs.map((run: {
       start_article: string;
       destination_article: string;
       steps: { type: string; article: string }[];
@@ -157,7 +276,7 @@ export default function ViewerTab({
       destination_article: run.destination_article,
       steps: run.steps.map((step: { article: string }) => step.article),
       result: run.result
-    })) || [];
+    }));
     const winRunsForModel = convertedRuns.filter((run) => run.result === "win");
     const minWinHops =
       winRunsForModel.length > 0
@@ -517,7 +636,7 @@ export default function ViewerTab({
                    <SelectValue placeholder="Select model" />
                  </SelectTrigger>
                  <SelectContent>
-                   {Object.keys(models).map((modelName) => (
+                   {modelOptions.map((modelName) => (
                      <SelectItem key={modelName} value={modelName}>
                        {modelName}
                      </SelectItem>
@@ -525,6 +644,30 @@ export default function ViewerTab({
                  </SelectContent>
                </Select>
              </div>
+
+             {isDefaultModel && selectedDefaultStatus === "loading" && (
+               <div className="text-xs text-muted-foreground">Loading dataset...</div>
+             )}
+
+             {isDefaultModel && selectedDefaultStatus === "error" && (
+               <div className="flex items-center gap-2 rounded-md border border-status-error/30 bg-status-error/10 px-2 py-1 text-xs text-foreground">
+                 <AlertTriangle
+                   className="h-4 w-4 shrink-0 text-status-error"
+                   aria-hidden="true"
+                 />
+                 <div className="truncate">
+                   {selectedDefaultError || "Failed to load dataset."}
+                 </div>
+                 <Button
+                   variant="outline"
+                   size="sm"
+                   className="h-7 px-2"
+                   onClick={retrySelectedDefaultDataset}
+                 >
+                   Retry
+                 </Button>
+               </div>
+             )}
 
              <div className="flex flex-wrap items-center gap-2">
                <Button
@@ -979,14 +1122,22 @@ export default function ViewerTab({
               onPointerDownCapture={pauseAutoplay}
               onTouchStartCapture={pauseAutoplay}
             >
-              <ForceDirectedGraph
-                runs={graphConfig.runs}
-                runId={graphConfig.runId}
-                compareRunIds={graphConfig.compareRunIds}
-                compareColorByRunId={graphConfig.compareColorByRunId}
-                compareHighlightStep={graphConfig.compareHighlightStep}
-                highlightStep={graphConfig.highlightStep}
-              />
+              <Suspense
+                fallback={
+                  <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
+                    Loading graph...
+                  </div>
+                }
+              >
+                <ForceDirectedGraph
+                  runs={graphConfig.runs}
+                  runId={graphConfig.runId}
+                  compareRunIds={graphConfig.compareRunIds}
+                  compareColorByRunId={graphConfig.compareColorByRunId}
+                  compareHighlightStep={graphConfig.compareHighlightStep}
+                  highlightStep={graphConfig.highlightStep}
+                />
+              </Suspense>
             </div>
           </div>
 

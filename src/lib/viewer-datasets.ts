@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react'
+import { safeLocalStorageGetJson, safeLocalStorageSetJson } from '@/lib/storage'
 
 export type ViewerDatasetRecord = {
   id: string
@@ -13,17 +14,8 @@ type StoreState = {
 
 const STORAGE_KEY = 'wikirace:viewer-datasets:v1'
 
-function safeParseJson<T>(value: string | null): T | null {
-  if (!value) return null
-  try {
-    return JSON.parse(value) as T
-  } catch {
-    return null
-  }
-}
-
 function loadInitialState(): StoreState {
-  const stored = safeParseJson<StoreState>(window.localStorage.getItem(STORAGE_KEY))
+  const stored = safeLocalStorageGetJson<StoreState>(STORAGE_KEY)
   if (!stored || !Array.isArray(stored.datasets)) {
     return { datasets: [] }
   }
@@ -39,7 +31,7 @@ function emit() {
 }
 
 function persist() {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+  safeLocalStorageSetJson(STORAGE_KEY, state)
 }
 
 function setState(next: StoreState) {
@@ -97,4 +89,3 @@ export function useViewerDatasetsStore() {
     () => ({ datasets: [] })
   )
 }
-

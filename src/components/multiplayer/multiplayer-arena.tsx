@@ -1,5 +1,3 @@
-"use client";
-
 import { useMemo } from "react";
 import RaceArena from "@/components/race/race-arena";
 import { Badge } from "@/components/ui/badge";

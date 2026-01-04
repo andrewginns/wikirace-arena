@@ -1,11 +1,13 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import ViewerTab from "@/components/viewer-tab";
 import PlayTab from "@/components/play-tab";
 import AboutTab from "@/components/about-tab";
 import LlmRunManager from "@/components/llm-run-manager";
 import { Github } from "lucide-react";
-import { useState, useEffect } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
+import { safeLocalStorageGetItem, safeLocalStorageSetItem } from "@/lib/storage";
+
+const ViewerTab = lazy(() => import("@/components/viewer-tab"));
 
 type TabValue = "view" | "play" | "about";
 
@@ -16,14 +18,14 @@ function loadStoredTab(): TabValue {
   if (typeof window === "undefined") return "view";
   const params = new URLSearchParams(window.location.search);
   if (params.has("room")) return "play";
-  const stored = window.localStorage.getItem(LAST_TAB_STORAGE_KEY);
+  const stored = safeLocalStorageGetItem(LAST_TAB_STORAGE_KEY);
   if (stored === "view" || stored === "play" || stored === "about") return stored;
   return "view";
 }
 
 function loadHasSeenPlayTab(): boolean {
   if (typeof window === "undefined") return false;
-  return window.localStorage.getItem(SEEN_PLAY_TAB_STORAGE_KEY) === "true";
+  return safeLocalStorageGetItem(SEEN_PLAY_TAB_STORAGE_KEY) === "true";
 }
 
 export default function Home() {
@@ -34,10 +36,10 @@ export default function Home() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(LAST_TAB_STORAGE_KEY, selectedTab);
+    safeLocalStorageSetItem(LAST_TAB_STORAGE_KEY, selectedTab);
 
     if (selectedTab === "play") {
-      window.localStorage.setItem(SEEN_PLAY_TAB_STORAGE_KEY, "true");
+      safeLocalStorageSetItem(SEEN_PLAY_TAB_STORAGE_KEY, "true");
       setHasSeenPlayTab(true);
     }
   }, [selectedTab]);
@@ -70,6 +72,7 @@ export default function Home() {
 	            href="https://github.com/huggingface/wikirace-llms" 
 	            target="_blank" 
 	            rel="noopener noreferrer"
+              aria-label="Open GitHub repository"
 	            className="text-muted-foreground hover:text-foreground"
 	          >
 	            <Github size={24} />
@@ -78,7 +81,6 @@ export default function Home() {
 	      </div>
 
       <Tabs
-        defaultValue="view"
         className="w-full"
         onValueChange={(value) => setSelectedTab(value as TabValue)}
         value={selectedTab}
@@ -92,11 +94,17 @@ export default function Home() {
         </TabsList>
 
         <TabsContent value="view">
-          <ViewerTab
-            handleTryRun={handleTryRun}
-            onGoToPlayTab={() => setSelectedTab("play")}
-            showPlayCta={!hasSeenPlayTab}
-          />
+          <Suspense
+            fallback={
+              <div className="p-4 text-sm text-muted-foreground">Loading viewer...</div>
+            }
+          >
+            <ViewerTab
+              handleTryRun={handleTryRun}
+              onGoToPlayTab={() => setSelectedTab("play")}
+              showPlayCta={!hasSeenPlayTab}
+            />
+          </Suspense>
         </TabsContent>
 
         <TabsContent value="play">
