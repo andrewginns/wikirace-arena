@@ -34,6 +34,57 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     }
   }
 
+  async function getActiveHumanRunSnapshot(p) {
+    return await p.evaluate(() => {
+      const active = window.localStorage.getItem("wikirace:active-session-id");
+      const raw = window.localStorage.getItem("wikirace:sessions:v1");
+      if (!active || !raw) return null;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return null;
+      }
+
+      const session = parsed?.sessions?.[active];
+      if (!session || !Array.isArray(session.runs)) return null;
+
+      const humanRun = session.runs.find((r) => r && r.kind === "human");
+      if (!humanRun) return null;
+
+      return {
+        run_id: humanRun.id || null,
+        steps_length: Array.isArray(humanRun.steps) ? humanRun.steps.length : null,
+        status: humanRun.status || null,
+        result: humanRun.result || null,
+      };
+    });
+  }
+
+  function getWikiFrameUrl(p) {
+    const frames = p.frames();
+    const frame = frames.find((f) => f.url().includes("/wiki/"));
+    return frame ? frame.url() : null;
+  }
+
+  async function openSelectContainingOption(p, optionText) {
+    const triggers = p.locator('[data-slot="select-trigger"]');
+    const count = await triggers.count();
+    const max = Math.min(10, count);
+
+    for (let i = 0; i < max; i += 1) {
+      const trigger = triggers.nth(i);
+      if (!(await trigger.isVisible().catch(() => false))) continue;
+      await trigger.click();
+      const option = p.getByRole("option", { name: optionText, exact: true });
+      if (await option.isVisible().catch(() => false)) return;
+      await p.keyboard.press("Escape").catch(() => null);
+    }
+
+    throw new Error(`Failed to open a Select that contains option "${optionText}"`);
+  }
+
   async function clearStorageAndReload(p) {
     await p.goto(BASE_URL, { waitUntil: "domcontentloaded" });
     await p.getByRole("heading", { name: "WikiRacing Arena" }).waitFor();
@@ -345,14 +396,66 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     });
   }
 
+  async function seedCouldHaveWonSession(p) {
+    await p.evaluate(() => {
+      const id = "session_could_have_won";
+      const created_at = new Date().toISOString();
+
+      const session = {
+        id,
+        title: "Direct link miss seed",
+        start_article: "Capybara",
+        destination_article: "Rodent",
+        created_at,
+        rules: {
+          max_hops: 20,
+          max_links: null,
+          max_tokens: null,
+          include_image_links: false,
+          disable_links_view: false,
+        },
+        runs: [
+          {
+            id: "run_human_miss",
+            kind: "human",
+            player_name: "You",
+            started_at: created_at,
+            finished_at: created_at,
+            status: "finished",
+            result: "lose",
+            steps: [
+              { type: "start", article: "Capybara", at: created_at },
+              { type: "move", article: "Car", at: created_at },
+              { type: "lose", article: "Car", at: created_at, metadata: { reason: "seed" } },
+            ],
+          },
+        ],
+      };
+
+      window.localStorage.setItem(
+        "wikirace:sessions:v1",
+        JSON.stringify({ sessions: { [id]: session } })
+      );
+      window.localStorage.setItem("wikirace:active-session-id", id);
+    });
+  }
+
   const summary = {
     local: {
       randomMatchup: null,
+      articlesComboboxLiveUpdateOk: false,
+      articlesComboboxKeyboardNavOk: false,
+      articlesComboboxReopenScrollOk: false,
+      couldHaveWonCalloutOk: false,
+      llmRunDeletionStopsRequestsOk: false,
       duplicateRemovalWorked: false,
       winHopCountOk: false,
       rulesUnlimitedOk: false,
       traceHeadersOk: false,
       localLayoutKey: null,
+    },
+    localReplayLock: {
+      blocksIframeNavigation: false,
     },
     localDisableLinksView: {
       splitLinksTabsHidden: false,
@@ -372,13 +475,245 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
       tokensLine: null,
       totalsOk: false,
     },
+    viewerDatasets: {
+      storedOk: false,
+      persistedAfterReload: false,
+    },
+    canonicalization: {
+      variantsOk: false,
+      failureTtlOk: false,
+    },
   };
+
+  let savedViewerDatasetName = null;
+  let apiOrigin = null;
 
   // ---- Begin run ----
   await clearStorageAndReload(page);
 
+  // --- Canonicalization cache behavior (variants + failure TTL) ---
+  {
+    const variantsTitle = "Foo_Bar";
+    const variantsCanonical = "Foo Bar Canonical";
+    const ttlTitle = "Transient_Failure_Title";
+    const ttlCanonical = "Transient Failure Canonical";
+
+    let ttlCalls = 0;
+    const canonicalRequests = [];
+
+    await page.route("**/canonical_title/**", async (route) => {
+      const url = route.request().url();
+      let pathname = url;
+      try {
+        pathname = new URL(url).pathname;
+      } catch {
+        // ignore
+      }
+
+      const marker = "/canonical_title/";
+      const idx = pathname.indexOf(marker);
+      if (idx === -1) return route.continue();
+
+      const raw = pathname.slice(idx + marker.length);
+      const decoded = decodeURIComponent(raw);
+      canonicalRequests.push(decoded);
+
+      const normalizedDecoded = decoded.replaceAll("_", " ").trim().toLowerCase();
+      const normalizedVariants = variantsTitle.replaceAll("_", " ").trim().toLowerCase();
+      const normalizedTtl = ttlTitle.replaceAll("_", " ").trim().toLowerCase();
+
+      if (normalizedDecoded === normalizedVariants) {
+        return await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          headers: { "Access-Control-Allow-Origin": "*" },
+          body: JSON.stringify({ title: variantsCanonical }),
+        });
+      }
+
+      if (normalizedDecoded === normalizedTtl) {
+        ttlCalls += 1;
+        if (ttlCalls === 1) {
+          return await route.fulfill({
+            status: 503,
+            headers: { "Access-Control-Allow-Origin": "*" },
+            body: "temporary failure",
+          });
+        }
+
+        return await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          headers: { "Access-Control-Allow-Origin": "*" },
+          body: JSON.stringify({ title: ttlCanonical }),
+        });
+      }
+
+      return route.continue();
+    });
+
+    try {
+      const variant1 = await page.evaluate(async (title) => {
+        const mod = await import("/src/lib/wiki-canonical.ts");
+        return await mod.canonicalizeTitle(title);
+      }, variantsTitle);
+      assert(variant1 === variantsCanonical, "canonicalizeTitle should return server canonical title");
+
+      const variant2 = await page.evaluate(async () => {
+        const mod = await import("/src/lib/wiki-canonical.ts");
+        return await mod.canonicalizeTitle("foo bar");
+      });
+      assert(variant2 === variantsCanonical, "canonicalizeTitle should share cache across _/space/case variants");
+
+      // Only the first call should hit the network (second should use the shared normalized cache key).
+      const normalizeReq = (t) => t.replaceAll("_", " ").trim().toLowerCase();
+      const normalizedVariants = normalizeReq(variantsTitle);
+      const variantRequests = canonicalRequests.filter(
+        (t) => normalizeReq(t) === normalizedVariants
+      );
+      assert(
+        variantRequests.length === 1,
+        `Expected 1 canonical_title request for variants test, got ${variantRequests.length} (${variantRequests.join(
+          ", "
+        )})`
+      );
+      summary.canonicalization.variantsOk = true;
+
+      const ttl1 = await page.evaluate(async (title) => {
+        const mod = await import("/src/lib/wiki-canonical.ts");
+        return await mod.canonicalizeTitle(title);
+      }, ttlTitle);
+      assert(ttl1 === ttlTitle, "canonicalizeTitle should fall back to input title on transient failures");
+
+      const ttl2 = await page.evaluate(async () => {
+        const mod = await import("/src/lib/wiki-canonical.ts");
+        return await mod.canonicalizeTitle("transient failure title");
+      });
+      assert(ttl2 === ttlTitle, "Failure caching should normalize titles consistently");
+      assert(ttlCalls === 1, "Failure TTL should prevent immediate refetch of canonical_title");
+
+      const ttl3 = await page.evaluate(async () => {
+        const mod = await import("/src/lib/wiki-canonical.ts");
+        const realNow = Date.now;
+        try {
+          const base = realNow();
+          Date.now = () => base + 61_000;
+          return await mod.canonicalizeTitle("Transient Failure Title");
+        } finally {
+          Date.now = realNow;
+        }
+      });
+      assert(ttl3 === ttlCanonical, "Failure TTL should expire so canonicalization can recover");
+      assert(ttlCalls >= 2, "Expected canonical_title to refetch after TTL expiry");
+      summary.canonicalization.failureTtlOk = true;
+    } finally {
+      await page.unroute("**/canonical_title/**").catch(() => null);
+    }
+  }
+
   // --- Local setup + duplication + tracing + win ---
+  // This is a regression guard for VirtualizedCombobox: keep the options popover open
+  // while /get_all_articles is still loading, and ensure results populate without closing.
+  let allowArticlesFetch = false;
+  await page.route("**/get_all_articles", async (route) => {
+    if (!apiOrigin) {
+      try {
+        apiOrigin = new URL(route.request().url()).origin;
+      } catch {
+        // ignore
+      }
+    }
+    if (!allowArticlesFetch) await new Promise((resolve) => setTimeout(resolve, 0));
+    while (!allowArticlesFetch) await new Promise((resolve) => setTimeout(resolve, 50));
+    await route.continue();
+  });
+
   await openLocalSetup(page);
+
+  try {
+    const pagesSection = page.locator("#pages-section");
+    const combos = pagesSection.getByRole("combobox");
+
+    await combos.nth(0).click();
+    const search = page.getByPlaceholder("Search items...");
+    await search.fill("Rodent");
+
+    const emptyState = page.getByText("No item found.");
+    await emptyState.waitFor();
+
+    const articlesResponsePromise = page.waitForResponse(
+      (resp) => resp.url().includes("/get_all_articles") && resp.ok(),
+      { timeout: TIMEOUT_MS }
+    );
+    allowArticlesFetch = true;
+    await articlesResponsePromise;
+
+    const rodentOption = page.getByRole("option", { name: "Rodent", exact: true });
+    await rodentOption.waitFor();
+    assert(
+      !(await emptyState.isVisible().catch(() => false)),
+      "Combobox still shows empty-state after /get_all_articles finished"
+    );
+
+    summary.local.articlesComboboxLiveUpdateOk = true;
+
+    // Keyboard navigation: ArrowDown/Enter should pick the focused option.
+    const options = page.getByRole("option");
+    const expected = safeText(await options.nth(0).textContent().catch(() => ""));
+    assert(expected, "Expected at least 1 combobox option after filtering");
+
+    // Because we started from an empty list, focus is -1. ArrowDown selects index 0.
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await sleep(150);
+
+    const startValue = safeText(await combos.nth(0).textContent().catch(() => ""));
+    assert(
+      startValue === expected,
+      `Keyboard selection failed (expected "${expected}", got "${startValue}")`
+    );
+    summary.local.articlesComboboxKeyboardNavOk = true;
+
+    // Reopening should scroll the selected value into view (even when it's far down the full list).
+    assert(apiOrigin, "Failed to infer API origin from /get_all_articles request");
+    const farOption = await page.evaluate(async (origin) => {
+      const res = await fetch(`${origin}/get_all_articles`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) return null;
+
+      // Choose a "late" item that is long enough to reduce substring collisions.
+      const start = Math.max(0, data.length - 300);
+      for (let i = data.length - 1; i >= start; i -= 1) {
+        const candidate = data[i];
+        if (typeof candidate !== "string") continue;
+        const trimmed = candidate.trim();
+        if (trimmed.length >= 12) return trimmed;
+      }
+
+      const fallback = data[data.length - 1];
+      return typeof fallback === "string" ? fallback.trim() : null;
+    }, apiOrigin);
+
+    assert(farOption, "Failed to pick a far combobox option from /get_all_articles");
+
+    await combos.nth(0).click();
+    await page.getByPlaceholder("Search items...").fill(farOption);
+    await page.getByRole("option", { name: farOption, exact: true }).first().click();
+    await sleep(150);
+
+    await combos.nth(0).click();
+    const selectedOption = page.getByRole("option", { name: farOption, exact: true }).first();
+    await selectedOption.waitFor({ timeout: 8_000 });
+    assert(
+      await selectedOption.isVisible().catch(() => false),
+      "Combobox reopen should scroll the selected option into view"
+    );
+    summary.local.articlesComboboxReopenScrollOk = true;
+  } finally {
+    allowArticlesFetch = true;
+    await page.unroute("**/get_all_articles").catch(() => null);
+  }
 
   // Random matchup should never pick identical start/target.
   await page.getByRole("button", { name: "Random matchup" }).click();
@@ -473,10 +808,83 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   await page.getByRole("tab", { name: "Article" }).click();
   await page.getByRole("tab", { name: "Wiki", exact: true }).click();
   await sleep(400);
+
+  // Replay should lock iframe navigation during active runs.
+  const stepsBefore = await getActiveHumanRunSnapshot(page);
+  assert(
+    stepsBefore && typeof stepsBefore.steps_length === "number",
+    "Failed to read active human run snapshot before replay lock check"
+  );
+
+  const capybaraUrlBefore = getWikiFrameUrl(page);
+  assert(
+    capybaraUrlBefore && capybaraUrlBefore.includes("/wiki/Capybara"),
+    `Expected wiki iframe URL to contain /wiki/Capybara before replay; got: ${capybaraUrlBefore}`
+  );
+
+  await page.getByRole("button", { name: "Replay", exact: true }).click();
+  await page.getByRole("button", { name: "Back to live" }).first().waitFor();
+  await sleep(150);
+
+  await clickWikiLink(page, "Rodent");
+  await sleep(1200);
+
+  const stepsAfter = await getActiveHumanRunSnapshot(page);
+  assert(
+    stepsAfter && typeof stepsAfter.steps_length === "number",
+    "Failed to read active human run snapshot after replay click"
+  );
+  assert(
+    stepsAfter.steps_length === stepsBefore.steps_length,
+    "Replay mode should block iframe navigation (human run steps changed after click)"
+  );
+
+  const capybaraUrlAfter = getWikiFrameUrl(page);
+  assert(
+    capybaraUrlAfter && capybaraUrlAfter.includes("/wiki/Capybara"),
+    `Replay mode should block iframe navigation (wiki iframe URL changed). URL: ${capybaraUrlAfter}`
+  );
+
+  summary.localReplayLock.blocksIframeNavigation = true;
+
+  await page.getByRole("button", { name: "Back to live" }).first().click();
+  await page.getByRole("button", { name: "Replay", exact: true }).waitFor();
+  await sleep(150);
+
   await clickWikiLink(page, "Rodent");
   await waitForWinToast(page);
   await page.getByText(/You won in 1 hop/i).first().waitFor({ timeout: 10_000 });
   summary.local.winHopCountOk = true;
+
+  // Save the finished race into the Viewer store so we can assert persistence across reloads.
+  await page.getByRole("button", { name: "Dismiss win message" }).click().catch(() => null);
+  // There are two "Save to viewer" buttons when the race is finished (header + finish card).
+  await page.getByRole("button", { name: "Save to viewer" }).first().click();
+  await page.getByRole("button", { name: "Upload JSON", exact: true }).waitFor({ timeout: 15_000 });
+
+  {
+    const stored = await page.evaluate(() => {
+      const raw = window.localStorage.getItem("wikirace:viewer-datasets:v1");
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    });
+
+    const datasets = stored?.datasets;
+    assert(Array.isArray(datasets) && datasets.length > 0, "Expected viewer datasets to be stored in localStorage");
+    savedViewerDatasetName = datasets[0]?.name || null;
+    assert(
+      typeof savedViewerDatasetName === "string" && savedViewerDatasetName.trim().length > 0,
+      "Stored viewer dataset missing a name"
+    );
+    summary.viewerDatasets.storedOk = true;
+  }
+
+  // Continue remaining tests from the Play tab.
+  await ensureTopLevelTab(page, "Play Game");
 
   // Capture + lock in local layout key so we can confirm multiplayer doesn't overwrite it.
   await setLeaderboardCollapsed(page, true);
@@ -487,6 +895,7 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   summary.local.localLayoutKey = localLayoutKey;
 
   // --- Local: disable_links_view hides Split/Links but does not block iframe clicks ---
+  await ensureTopLevelTab(page, "Play Game");
   await page.getByRole("button", { name: "New race" }).click();
   await openLocalSetup(page);
 
@@ -517,6 +926,177 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   await clickWikiLink(page, "Rodent");
   await waitForWinToast(page);
   summary.localDisableLinksView.iframeClickStillWorks = true;
+
+  // --- Local: "You could have won" callout only appears for direct-link-to-target misses ---
+  await seedCouldHaveWonSession(page);
+
+  // Negative: no callout when the current page does NOT link directly to the destination.
+  await page.route("**/get_article_with_links/**", async (route) => {
+    const url = route.request().url();
+    if (!url.includes("/get_article_with_links/")) return route.continue();
+
+    // Only override Capybara for this check.
+    if (!url.includes("/get_article_with_links/Capybara")) return route.continue();
+
+    return await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ links: ["Not Rodent"] }),
+    });
+  });
+
+  const noDirectLinkResp = page.waitForResponse(
+    (resp) => resp.url().includes("/get_article_with_links/Capybara") && resp.ok(),
+    { timeout: TIMEOUT_MS }
+  );
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ensureTopLevelTab(page, "Play Game");
+  await ensurePlayMode(page, "Local");
+  await ensureLeaderboardExpanded(page);
+  await selectLeaderboardRun(page, "You");
+  await noDirectLinkResp;
+  await sleep(250);
+  assert(
+    (await page.getByText("You could have won").count()) === 0,
+    "Did not expect 'You could have won' callout when no direct link exists"
+  );
+
+  await page.unroute("**/get_article_with_links/**").catch(() => null);
+
+  // Positive: callout appears when a hop page links directly to the destination but the next step isn't the destination.
+  await page.route("**/get_article_with_links/**", async (route) => {
+    const url = route.request().url();
+    if (!url.includes("/get_article_with_links/")) return route.continue();
+    if (!url.includes("/get_article_with_links/Capybara")) return route.continue();
+
+    return await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ links: ["Rodent"] }),
+    });
+  });
+
+  const directLinkResp = page.waitForResponse(
+    (resp) => resp.url().includes("/get_article_with_links/Capybara") && resp.ok(),
+    { timeout: TIMEOUT_MS }
+  );
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ensureTopLevelTab(page, "Play Game");
+  await ensurePlayMode(page, "Local");
+  await ensureLeaderboardExpanded(page);
+  await selectLeaderboardRun(page, "You");
+  await directLinkResp;
+
+  const couldHaveWon = page.getByText("You could have won");
+  await couldHaveWon.waitFor({ timeout: 15_000 });
+  await page.getByText(/Hop 0:\s*on\s*Capybara/i).waitFor({ timeout: 15_000 });
+  summary.local.couldHaveWonCalloutOk = true;
+
+  await page.unroute("**/get_article_with_links/**").catch(() => null);
+
+  // --- Local: deleting a running LLM run stops further /llm/local_run/step calls (no "zombie" runners) ---
+  await ensureTopLevelTab(page, "Play Game");
+  await page.getByRole("button", { name: "New race" }).click();
+  await openLocalSetup(page);
+
+  await clickQuickPreset(page, "you_vs_fast");
+  await setStartAndTargetInLocalSetup(page, { start: "Capybara", target: "Rodent" });
+
+  const stepReqPromise = page.waitForRequest(
+    (req) => reqPath(req) === "/llm/local_run/step" && req.method() === "POST",
+    { timeout: TIMEOUT_MS }
+  );
+
+  let releaseStepRoute = null;
+  const releaseStepPromise = new Promise((resolve) => {
+    releaseStepRoute = resolve;
+  });
+
+  await page.route("**/llm/local_run/step", async (route) => {
+    // Only delay the very first step request; the rest should proceed normally.
+    await page.unroute("**/llm/local_run/step").catch(() => null);
+
+    await Promise.race([
+      releaseStepPromise,
+      new Promise((resolve) => setTimeout(resolve, 5_000)),
+    ]);
+
+    try {
+      await route.continue();
+    } catch {
+      // If the request is aborted (expected when deleting the run), continue silently.
+    }
+  });
+
+  await startRace(page);
+  await ensureLeaderboardExpanded(page);
+
+  const stepReq = await stepReqPromise;
+  const llmRunId = stepReq.headers()["x-wikirace-run-id"] || null;
+  assert(llmRunId, "Expected x-wikirace-run-id header on /llm/local_run/step");
+
+  const llmRunLabel = await page.evaluate((runId) => {
+    const active = window.localStorage.getItem("wikirace:active-session-id");
+    const raw = window.localStorage.getItem("wikirace:sessions:v1");
+    if (!active || !raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      const session = parsed?.sessions?.[active];
+      const run = session?.runs?.find((r) => r && r.id === runId);
+      return run?.model || run?.player_name || null;
+    } catch {
+      return null;
+    }
+  }, llmRunId);
+  assert(llmRunLabel, "Failed to resolve LLM run label from localStorage");
+
+  // Run display names may omit the provider prefix (e.g. "openai-responses:").
+  const labelNeedle = llmRunLabel.includes(":") ? llmRunLabel.split(":").pop() : llmRunLabel;
+  const escapedNeedle = String(labelNeedle || llmRunLabel).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  await selectLeaderboardRun(page, new RegExp(escapedNeedle, "i"));
+
+  // Delete the running run (this should abort its in-flight controller).
+  const arena = page.locator("#matchup-arena");
+  await arena.getByRole("button", { name: "Delete", exact: true }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "Delete this run?" });
+  await deleteDialog.waitFor();
+  await deleteDialog.getByRole("button", { name: "Delete", exact: true }).click();
+  await deleteDialog.waitFor({ state: "hidden" });
+
+  const deletedOk = await page.evaluate((runId) => {
+    const active = window.localStorage.getItem("wikirace:active-session-id");
+    const raw = window.localStorage.getItem("wikirace:sessions:v1");
+    if (!active || !raw) return false;
+    try {
+      const parsed = JSON.parse(raw);
+      const session = parsed?.sessions?.[active];
+      return !session?.runs?.some((r) => r && r.id === runId);
+    } catch {
+      return false;
+    }
+  }, llmRunId);
+  assert(deletedOk, "Deleted LLM run should be removed from localStorage session");
+
+  releaseStepRoute?.();
+  await sleep(600);
+
+  // Ensure no follow-up step requests happen for the deleted run.
+  const extraStepReq = await page
+    .waitForRequest(
+      (req) =>
+        reqPath(req) === "/llm/local_run/step" &&
+        req.method() === "POST" &&
+        req.headers()["x-wikirace-run-id"] === llmRunId,
+      { timeout: 1500 }
+    )
+    .then(() => true)
+    .catch(() => false);
+  assert(!extraStepReq, "Deleted LLM run should not continue sending /llm/local_run/step requests");
+  summary.local.llmRunDeletionStopsRequestsOk = true;
 
   const localLayoutKeyBeforeMultiplayer = await page.evaluate(() =>
     window.localStorage.getItem("wikirace:arena-layout:v1")
@@ -734,6 +1314,19 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   summary.tokenSeed.tokensLine = safeText(await tokensLine.textContent().catch(() => null));
   summary.tokenSeed.totalsOk = true;
 
+  // --- Viewer dataset persistence (saved via Save to viewer) ---
+  assert(savedViewerDatasetName, "Expected a saved viewer dataset name from earlier in the run");
+  await ensureTopLevelTab(page, "View Runs");
+  await page.getByRole("button", { name: "Upload JSON", exact: true }).waitFor({ timeout: 15_000 });
+
+  await openSelectContainingOption(page, "Qwen3-14B");
+  const savedOptionText = `Saved: ${savedViewerDatasetName}`;
+  const savedDatasetOption = page.getByRole("option", { name: savedOptionText, exact: true });
+  await savedDatasetOption.waitFor({ timeout: 10_000 });
+  await savedDatasetOption.click();
+
+  await page.getByText("No runs available.").waitFor({ state: "hidden", timeout: 10_000 });
+  summary.viewerDatasets.persistedAfterReload = true;
+
   return summary;
 }
-

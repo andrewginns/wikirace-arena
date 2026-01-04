@@ -37,12 +37,22 @@ const VirtualizedCommand = ({
   selectedOption,
   onSelectOption,
 }: VirtualizedCommandProps) => {
-  const [filteredOptions, setFilteredOptions] =
-    React.useState<Option[]>(options);
+  const [search, setSearch] = React.useState<string>("");
   const [focusedIndex, setFocusedIndex] = React.useState(0);
   const [isKeyboardNavActive, setIsKeyboardNavActive] = React.useState(false);
 
   const parentRef = React.useRef(null);
+
+  const filteredOptions = React.useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (query.length === 0) return options;
+
+    return options.filter((option) => {
+      const value = option.value.toLowerCase();
+      const label = option.label.toLowerCase();
+      return value.includes(query) || label.includes(query);
+    });
+  }, [options, search]);
 
   const virtualizer = useVirtualizer({
     count: filteredOptions.length,
@@ -53,24 +63,22 @@ const VirtualizedCommand = ({
   const virtualOptions = virtualizer.getVirtualItems();
 
   const scrollToIndex = (index: number) => {
+    if (index < 0) return;
     virtualizer.scrollToIndex(index, {
       align: "center",
     });
   };
 
-  const handleSearch = (search: string) => {
+  const handleSearch = (nextSearch: string) => {
     setIsKeyboardNavActive(false);
-    setFilteredOptions(
-      options.filter((option) =>
-        option.value.toLowerCase().includes(search.toLowerCase() ?? [])
-      )
-    );
+    setSearch(nextSearch);
   };
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
     switch (event.key) {
       case "ArrowDown": {
         event.preventDefault();
+        if (filteredOptions.length === 0) break;
         setIsKeyboardNavActive(true);
         setFocusedIndex((prev) => {
           const newIndex =
@@ -82,6 +90,7 @@ const VirtualizedCommand = ({
       }
       case "ArrowUp": {
         event.preventDefault();
+        if (filteredOptions.length === 0) break;
         setIsKeyboardNavActive(true);
         setFocusedIndex((prev) => {
           const newIndex =
@@ -104,6 +113,14 @@ const VirtualizedCommand = ({
   };
 
   React.useEffect(() => {
+    setFocusedIndex((prev) => {
+      if (filteredOptions.length === 0) return -1;
+      if (prev < 0) return prev;
+      return Math.min(prev, filteredOptions.length - 1);
+    });
+  }, [filteredOptions.length]);
+
+  React.useEffect(() => {
     if (selectedOption) {
       const option = filteredOptions.find(
         (option) => option.value === selectedOption
@@ -120,7 +137,11 @@ const VirtualizedCommand = ({
 
   return (
     <Command shouldFilter={false} onKeyDown={handleKeyDown}>
-      <CommandInput onValueChange={handleSearch} placeholder={placeholder} />
+      <CommandInput
+        value={search}
+        onValueChange={handleSearch}
+        placeholder={placeholder}
+      />
       <CommandList
         ref={parentRef}
         style={{

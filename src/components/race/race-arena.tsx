@@ -1,6 +1,6 @@
-"use client";
-
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -55,7 +55,6 @@ import {
   User,
   X,
 } from "lucide-react";
-import ForceDirectedGraph from "@/components/force-directed-graph";
 import ConfettiCanvas from "@/components/confetti-canvas";
 import WikiArticlePreview from "@/components/wiki-article-preview";
 import AddAiForm from "@/components/race/add-ai-form";
@@ -70,6 +69,7 @@ import {
 import { addViewerDataset } from "@/lib/viewer-datasets";
 import { normalizeWikiTitle, wikiTitlesMatch } from "@/lib/wiki-title";
 
+const ForceDirectedGraph = lazy(() => import("@/components/force-directed-graph"));
 
 const DEFAULT_MAX_STEPS = 20;
 
@@ -404,7 +404,14 @@ function stepError(step: RaceStep) {
   return typeof error === "string" && error.trim().length > 0 ? error : null;
 }
 
-function stepMetrics(step: RaceStep) {
+type StepMetrics = {
+  latencyMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+};
+
+function stepMetrics(step: RaceStep): StepMetrics {
   if (!step.metadata) return {};
   const meta = step.metadata as Record<string, unknown>;
   const latencyMs =
@@ -1534,19 +1541,33 @@ export default function RaceArena({
   const wikiScale = wikiZoomValue / 100;
   const wikiZoomMultiplier = 1 / wikiScale;
 
+  const wikiPostMessageOrigin = useMemo((): string | null => {
+    if (typeof window === "undefined") return null;
+    if (!wikiSrc) return window.location.origin;
+
+    // Ensure we only send messages to the iframe's origin (dev: API origin; prod: same-origin).
+    try {
+      return new URL(wikiSrc, window.location.href).origin;
+    } catch {
+      return window.location.origin;
+    }
+  }, [wikiSrc]);
+
   const postWikiReplayMode = useCallback((enabled: boolean) => {
+    if (!wikiPostMessageOrigin) return;
     wikiIframeRef.current?.contentWindow?.postMessage(
       { type: "wikirace:setReplayMode", enabled },
-      "*"
+      wikiPostMessageOrigin
     );
-  }, []);
+  }, [wikiPostMessageOrigin]);
 
   const postWikiIncludeImageLinks = useCallback((enabled: boolean) => {
+    if (!wikiPostMessageOrigin) return;
     wikiIframeRef.current?.contentWindow?.postMessage(
       { type: "wikirace:setIncludeImageLinks", enabled },
-      "*"
+      wikiPostMessageOrigin
     );
-  }, []);
+  }, [wikiPostMessageOrigin]);
 
   useEffect(() => {
     if (!session) return;
@@ -3719,23 +3740,31 @@ export default function RaceArena({
 
                 <Separator className="my-3" />
                 <div className="flex-1 min-h-0">
-                  <ForceDirectedGraph
-                    runs={forceGraphRuns}
-                    runId={selectedForceGraphRunId}
-                    focusColor={selectedRunColor ?? undefined}
-                    compareRunIds={compareEnabled ? compareRunIndices : undefined}
-                    compareColorByRunId={compareEnabled ? compareColorByRunId : undefined}
-                    compareHighlightStep={compareEnabled ? compareHopClamped : undefined}
-                    highlightStep={
-                      compareEnabled
-                        ? compareHopClamped
-                        : replayEnabled
-                        ? selectedReplayStepIndex
-                        : undefined
+                  <Suspense
+                    fallback={
+                      <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
+                        Loading map...
+                      </div>
                     }
-                    onNodeSelect={handleMapNodeSelect}
-                    includeGraphLinks
-                  />
+                  >
+                    <ForceDirectedGraph
+                      runs={forceGraphRuns}
+                      runId={selectedForceGraphRunId}
+                      focusColor={selectedRunColor ?? undefined}
+                      compareRunIds={compareEnabled ? compareRunIndices : undefined}
+                      compareColorByRunId={compareEnabled ? compareColorByRunId : undefined}
+                      compareHighlightStep={compareEnabled ? compareHopClamped : undefined}
+                      highlightStep={
+                        compareEnabled
+                          ? compareHopClamped
+                          : replayEnabled
+                          ? selectedReplayStepIndex
+                          : undefined
+                      }
+                      onNodeSelect={handleMapNodeSelect}
+                      includeGraphLinks
+                    />
+                  </Suspense>
                 </div>
               </Card>
             </div>

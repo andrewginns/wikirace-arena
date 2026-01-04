@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useRef } from "react";
 import { runLlmRace } from "@/lib/llm-runner";
 import { endLocalRunTrace, startLocalRunTrace } from "@/lib/local-run-tracing";
@@ -48,6 +46,18 @@ function getRunLimits(run: RunV1, session: SessionV1) {
 export default function LlmRunManager() {
   const { sessions } = useSessionsStore();
   const controllersRef = useRef<Map<string, AbortController>>(new Map());
+
+  // In React StrictMode (dev), effects are mounted/unmounted twice. Abort any in-flight
+  // controllers on unmount to avoid duplicate runners continuing in the background.
+  useEffect(() => {
+    const controllers = controllersRef.current;
+    return () => {
+      for (const controller of controllers.values()) {
+        controller.abort();
+      }
+      controllers.clear();
+    };
+  }, []);
 
   useEffect(() => {
     const controllers = controllersRef.current;

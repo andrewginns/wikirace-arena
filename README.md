@@ -238,9 +238,9 @@ These env vars must be set in the shell where you run the API server.
 | OpenAI (hosted, Responses API) | `openai-responses:gpt-5.2` | `OPENAI_API_KEY` | Default for OpenAI in this repo. |
 | OpenAI (Chat Completions) | `openai:gpt-5.2` | `OPENAI_API_KEY` | Useful for OpenAI-compatible servers. |
 | Anthropic | `anthropic:claude-3-haiku-20240307` | `ANTHROPIC_API_KEY` | Uses Anthropic’s hosted API. |
-| Google AI Studio (Gemini) | `google-gla:gemini-2.0-flash` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Gemini via Google AI Studio (Generative Language API). |
-| Google Vertex AI (Gemini) | `google-vertex:gemini-2.5-pro` | Vertex credentials/config | Useful for org/GCP deployments. |
-| OpenRouter | `openrouter:anthropic/claude-3.5-sonnet` | `OPENROUTER_API_KEY` | Token usage is opt-in (handled automatically by the server). |
+| Google AI Studio (Gemini) | `google-gla:gemini-3-flash-preview` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Gemini via Google AI Studio (Generative Language API). |
+| Google Vertex AI (Gemini) | `google-vertex:gemini-3-pro-preview` | Vertex credentials/config | Useful for org/GCP deployments. |
+| OpenRouter | `openrouter:anthropic/claude-4.5-sonnet` | `OPENROUTER_API_KEY` | Token usage is opt-in (handled automatically by the server). |
 | Local OpenAI-compatible server (vLLM, etc.) | `openai:<model>` | `OPENAI_API_KEY=EMPTY` (often) | Set `api_base` in a model participant’s “Provider overrides (advanced)”. |
 
 PydanticAI supports many more providers; as long as PydanticAI recognizes the `model` string + the corresponding env vars are set, the web UI will work.
