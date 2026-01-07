@@ -62,12 +62,15 @@ const VirtualizedCommand = ({
 
   const virtualOptions = virtualizer.getVirtualItems();
 
-  const scrollToIndex = (index: number) => {
-    if (index < 0) return;
-    virtualizer.scrollToIndex(index, {
-      align: "center",
-    });
-  };
+  const scrollToIndex = React.useCallback(
+    (index: number) => {
+      if (index < 0) return;
+      virtualizer.scrollToIndex(index, {
+        align: "center",
+      });
+    },
+    [virtualizer]
+  );
 
   const handleSearch = (nextSearch: string) => {
     setIsKeyboardNavActive(false);
@@ -102,9 +105,9 @@ const VirtualizedCommand = ({
       }
       case "Enter": {
         event.preventDefault();
-        if (filteredOptions[focusedIndex]) {
-          onSelectOption?.(filteredOptions[focusedIndex].value);
-        }
+        const index = focusedIndex < 0 ? 0 : focusedIndex;
+        const option = filteredOptions[index];
+        if (option) onSelectOption?.(option.value);
         break;
       }
       default:
@@ -115,10 +118,19 @@ const VirtualizedCommand = ({
   React.useEffect(() => {
     setFocusedIndex((prev) => {
       if (filteredOptions.length === 0) return -1;
-      if (prev < 0) return prev;
-      return Math.min(prev, filteredOptions.length - 1);
+
+      // If we were previously focused on "nothing" (e.g. a transient empty search),
+      // reset focus to the first option so keyboard-only users can press Enter to select.
+      if (prev < 0) {
+        scrollToIndex(0);
+        return 0;
+      }
+
+      const next = Math.min(prev, filteredOptions.length - 1);
+      if (next !== prev) scrollToIndex(next);
+      return next;
     });
-  }, [filteredOptions.length]);
+  }, [filteredOptions.length, scrollToIndex]);
 
   React.useEffect(() => {
     if (selectedOption) {

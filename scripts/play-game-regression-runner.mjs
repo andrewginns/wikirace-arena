@@ -657,12 +657,39 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
 
     summary.local.articlesComboboxLiveUpdateOk = true;
 
-    // Keyboard navigation: ArrowDown/Enter should pick the focused option.
-    const options = page.getByRole("option");
-    const expected = safeText(await options.nth(0).textContent().catch(() => ""));
-    assert(expected, "Expected at least 1 combobox option after filtering");
+    // Keyboard navigation: after a transient empty search, Enter should select the first match
+    // without requiring arrow keys or mouse movement.
+    await search.fill("zzzzzzzzzzzz");
+    await emptyState.waitFor();
+    await search.fill("o");
 
-    // Because we started from an empty list, focus is -1. ArrowDown selects index 0.
+    const options = page.getByRole("option");
+    await options.nth(0).waitFor({ timeout: 8_000 });
+    await emptyState.waitFor({ state: "hidden", timeout: 8_000 }).catch(() => null);
+
+    const expectedFirst = safeText(await options.nth(0).textContent().catch(() => ""));
+    assert(expectedFirst, "Expected at least 1 combobox option after recovering from empty search");
+
+    await page.keyboard.press("Enter");
+    await sleep(150);
+
+    const valueAfterEnter = safeText(await combos.nth(0).textContent().catch(() => ""));
+    assert(
+      valueAfterEnter === expectedFirst,
+      `Enter selection after empty search failed (expected "${expectedFirst}", got "${valueAfterEnter}")`
+    );
+
+    // ArrowDown/Enter should pick the focused option.
+    await combos.nth(0).click();
+    await page.getByPlaceholder("Search items...").fill("o");
+    await options.nth(0).waitFor({ timeout: 8_000 });
+
+    const optionCount = await options.count().catch(() => 0);
+    assert(optionCount > 0, "Expected at least 1 combobox option after filtering");
+    const expectedIndex = optionCount > 1 ? 1 : 0;
+    const expected = safeText(await options.nth(expectedIndex).textContent().catch(() => ""));
+    assert(expected, "Expected a combobox option label for keyboard navigation test");
+
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     await sleep(150);
