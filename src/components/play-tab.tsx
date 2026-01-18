@@ -1,6 +1,4 @@
-"use client";
-
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE } from "@/lib/constants";
 import { prefersReducedMotion } from "@/lib/motion";
 import RaceSetup from "@/components/race/race-setup";
@@ -8,6 +6,7 @@ import type { RaceConfig } from "@/components/race/race-types";
 import MatchupArena from "@/components/matchup-arena";
 import MultiplayerPlay from "@/components/multiplayer/multiplayer-play";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { safeLocalStorageGetItem, safeLocalStorageSetItem } from "@/lib/storage";
 import {
   createSession,
   getOrCreateSession,
@@ -25,7 +24,7 @@ function loadStoredPlayMode(): PlayMode {
   if (typeof window === "undefined") return "local";
   const params = new URLSearchParams(window.location.search);
   if (params.has("room")) return "multiplayer";
-  const stored = window.localStorage.getItem(PLAY_MODE_STORAGE_KEY);
+  const stored = safeLocalStorageGetItem(PLAY_MODE_STORAGE_KEY);
   if (stored === "multiplayer") return "multiplayer";
   return "local";
 }
@@ -45,6 +44,8 @@ export default function PlayTab({
   const [allArticles, setAllArticles] = useState<string[]>([]);
   const [setupCollapsed, setSetupCollapsed] = useState<boolean>(false);
   const [scrollTarget, setScrollTarget] = useState<"setup" | "arena" | null>(null);
+  const allArticlesFetchAbortRef = useRef<AbortController | null>(null);
+  const prevServerConnectedRef = useRef<boolean>(isServerConnected);
 
   const { sessions, active_session_id } = useSessionsStore();
   const activeSession = active_session_id ? sessions[active_session_id] : null;
@@ -69,21 +70,48 @@ export default function PlayTab({
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(PLAY_MODE_STORAGE_KEY, playMode);
+    safeLocalStorageSetItem(PLAY_MODE_STORAGE_KEY, playMode);
   }, [playMode]);
 
-  useEffect(() => {
-    const fetchAllArticles = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/get_all_articles`);
-        const data = await response.json();
-        if (Array.isArray(data)) setAllArticles(data);
-      } catch {
-        setAllArticles([]);
-      }
-    };
-    fetchAllArticles();
+  const fetchAllArticles = useCallback(async () => {
+    allArticlesFetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    allArticlesFetchAbortRef.current = controller;
+
+    try {
+      const response = await fetch(`${API_BASE}/get_all_articles`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data: unknown = await response.json();
+      if (controller.signal.aborted) return;
+      if (!Array.isArray(data)) throw new Error("Unexpected response");
+      setAllArticles(data.filter((item): item is string => typeof item === "string"));
+    } catch {
+      if (controller.signal.aborted) return;
+      setAllArticles([]);
+    }
   }, []);
+
+  useEffect(() => {
+    fetchAllArticles();
+
+    return () => {
+      allArticlesFetchAbortRef.current?.abort();
+      allArticlesFetchAbortRef.current = null;
+    };
+  }, [fetchAllArticles]);
+
+  useEffect(() => {
+    const prev = prevServerConnectedRef.current;
+    prevServerConnectedRef.current = isServerConnected;
+
+    // The UI can boot before the API server. When the server becomes reachable,
+    // retry loading the article list so comboboxes populate without a reload.
+    if (prev || !isServerConnected) return;
+    if (allArticles.length > 0) return;
+    fetchAllArticles();
+  }, [allArticles.length, fetchAllArticles, isServerConnected]);
 
   const initialStartPage = activeSession?.start_article || startArticle || "Capybara";
   const initialTargetPage = activeSession?.destination_article || destinationArticle || "Pokémon";

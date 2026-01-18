@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "packageManager": "yarn@1.22.22",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -10,6 +11,8 @@
     "lint": "eslint .",
     "play:regression": "node scripts/play-game-regression.mjs",
     "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit",
+    "test": "yarn lint && yarn typecheck && yarn build",
     "ux:audit": "node scripts/generate-ux-audit.mjs"
   },
   "dependencies": {
@@ -33,9 +36,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-force-graph-2d": "^1.27.1",
-    "react-force-graph-3d": "^1.26.1",
     "react-markdown": "^10.1.0",
-    "react-vis-force": "^0.3.1",
     "tailwind-merge": "^3.2.0",
     "tailwindcss": "^4.1.5"
   },

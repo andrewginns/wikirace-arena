@@ -170,8 +170,7 @@ export function createLocalRaceDriver(sessionId: string): RaceDriver {
         maxHops: maxSteps,
       });
 
-      if (validated.ok) {
-        if (validated.noop) return true;
+      if (validated.ok && validated.noop === false) {
         const step = validated.step;
 
         appendRunStep({
@@ -193,7 +192,9 @@ export function createLocalRaceDriver(sessionId: string): RaceDriver {
         return true;
       }
 
-      if (!validated.shouldFallback) return false;
+      if (validated.ok) return true;
+
+      if (!("shouldFallback" in validated) || !validated.shouldFallback) return false;
 
       const nextHops = currentHops + 1;
       const at = nowIso();
