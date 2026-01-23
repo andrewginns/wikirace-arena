@@ -1,7 +1,6 @@
 import sqlite3
 import json
 import os
-from dotenv import load_dotenv
 import re
 import asyncio
 import time
@@ -13,6 +12,7 @@ import sys
 import ipaddress
 import urllib.error
 import urllib.request
+from dotenv import dotenv_values, load_dotenv
 from dataclasses import dataclass
 from threading import Lock
 from collections import OrderedDict
@@ -32,9 +32,24 @@ from opentelemetry import context as otel_context
 from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import INVALID_SPAN, Span, set_span_in_context
 
-from llm_client import achat, configure_observability, run_span_name
+_DOTENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 
-load_dotenv()
+
+def _load_local_env() -> None:
+    # Load `.env` for local/dev, but only override existing values for API keys.
+    load_dotenv(dotenv_path=_DOTENV_PATH, override=False)
+
+    for key, value in dotenv_values(dotenv_path=_DOTENV_PATH).items():
+        if not isinstance(key, str) or not key.endswith("_API_KEY"):
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        os.environ[key] = value.strip()
+
+
+_load_local_env()
+
+from llm_client import achat, configure_observability, run_span_name
 
 app = FastAPI(title="WikiSpeedia API")
 

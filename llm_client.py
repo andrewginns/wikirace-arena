@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Optional
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 import logfire
 
 from pydantic_ai import Agent
@@ -16,6 +16,24 @@ from pydantic_ai.providers.openai import OpenAIProvider
 _LOGFIRE_CONFIGURED = False
 _LOGFIRE_LOCK = Lock()
 
+_DOTENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+
+
+def _load_local_env() -> None:
+    # Load `.env` for local/dev, but only override existing values for API keys
+    # (and Logfire token) when a non-empty value is provided.
+    load_dotenv(dotenv_path=_DOTENV_PATH, override=False)
+
+    override_keys = {"LOGFIRE_TOKEN"}
+    for key, value in dotenv_values(dotenv_path=_DOTENV_PATH).items():
+        if not isinstance(key, str):
+            continue
+        if not (key.endswith("_API_KEY") or key in override_keys):
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        os.environ[key] = value.strip()
+
 
 def _configure_logfire() -> None:
     global _LOGFIRE_CONFIGURED
@@ -23,14 +41,7 @@ def _configure_logfire() -> None:
         if _LOGFIRE_CONFIGURED:
             return
 
-        # Load LOGFIRE_TOKEN and provider keys from a local `.env`.
-        #
-        # `override=True` makes `.env` take precedence over the parent process
-        # environment (e.g. keys exported in your shell rc files). This keeps
-        # local/dev behavior consistent when people prefer editing `.env`.
-        #
-        # This is intentionally best-effort: the repo should run without a token.
-        load_dotenv(override=True)
+        _load_local_env()
 
         # 'if-token-present' means the app works even without auth/token.
         logfire.configure(send_to_logfire="if-token-present")
