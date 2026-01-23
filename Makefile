@@ -13,7 +13,14 @@ install:
 		echo "LLM participants will be unavailable until you set one; see README.md for setup."; \
 		echo ""; \
 	fi
-	uv run python get_wikihop.py --output parallel_eval/wikihop.db --download
+	@if [ -f parallel_eval/wikihop.db ]; then \
+		echo ""; \
+		echo "NOTE: parallel_eval/wikihop.db already exists; skipping DB build."; \
+		echo "To overwrite/regenerate it, see README.md (e.g. run: uv run python get_wikihop.py --output parallel_eval/wikihop.db --overwrite --download)."; \
+		echo ""; \
+	else \
+		uv run python get_wikihop.py --output parallel_eval/wikihop.db --download; \
+	fi
 
 playwright-install:
 	yarn playwright install chromium
