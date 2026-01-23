@@ -105,13 +105,29 @@ The API serves graph endpoints used by the web app.
 WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db uv run uvicorn api:app --reload --port 8000
 ```
 
-If you want **LLM participants** to make moves in the web UI, export a provider key (used by PydanticAI), e.g.:
+If you want **LLM participants** to make moves in the web UI, set a provider key (used by PydanticAI).
+
+Recommended: create a repo-root `.env` file:
+
+```bash
+# .env
+OPENAI_API_KEY=sk_...
+# or:
+# ANTHROPIC_API_KEY=...
+# GEMINI_API_KEY=...
+# Optional (enables trace export to Logfire):
+LOGFIRE_TOKEN=...
+```
+
+`.env` values take precedence over existing environment variables for `*_API_KEY` and `LOGFIRE_TOKEN` (when set to a non-empty value). Alternatively, export in your shell:
 
 ```bash
 export OPENAI_API_KEY=sk_...
-# or: export ANTHROPIC_API_KEY=...
-# or: export GEMINI_API_KEY=...
-WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db uv run uvicorn api:app --reload --port 8000
+# or:
+# export ANTHROPIC_API_KEY=...
+# export GEMINI_API_KEY=...
+# Optional:
+export LOGFIRE_TOKEN=...
 ```
 
 Endpoints you’ll care about:
