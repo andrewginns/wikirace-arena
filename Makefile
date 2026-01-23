@@ -1,6 +1,7 @@
 install:
 	yarn install
 	uv sync
+	uv run python get_wikihop.py --output parallel_eval/wikihop.db --download
 
 playwright-install:
 	yarn playwright install chromium
