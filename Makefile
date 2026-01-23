@@ -1,6 +1,18 @@
 install:
 	yarn install
 	uv sync
+	@has_key=0; \
+	if [ -n "$${OPENAI_API_KEY:-}" ] || [ -n "$${ANTHROPIC_API_KEY:-}" ] || [ -n "$${GEMINI_API_KEY:-}" ] || [ -n "$${GOOGLE_API_KEY:-}" ] || [ -n "$${OPENROUTER_API_KEY:-}" ]; then \
+		has_key=1; \
+	elif [ -f .env ] && grep -Eq '^(OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|GOOGLE_API_KEY|OPENROUTER_API_KEY)[[:space:]]*=[[:space:]]*[^[:space:]#]+' .env; then \
+		has_key=1; \
+	fi; \
+	if [ "$$has_key" -eq 0 ]; then \
+		echo ""; \
+		echo "NOTE: No model API key detected (OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY / OPENROUTER_API_KEY)."; \
+		echo "LLM participants will be unavailable until you set one; see README.md for setup."; \
+		echo ""; \
+	fi
 	uv run python get_wikihop.py --output parallel_eval/wikihop.db --download
 
 playwright-install:
