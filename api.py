@@ -11,6 +11,8 @@ import socket
 import subprocess
 import sys
 import ipaddress
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from threading import Lock
 from collections import OrderedDict
@@ -24,7 +26,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import uvicorn
-import aiohttp
 import logfire
 from opentelemetry import trace
 from opentelemetry import context as otel_context
@@ -498,7 +499,6 @@ WIKIRACE_WIKI_USER_AGENT = (
 LLM_CALL_SEMAPHORE = asyncio.Semaphore(WIKIRACE_MAX_CONCURRENT_LLM_CALLS)
 
 
-_WIKI_HTTP_SESSION: Optional[aiohttp.ClientSession] = None
 _WIKI_PROXY_CACHE: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
 _WIKI_PROXY_INFLIGHT: dict[str, asyncio.Task[str]] = {}
 _WIKI_PROXY_LOCK = asyncio.Lock()
@@ -1475,30 +1475,6 @@ ROOM_CLEANUP_INTERVAL_SECONDS = int(os.getenv("WIKIRACE_ROOM_CLEANUP_INTERVAL_SE
 
 
 @app.on_event("startup")
-async def _start_wiki_http_session() -> None:
-    global _WIKI_HTTP_SESSION
-
-    if _WIKI_HTTP_SESSION is not None and not _WIKI_HTTP_SESSION.closed:
-        return
-
-    timeout = aiohttp.ClientTimeout(
-        total=WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS,
-        connect=WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS,
-    )
-    connector = aiohttp.TCPConnector(
-        limit=WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS,
-        ttl_dns_cache=300,
-    )
-    headers = _wiki_http_headers()
-    _WIKI_HTTP_SESSION = aiohttp.ClientSession(
-        timeout=timeout,
-        headers=headers,
-        connector=connector,
-        trust_env=WIKIRACE_WIKI_TRUST_ENV,
-    )
-
-
-@app.on_event("startup")
 async def _start_room_cleanup_task():
     async def _cleanup_loop():
         while True:
@@ -1578,21 +1554,6 @@ async def _shutdown_local_run_traces() -> None:
             span.end()
         except Exception:
             pass
-
-
-@app.on_event("shutdown")
-async def _shutdown_wiki_http_session() -> None:
-    global _WIKI_HTTP_SESSION
-
-    session = _WIKI_HTTP_SESSION
-    _WIKI_HTTP_SESSION = None
-
-    if session is None:
-        return
-    if session.closed:
-        return
-
-    await session.close()
 
 
 def _inject_base_href(html: str) -> str:
@@ -3055,37 +3016,31 @@ def _wiki_proxy_cache_set(key: str, html: str, now: float) -> None:
 
 
 async def _fetch_remote_wiki_html(remote_urls: list[tuple[str, str]]) -> str:
-    session = _WIKI_HTTP_SESSION
-    if session is None or session.closed:
-        timeout = aiohttp.ClientTimeout(
-            total=WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS,
-            connect=WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS,
-        )
-        connector = aiohttp.TCPConnector(
-            limit=WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS,
-            ttl_dns_cache=300,
-        )
-        async with aiohttp.ClientSession(
-            timeout=timeout,
-            headers=_wiki_http_headers(),
-            connector=connector,
-            trust_env=WIKIRACE_WIKI_TRUST_ENV,
-        ) as temp_session:
-            return await _fetch_remote_wiki_html_with_session(temp_session, remote_urls)
-
-    return await _fetch_remote_wiki_html_with_session(session, remote_urls)
+    return await asyncio.to_thread(_fetch_remote_wiki_html_sync, remote_urls)
 
 
-async def _fetch_remote_wiki_html_with_session(
-    session: aiohttp.ClientSession, remote_urls: list[tuple[str, str]]
-) -> str:
+def _fetch_remote_wiki_html_sync(remote_urls: list[tuple[str, str]]) -> str:
     attempts: list[str] = []
+    timeout_seconds = max(1, int(WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS))
+    headers = {**_wiki_http_headers(), "Accept-Encoding": "identity"}
+
+    opener = (
+        urllib.request.build_opener()
+        if WIKIRACE_WIKI_TRUST_ENV
+        else urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    )
+
     for label, url in remote_urls:
         try:
-            async with session.get(url, allow_redirects=True) as response:
-                if response.status == 200:
-                    return await response.text()
-                attempts.append(f"{label}={response.status}")
+            req = urllib.request.Request(url, headers=headers)
+            with opener.open(req, timeout=timeout_seconds) as resp:
+                status = getattr(resp, "status", None) or resp.getcode()
+                if status == 200:
+                    charset = resp.headers.get_content_charset() or "utf-8"
+                    return resp.read().decode(charset, errors="replace")
+                attempts.append(f"{label}={status}")
+        except urllib.error.HTTPError as exc:
+            attempts.append(f"{label}={exc.code}")
         except Exception as exc:
             attempts.append(f"{label}={type(exc).__name__}")
 
