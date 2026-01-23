@@ -119,11 +119,21 @@ Endpoints you’ll care about:
 - `GET /health`
 - `GET /get_all_articles`
 - `GET /get_article_with_links/{title}`
-- `GET /wiki/{title}` (Wikipedia iframe proxy)
+- `GET /wiki/{title}` (iframe wiki proxy; fetches live Simple Wikipedia HTML)
 - `POST /local/validate_move` (human move validation; Local)
 - `POST /llm/local_run/start` + `POST /llm/local_run/step` (local AI runs)
 - Multiplayer rooms: `POST /rooms` + `/rooms/*` (REST + websocket)
 - `POST /llm/chat` (direct PydanticAI chat; mostly for debugging)
+
+If the in-game wiki iframe shows `Fetch error: Failed to fetch wiki page ...`, your network (or a proxy/WAF) may be blocking automated fetches. Try setting:
+
+```bash
+# Use a descriptive UA with contact info if possible (Wikimedia etiquette).
+export WIKIRACE_WIKI_USER_AGENT='wikirace-arena (your email or URL here)'
+
+# If you're behind a corporate proxy, also set HTTP(S)_PROXY and keep this enabled:
+export WIKIRACE_WIKI_TRUST_ENV=1
+```
 
 ### 5) Start the web app
 

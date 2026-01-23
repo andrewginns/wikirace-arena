@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+from dotenv import load_dotenv
 import re
 import asyncio
 import time
@@ -31,6 +32,8 @@ from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import INVALID_SPAN, Span, set_span_in_context
 
 from llm_client import achat, configure_observability, run_span_name
+
+load_dotenv()
 
 app = FastAPI(title="WikiSpeedia API")
 
@@ -443,6 +446,17 @@ def _env_positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "y", "on"):
+        return True
+    if raw in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
 def _local_run_trace_key(session_id: str, run_id: str) -> str:
     return f"{session_id}:{run_id}"
 
@@ -476,6 +490,11 @@ WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS = _env_positive_int(
 WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS = _env_positive_int(
     "WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS", 32
 )
+WIKIRACE_WIKI_TRUST_ENV = _env_bool("WIKIRACE_WIKI_TRUST_ENV", True)
+WIKIRACE_WIKI_USER_AGENT = (
+    (os.getenv("WIKIRACE_WIKI_USER_AGENT") or "").strip()
+    or "wikirace-arena (local dev; +https://github.com/openai/wikirace-arena)"
+)
 LLM_CALL_SEMAPHORE = asyncio.Semaphore(WIKIRACE_MAX_CONCURRENT_LLM_CALLS)
 
 
@@ -483,6 +502,14 @@ _WIKI_HTTP_SESSION: Optional[aiohttp.ClientSession] = None
 _WIKI_PROXY_CACHE: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
 _WIKI_PROXY_INFLIGHT: dict[str, asyncio.Task[str]] = {}
 _WIKI_PROXY_LOCK = asyncio.Lock()
+
+
+def _wiki_http_headers() -> dict[str, str]:
+    return {
+        "User-Agent": WIKIRACE_WIKI_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
 
 
 def _now_iso() -> str:
@@ -1462,11 +1489,12 @@ async def _start_wiki_http_session() -> None:
         limit=WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS,
         ttl_dns_cache=300,
     )
-    headers = {"User-Agent": "wikiracing-llms"}
+    headers = _wiki_http_headers()
     _WIKI_HTTP_SESSION = aiohttp.ClientSession(
         timeout=timeout,
         headers=headers,
         connector=connector,
+        trust_env=WIKIRACE_WIKI_TRUST_ENV,
     )
 
 
@@ -2986,6 +3014,16 @@ def _normalize_wiki_proxy_title(article_title: str) -> str:
     return (article_title or "").replace(" ", "_").strip()
 
 
+def _wiki_remote_fetch_urls(article_title: str) -> list[tuple[str, str]]:
+    safe_title = _normalize_wiki_proxy_title(article_title)
+    quoted = quote(safe_title, safe="")
+    return [
+        ("wiki", f"{SIMPLEWIKI_ORIGIN}/wiki/{quoted}"),
+        ("render", f"{SIMPLEWIKI_ORIGIN}/w/index.php?title={quoted}&redirect=yes&action=render"),
+        ("rest_html", f"{SIMPLEWIKI_ORIGIN}/api/rest_v1/page/html/{quoted}"),
+    ]
+
+
 def _wiki_proxy_headers(cache_status: str) -> dict[str, str]:
     max_age = max(0, int(WIKIRACE_WIKI_CACHE_TTL_SECONDS))
     return {
@@ -3016,30 +3054,52 @@ def _wiki_proxy_cache_set(key: str, html: str, now: float) -> None:
         _WIKI_PROXY_CACHE.popitem(last=False)
 
 
-async def _fetch_remote_wiki_html(remote_url: str) -> str:
+async def _fetch_remote_wiki_html(remote_urls: list[tuple[str, str]]) -> str:
     session = _WIKI_HTTP_SESSION
     if session is None or session.closed:
         timeout = aiohttp.ClientTimeout(
             total=WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS,
             connect=WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS,
         )
-        headers = {"User-Agent": "wikiracing-llms"}
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as temp_session:
-            async with temp_session.get(remote_url, allow_redirects=True) as response:
-                if response.status != 200:
-                    raise RuntimeError(
-                        f"Failed to fetch wiki page ({response.status})"
-                    )
-                return await response.text()
+        connector = aiohttp.TCPConnector(
+            limit=WIKIRACE_WIKI_HTTP_MAX_CONNECTIONS,
+            ttl_dns_cache=300,
+        )
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=_wiki_http_headers(),
+            connector=connector,
+            trust_env=WIKIRACE_WIKI_TRUST_ENV,
+        ) as temp_session:
+            return await _fetch_remote_wiki_html_with_session(temp_session, remote_urls)
 
-    async with session.get(remote_url, allow_redirects=True) as response:
-        if response.status != 200:
-            raise RuntimeError(f"Failed to fetch wiki page ({response.status})")
-        return await response.text()
+    return await _fetch_remote_wiki_html_with_session(session, remote_urls)
 
 
-async def _fetch_rewritten_wiki_html(remote_url: str) -> str:
-    html = await _fetch_remote_wiki_html(remote_url)
+async def _fetch_remote_wiki_html_with_session(
+    session: aiohttp.ClientSession, remote_urls: list[tuple[str, str]]
+) -> str:
+    attempts: list[str] = []
+    for label, url in remote_urls:
+        try:
+            async with session.get(url, allow_redirects=True) as response:
+                if response.status == 200:
+                    return await response.text()
+                attempts.append(f"{label}={response.status}")
+        except Exception as exc:
+            attempts.append(f"{label}={type(exc).__name__}")
+
+    attempts_str = ", ".join(attempts) if attempts else "none"
+    raise RuntimeError(
+        "Failed to fetch wiki page from Simple Wikipedia. "
+        + f"Attempts: {attempts_str}. "
+        + "If you're behind a proxy, set HTTP(S)_PROXY (and WIKIRACE_WIKI_TRUST_ENV=1). "
+        + "You can also set WIKIRACE_WIKI_USER_AGENT in .env."
+    )
+
+
+async def _fetch_rewritten_wiki_html(remote_urls: list[tuple[str, str]]) -> str:
+    html = await _fetch_remote_wiki_html(remote_urls)
     return _rewrite_wiki_html(html)
 
 
@@ -3053,7 +3113,7 @@ async def wiki_proxy(article_title: str):
 
     resolved_title = db.resolve_title(article_title)
     safe_title = _normalize_wiki_proxy_title(resolved_title or article_title)
-    remote_url = f"{SIMPLEWIKI_ORIGIN}/wiki/{quote(safe_title, safe='')}"
+    remote_urls = _wiki_remote_fetch_urls(safe_title)
 
     cache_key = resolved_title or safe_title
     now = time.monotonic()
@@ -3065,7 +3125,7 @@ async def wiki_proxy(article_title: str):
 
         inflight = _WIKI_PROXY_INFLIGHT.get(cache_key)
         if inflight is None:
-            inflight = asyncio.create_task(_fetch_rewritten_wiki_html(remote_url))
+            inflight = asyncio.create_task(_fetch_rewritten_wiki_html(remote_urls))
             _WIKI_PROXY_INFLIGHT[cache_key] = inflight
 
     try:
