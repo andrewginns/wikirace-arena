@@ -3037,6 +3037,8 @@ async def _fetch_remote_wiki_html(remote_urls: list[tuple[str, str]]) -> str:
 def _fetch_remote_wiki_html_sync(remote_urls: list[tuple[str, str]]) -> str:
     attempts: list[str] = []
     timeout_seconds = max(1, int(WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS))
+    connect_timeout_seconds = max(1, int(WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS))
+    effective_timeout_seconds = min(timeout_seconds, connect_timeout_seconds)
     headers = {**_wiki_http_headers(), "Accept-Encoding": "identity"}
 
     opener = (
@@ -3048,7 +3050,7 @@ def _fetch_remote_wiki_html_sync(remote_urls: list[tuple[str, str]]) -> str:
     for label, url in remote_urls:
         try:
             req = urllib.request.Request(url, headers=headers)
-            with opener.open(req, timeout=timeout_seconds) as resp:
+            with opener.open(req, timeout=effective_timeout_seconds) as resp:
                 status = getattr(resp, "status", None) or resp.getcode()
                 if status == 200:
                     charset = resp.headers.get_content_charset() or "utf-8"
