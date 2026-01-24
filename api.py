@@ -7,6 +7,7 @@ import time
 import secrets
 import string
 import socket
+import http.client
 import subprocess
 import sys
 import ipaddress
@@ -3037,12 +3038,47 @@ async def _fetch_remote_wiki_html(remote_urls: list[tuple[str, str]]) -> str:
 def _fetch_remote_wiki_html_sync(remote_urls: list[tuple[str, str]]) -> str:
     attempts: list[str] = []
     timeout_seconds = max(1, int(WIKIRACE_WIKI_FETCH_TIMEOUT_SECONDS))
+    connect_timeout_seconds = max(1, int(WIKIRACE_WIKI_FETCH_CONNECT_TIMEOUT_SECONDS))
     headers = {**_wiki_http_headers(), "Accept-Encoding": "identity"}
 
+    class _ConnectTimeoutHTTPConnection(http.client.HTTPConnection):
+        def connect(self) -> None:
+            original_timeout = self.timeout
+            try:
+                self.timeout = connect_timeout_seconds
+                super().connect()
+            finally:
+                self.timeout = original_timeout
+            if self.sock is not None:
+                self.sock.settimeout(timeout_seconds)
+
+    class _ConnectTimeoutHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            conn = self._create_connection(
+                (self.host, self.port), connect_timeout_seconds, self.source_address
+            )
+            conn.settimeout(timeout_seconds)
+            if self._tunnel_host:
+                self.sock = conn
+                self._tunnel()
+            server_hostname = self._tunnel_host or self.host
+            self.sock = self._context.wrap_socket(conn, server_hostname=server_hostname)
+            self.sock.settimeout(timeout_seconds)
+
+    class _ConnectTimeoutHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req: urllib.request.Request):
+            return self.do_open(_ConnectTimeoutHTTPConnection, req)
+
+    class _ConnectTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req: urllib.request.Request):
+            return self.do_open(_ConnectTimeoutHTTPSConnection, req)
+
     opener = (
-        urllib.request.build_opener()
+        urllib.request.build_opener(_ConnectTimeoutHTTPHandler, _ConnectTimeoutHTTPSHandler)
         if WIKIRACE_WIKI_TRUST_ENV
-        else urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        else urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _ConnectTimeoutHTTPHandler, _ConnectTimeoutHTTPSHandler
+        )
     )
 
     for label, url in remote_urls:
