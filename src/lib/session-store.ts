@@ -11,6 +11,13 @@ import type {
   StepV1,
 } from '@/lib/session-types'
 import { finalizeRun, makeId, nowIso, sessionDisplayName } from '@/lib/session-utils'
+import {
+  safeLocalStorageGetItem,
+  safeLocalStorageGetJson,
+  safeLocalStorageRemoveItem,
+  safeLocalStorageSetItem,
+  safeLocalStorageSetJson,
+} from '@/lib/storage'
 
 type StoreState = {
   sessions: Record<string, SessionV1>
@@ -74,21 +81,11 @@ function normalizeSession(session: SessionV1): SessionV1 {
   }
 }
 
-function safeParseJson<T>(value: string | null): T | null {
-  if (!value) return null
-  try {
-    return JSON.parse(value) as T
-  } catch {
-    return null
-  }
-}
-
 function loadInitialState(): StoreState {
-  const stored = safeParseJson<{ sessions: Record<string, SessionV1> }>(
-    window.localStorage.getItem(SESSIONS_STORAGE_KEY)
-  )
+  const stored =
+    safeLocalStorageGetJson<{ sessions: Record<string, SessionV1> }>(SESSIONS_STORAGE_KEY)
 
-  const active_session_id = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY)
+  const active_session_id = safeLocalStorageGetItem(ACTIVE_SESSION_STORAGE_KEY)
 
   const sessionsRaw = stored?.sessions || {}
   let changed = false
@@ -111,7 +108,7 @@ function loadInitialState(): StoreState {
   }
 
   if (changed) {
-    window.localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify({ sessions }))
+    safeLocalStorageSetJson(SESSIONS_STORAGE_KEY, { sessions })
   }
 
   return {
@@ -132,14 +129,11 @@ function emit() {
 }
 
 function persist() {
-  window.localStorage.setItem(
-    SESSIONS_STORAGE_KEY,
-    JSON.stringify({ sessions: state.sessions })
-  )
+  safeLocalStorageSetJson(SESSIONS_STORAGE_KEY, { sessions: state.sessions })
   if (state.active_session_id) {
-    window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, state.active_session_id)
+    safeLocalStorageSetItem(ACTIVE_SESSION_STORAGE_KEY, state.active_session_id)
   } else {
-    window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY)
+    safeLocalStorageRemoveItem(ACTIVE_SESSION_STORAGE_KEY)
   }
 }
 
@@ -326,7 +320,11 @@ export function startLlmRun({
   model,
   playerName,
   apiBase,
-  reasoningEffort,
+  openaiApiMode,
+  openaiReasoningEffort,
+  openaiReasoningSummary,
+  anthropicThinkingBudgetTokens,
+  googleThinkingConfig,
   maxSteps,
   maxLinks,
   maxTokens,
@@ -337,7 +335,11 @@ export function startLlmRun({
   model: string
   playerName?: string
   apiBase?: string
-  reasoningEffort?: string
+  openaiApiMode?: string
+  openaiReasoningEffort?: string
+  openaiReasoningSummary?: string
+  anthropicThinkingBudgetTokens?: number
+  googleThinkingConfig?: Record<string, unknown>
   maxSteps?: number
   maxLinks?: number | null
   maxTokens?: number | null
@@ -355,7 +357,14 @@ export function startLlmRun({
     player_name: playerName?.trim() ? playerName.trim() : undefined,
     model,
     api_base: apiBase || undefined,
-    reasoning_effort: reasoningEffort || undefined,
+    openai_api_mode: openaiApiMode || undefined,
+    openai_reasoning_effort: openaiReasoningEffort || undefined,
+    openai_reasoning_summary: openaiReasoningSummary || undefined,
+    anthropic_thinking_budget_tokens:
+      typeof anthropicThinkingBudgetTokens === 'number'
+        ? anthropicThinkingBudgetTokens
+        : undefined,
+    google_thinking_config: googleThinkingConfig || undefined,
     max_steps: typeof maxSteps === 'number' ? maxSteps : undefined,
     max_links: typeof maxLinks === 'number' ? maxLinks : undefined,
     max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined,
@@ -715,8 +724,9 @@ export function getSessionsSnapshot() {
 }
 
 export function useSessionsStore() {
-  return useSyncExternalStore(subscribeSessions, getSessionsSnapshot, () => ({
-    sessions: {},
-    active_session_id: null,
-  }))
+  return useSyncExternalStore<StoreState>(
+    subscribeSessions,
+    getSessionsSnapshot,
+    () => ({ sessions: {}, active_session_id: null } as StoreState)
+  )
 }

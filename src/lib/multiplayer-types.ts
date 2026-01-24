@@ -37,7 +37,11 @@ export type MultiplayerRunV1 = {
   player_name?: string;
   model?: string;
   api_base?: string;
-  reasoning_effort?: string;
+  openai_api_mode?: string;
+  openai_reasoning_effort?: string;
+  openai_reasoning_summary?: string;
+  anthropic_thinking_budget_tokens?: number;
+  google_thinking_config?: Record<string, unknown>;
   max_steps?: number;
   max_links?: number | null;
   max_tokens?: number | null;
@@ -102,7 +106,11 @@ export type AddLlmRunRequest = {
   model: string;
   player_name?: string;
   api_base?: string;
-  reasoning_effort?: string;
+  openai_api_mode?: string;
+  openai_reasoning_effort?: string;
+  openai_reasoning_summary?: string;
+  anthropic_thinking_budget_tokens?: number;
+  google_thinking_config?: Record<string, unknown>;
   max_steps?: number;
   max_links?: number | null;
   max_tokens?: number | null;

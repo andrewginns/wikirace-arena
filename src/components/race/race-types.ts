@@ -6,7 +6,11 @@ export type RaceParticipantDraft = {
   name: string;
   model?: string;
   apiBase?: string;
-  reasoningEffort?: string;
+  openaiApiMode?: string;
+  openaiReasoningEffort?: string;
+  openaiReasoningSummary?: string;
+  anthropicThinkingBudgetTokens?: number;
+  googleThinkingConfig?: Record<string, unknown>;
 };
 
 export type RaceRules = {

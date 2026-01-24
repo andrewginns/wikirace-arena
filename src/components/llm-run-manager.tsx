@@ -1,7 +1,6 @@
-"use client";
-
 import { useEffect, useRef } from "react";
 import { runLlmRace } from "@/lib/llm-runner";
+import { endLocalRunTrace, startLocalRunTrace } from "@/lib/local-run-tracing";
 import {
   appendRunStep,
   finishRun,
@@ -48,6 +47,18 @@ export default function LlmRunManager() {
   const { sessions } = useSessionsStore();
   const controllersRef = useRef<Map<string, AbortController>>(new Map());
 
+  // In React StrictMode (dev), effects are mounted/unmounted twice. Abort any in-flight
+  // controllers on unmount to avoid duplicate runners continuing in the background.
+  useEffect(() => {
+    const controllers = controllersRef.current;
+    return () => {
+      for (const controller of controllers.values()) {
+        controller.abort();
+      }
+      controllers.clear();
+    };
+  }, []);
+
   useEffect(() => {
     const controllers = controllersRef.current;
     const activeRunIds = new Set<string>();
@@ -69,6 +80,8 @@ export default function LlmRunManager() {
         let lastArticle = run.steps[run.steps.length - 1]?.article || session.start_article;
 
         void (async () => {
+          let traceContext: { sessionId: string; runId: string; traceparent: string } | undefined;
+
           try {
             const [canonicalLast, canonicalTarget] = await Promise.all([
               canonicalizeTitle(lastArticle),
@@ -82,12 +95,32 @@ export default function LlmRunManager() {
               return;
             }
 
+            const trace = await startLocalRunTrace({
+              sessionId,
+              runId: run.id,
+              model: run.model || "llm",
+              apiBase: run.api_base,
+              openaiApiMode: run.openai_api_mode,
+              openaiReasoningEffort: run.openai_reasoning_effort,
+              openaiReasoningSummary: run.openai_reasoning_summary,
+              anthropicThinkingBudgetTokens: run.anthropic_thinking_budget_tokens,
+              googleThinkingConfig: run.google_thinking_config,
+            });
+            if (trace) {
+              traceContext = { sessionId, runId: run.id, traceparent: trace.traceparent };
+            }
+
             const { result } = await runLlmRace({
               startArticle: session.start_article,
               destinationArticle: session.destination_article,
               model: run.model || "llm",
               apiBase: run.api_base,
-              reasoningEffort: run.reasoning_effort,
+              openaiApiMode: run.openai_api_mode,
+              openaiReasoningEffort: run.openai_reasoning_effort,
+              openaiReasoningSummary: run.openai_reasoning_summary,
+              anthropicThinkingBudgetTokens: run.anthropic_thinking_budget_tokens,
+              googleThinkingConfig: run.google_thinking_config,
+              traceContext,
               resumeFromSteps: run.steps,
               maxSteps: limits.maxSteps,
               maxLinks: limits.maxLinks,
@@ -118,6 +151,9 @@ export default function LlmRunManager() {
             });
             finishRun({ sessionId, runId: run.id, result: "lose" });
           } finally {
+            if (traceContext) {
+              await endLocalRunTrace({ sessionId: traceContext.sessionId, runId: traceContext.runId });
+            }
             controllersRef.current.delete(run.id);
           }
         })();

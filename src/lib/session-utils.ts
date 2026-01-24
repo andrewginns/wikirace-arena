@@ -1,4 +1,6 @@
 import type { RunResult, RunV1, SessionV1, StepV1 } from '@/lib/session-types'
+import { computeHopsFromSteps } from '@/lib/run-metrics'
+import { formatRunDisplayName } from '@/lib/run-display'
 
 export function nowIso() {
   return new Date().toISOString()
@@ -13,7 +15,7 @@ export function makeId(prefix: string) {
 }
 
 export function computeHops(steps: StepV1[]) {
-  return Math.max(0, steps.length - 1)
+  return computeHopsFromSteps(steps)
 }
 
 export function finalizeRun(run: RunV1, result: RunResult, finishedAtIso?: string) {
@@ -44,29 +46,13 @@ export function finalizeRun(run: RunV1, result: RunResult, finishedAtIso?: strin
 }
 
 export function runDisplayName(run: RunV1) {
-  if (run.kind === 'human') return run.player_name || 'Human'
-  const model = run.model || 'LLM'
-  const effort = run.reasoning_effort?.trim()
-  const override = run.player_name?.trim()
-  if (override && override !== model) {
-    const overrideLower = override.toLowerCase()
-    const modelLower = model.toLowerCase()
-    const effortLower = effort?.toLowerCase()
-    const overrideAlreadyIncludesModel = overrideLower.includes(modelLower)
-    const overrideAlreadyIncludesEffort = effortLower
-      ? overrideLower.includes(effortLower)
-      : true
-    if (overrideAlreadyIncludesModel && overrideAlreadyIncludesEffort) {
-      return override
-    }
-
-    const suffixParts = [model]
-    if (effort) suffixParts.push(effort)
-    return `${override} (${suffixParts.join(' • ')})`
-  }
-
-  if (effort) return `${model} (${effort})`
-  return model
+  return formatRunDisplayName({
+    kind: run.kind,
+    playerName: run.player_name,
+    model: run.model,
+    openaiReasoningEffort: run.openai_reasoning_effort,
+    anthropicThinkingBudgetTokens: run.anthropic_thinking_budget_tokens,
+  })
 }
 
 export function sessionDisplayName(session: SessionV1) {

@@ -37,12 +37,22 @@ const VirtualizedCommand = ({
   selectedOption,
   onSelectOption,
 }: VirtualizedCommandProps) => {
-  const [filteredOptions, setFilteredOptions] =
-    React.useState<Option[]>(options);
+  const [search, setSearch] = React.useState<string>("");
   const [focusedIndex, setFocusedIndex] = React.useState(0);
   const [isKeyboardNavActive, setIsKeyboardNavActive] = React.useState(false);
 
   const parentRef = React.useRef(null);
+
+  const filteredOptions = React.useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (query.length === 0) return options;
+
+    return options.filter((option) => {
+      const value = option.value.toLowerCase();
+      const label = option.label.toLowerCase();
+      return value.includes(query) || label.includes(query);
+    });
+  }, [options, search]);
 
   const virtualizer = useVirtualizer({
     count: filteredOptions.length,
@@ -52,25 +62,26 @@ const VirtualizedCommand = ({
 
   const virtualOptions = virtualizer.getVirtualItems();
 
-  const scrollToIndex = (index: number) => {
-    virtualizer.scrollToIndex(index, {
-      align: "center",
-    });
-  };
+  const scrollToIndex = React.useCallback(
+    (index: number) => {
+      if (index < 0) return;
+      virtualizer.scrollToIndex(index, {
+        align: "center",
+      });
+    },
+    [virtualizer]
+  );
 
-  const handleSearch = (search: string) => {
+  const handleSearch = (nextSearch: string) => {
     setIsKeyboardNavActive(false);
-    setFilteredOptions(
-      options.filter((option) =>
-        option.value.toLowerCase().includes(search.toLowerCase() ?? [])
-      )
-    );
+    setSearch(nextSearch);
   };
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
     switch (event.key) {
       case "ArrowDown": {
         event.preventDefault();
+        if (filteredOptions.length === 0) break;
         setIsKeyboardNavActive(true);
         setFocusedIndex((prev) => {
           const newIndex =
@@ -82,6 +93,7 @@ const VirtualizedCommand = ({
       }
       case "ArrowUp": {
         event.preventDefault();
+        if (filteredOptions.length === 0) break;
         setIsKeyboardNavActive(true);
         setFocusedIndex((prev) => {
           const newIndex =
@@ -93,15 +105,32 @@ const VirtualizedCommand = ({
       }
       case "Enter": {
         event.preventDefault();
-        if (filteredOptions[focusedIndex]) {
-          onSelectOption?.(filteredOptions[focusedIndex].value);
-        }
+        const index = focusedIndex < 0 ? 0 : focusedIndex;
+        const option = filteredOptions[index];
+        if (option) onSelectOption?.(option.value);
         break;
       }
       default:
         break;
     }
   };
+
+  React.useEffect(() => {
+    setFocusedIndex((prev) => {
+      if (filteredOptions.length === 0) return -1;
+
+      // If we were previously focused on "nothing" (e.g. a transient empty search),
+      // reset focus to the first option so keyboard-only users can press Enter to select.
+      if (prev < 0) {
+        scrollToIndex(0);
+        return 0;
+      }
+
+      const next = Math.min(prev, filteredOptions.length - 1);
+      if (next !== prev) scrollToIndex(next);
+      return next;
+    });
+  }, [filteredOptions.length, scrollToIndex]);
 
   React.useEffect(() => {
     if (selectedOption) {
@@ -120,7 +149,11 @@ const VirtualizedCommand = ({
 
   return (
     <Command shouldFilter={false} onKeyDown={handleKeyDown}>
-      <CommandInput onValueChange={handleSearch} placeholder={placeholder} />
+      <CommandInput
+        value={search}
+        onValueChange={handleSearch}
+        placeholder={placeholder}
+      />
       <CommandList
         ref={parentRef}
         style={{

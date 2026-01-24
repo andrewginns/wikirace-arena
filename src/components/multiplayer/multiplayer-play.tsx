@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useMemo, useRef, useState } from "react";
 import MultiplayerSetup from "@/components/multiplayer/multiplayer-setup";
 import MultiplayerRoundSetup from "@/components/multiplayer/multiplayer-round-setup";

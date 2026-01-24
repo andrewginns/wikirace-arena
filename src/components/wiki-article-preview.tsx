@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { ImageOff } from "lucide-react";
 import { cn } from "@/lib/utils";
