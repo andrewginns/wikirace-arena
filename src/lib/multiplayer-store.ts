@@ -1,5 +1,13 @@
 import { useSyncExternalStore } from "react";
 import { API_BASE } from "@/lib/constants";
+import {
+  safeLocalStorageGetItem,
+  safeLocalStorageRemoveItem,
+  safeLocalStorageSetItem,
+  safeSessionStorageGetItem,
+  safeSessionStorageRemoveItem,
+  safeSessionStorageSetItem,
+} from "@/lib/storage";
 import type {
   AddLlmRunRequest,
   CreateRoomRequest,
@@ -47,67 +55,15 @@ function emit() {
   for (const listener of listeners) listener();
 }
 
-function safeGetItem(key: string) {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function safeGetSessionItem(key: string) {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function safeSetSessionItem(key: string, value: string) {
-  if (typeof window === "undefined") return;
-  try {
-    window.sessionStorage.setItem(key, value);
-  } catch {
-    // ignore
-  }
-}
-
-function safeRemoveSessionItem(key: string) {
-  if (typeof window === "undefined") return;
-  try {
-    window.sessionStorage.removeItem(key);
-  } catch {
-    // ignore
-  }
-}
-
-function safeSetItem(key: string, value: string) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    // ignore
-  }
-}
-
-function safeRemoveItem(key: string) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.removeItem(key);
-  } catch {
-    // ignore
-  }
-}
-
 function loadInitialState(): StoreState {
-  const roomId = safeGetSessionItem(ROOM_ID_KEY) || safeGetItem(ROOM_ID_KEY);
-  const playerId = safeGetSessionItem(PLAYER_ID_KEY) || safeGetItem(PLAYER_ID_KEY);
-  const playerName = safeGetItem(PLAYER_NAME_KEY);
+  const roomId =
+    safeSessionStorageGetItem(ROOM_ID_KEY) || safeLocalStorageGetItem(ROOM_ID_KEY);
+  const playerId =
+    safeSessionStorageGetItem(PLAYER_ID_KEY) || safeLocalStorageGetItem(PLAYER_ID_KEY);
+  const playerName = safeLocalStorageGetItem(PLAYER_NAME_KEY);
 
   const normalizedRoomId = roomId ? normalizeRoomId(roomId) : null;
-  const storedJoinUrl = safeGetSessionItem(JOIN_URL_KEY);
+  const storedJoinUrl = safeSessionStorageGetItem(JOIN_URL_KEY);
   let join_url: string | null = null;
 
   if (storedJoinUrl && normalizedRoomId) {
@@ -123,8 +79,12 @@ function loadInitialState(): StoreState {
   }
 
   // Migration: older builds stored ids in localStorage.
-  if (roomId && !safeGetSessionItem(ROOM_ID_KEY)) safeSetSessionItem(ROOM_ID_KEY, roomId);
-  if (playerId && !safeGetSessionItem(PLAYER_ID_KEY)) safeSetSessionItem(PLAYER_ID_KEY, playerId);
+  if (roomId && !safeSessionStorageGetItem(ROOM_ID_KEY)) {
+    safeSessionStorageSetItem(ROOM_ID_KEY, roomId);
+  }
+  if (playerId && !safeSessionStorageGetItem(PLAYER_ID_KEY)) {
+    safeSessionStorageSetItem(PLAYER_ID_KEY, playerId);
+  }
 
   return {
     room: null,
@@ -169,21 +129,21 @@ function persistRoomIdentity(
   name: string | null,
   joinUrl?: string | null
 ) {
-  if (roomId) safeSetSessionItem(ROOM_ID_KEY, roomId);
-  else safeRemoveSessionItem(ROOM_ID_KEY);
+  if (roomId) safeSessionStorageSetItem(ROOM_ID_KEY, roomId);
+  else safeSessionStorageRemoveItem(ROOM_ID_KEY);
 
-  if (playerId) safeSetSessionItem(PLAYER_ID_KEY, playerId);
-  else safeRemoveSessionItem(PLAYER_ID_KEY);
+  if (playerId) safeSessionStorageSetItem(PLAYER_ID_KEY, playerId);
+  else safeSessionStorageRemoveItem(PLAYER_ID_KEY);
 
-  if (joinUrl) safeSetSessionItem(JOIN_URL_KEY, joinUrl);
-  else safeRemoveSessionItem(JOIN_URL_KEY);
+  if (joinUrl) safeSessionStorageSetItem(JOIN_URL_KEY, joinUrl);
+  else safeSessionStorageRemoveItem(JOIN_URL_KEY);
 
   // Also keep legacy keys clean so other tabs don't unexpectedly bootstrap.
-  safeRemoveItem(ROOM_ID_KEY);
-  safeRemoveItem(PLAYER_ID_KEY);
+  safeLocalStorageRemoveItem(ROOM_ID_KEY);
+  safeLocalStorageRemoveItem(PLAYER_ID_KEY);
 
-  if (name) safeSetItem(PLAYER_NAME_KEY, name);
-  else safeRemoveItem(PLAYER_NAME_KEY);
+  if (name) safeLocalStorageSetItem(PLAYER_NAME_KEY, name);
+  else safeLocalStorageRemoveItem(PLAYER_NAME_KEY);
 }
 
 function getApiOrigin(): string {
@@ -307,19 +267,21 @@ export function connectWebSocket(roomId: string, playerId: string | null) {
 }
 
 export async function bootstrapMultiplayer() {
-  const storedRoomId = safeGetSessionItem(ROOM_ID_KEY) || safeGetItem(ROOM_ID_KEY);
-  const storedPlayerId = safeGetSessionItem(PLAYER_ID_KEY) || safeGetItem(PLAYER_ID_KEY);
+  const storedRoomId =
+    safeSessionStorageGetItem(ROOM_ID_KEY) || safeLocalStorageGetItem(ROOM_ID_KEY);
+  const storedPlayerId =
+    safeSessionStorageGetItem(PLAYER_ID_KEY) || safeLocalStorageGetItem(PLAYER_ID_KEY);
   if (!storedRoomId) return;
 
   const normalizedRoomId = normalizeRoomId(storedRoomId);
 
-  if (storedRoomId) safeSetSessionItem(ROOM_ID_KEY, normalizedRoomId);
-  if (storedPlayerId) safeSetSessionItem(PLAYER_ID_KEY, storedPlayerId);
+  if (storedRoomId) safeSessionStorageSetItem(ROOM_ID_KEY, normalizedRoomId);
+  if (storedPlayerId) safeSessionStorageSetItem(PLAYER_ID_KEY, storedPlayerId);
 
   try {
     const room = await apiJson<MultiplayerRoomV1>(`/rooms/${encodeURIComponent(normalizedRoomId)}`);
 
-    const storedJoinUrl = safeGetSessionItem(JOIN_URL_KEY);
+    const storedJoinUrl = safeSessionStorageGetItem(JOIN_URL_KEY);
     const join_url = storedJoinUrl
       ? storedJoinUrl
       : `${window.location.origin}/?room=${normalizedRoomId}`;

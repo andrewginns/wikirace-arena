@@ -3,8 +3,8 @@
 // Generates the screenshots used by `docs/ux-audit/`.
 //
 // Prereqs:
-//   - `yarn add -D playwright`
-//   - `npx playwright install chromium`
+//   - `yarn install`
+//   - `yarn playwright install chromium` (or `make playwright-install`)
 //
 // Usage:
 //   node scripts/generate-ux-audit.mjs --base-url http://localhost:5173

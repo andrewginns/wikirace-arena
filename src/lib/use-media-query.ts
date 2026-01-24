@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useState } from "react";
 
 export function useMediaQuery(query: string) {
@@ -17,15 +15,19 @@ export function useMediaQuery(query: string) {
       setMatches(event.matches);
     };
 
-    if ("addEventListener" in mediaQueryList) {
+    if (typeof mediaQueryList.addEventListener === "function") {
       mediaQueryList.addEventListener("change", handleChange);
       return () => mediaQueryList.removeEventListener("change", handleChange);
     }
 
-    mediaQueryList.addListener(handleChange);
-    return () => mediaQueryList.removeListener(handleChange);
+    // Legacy Safari support (MediaQueryList#addListener/removeListener).
+    const legacy = mediaQueryList as unknown as {
+      addListener: (listener: (event: MediaQueryListEvent) => void) => void;
+      removeListener: (listener: (event: MediaQueryListEvent) => void) => void;
+    };
+    legacy.addListener(handleChange);
+    return () => legacy.removeListener(handleChange);
   }, [query]);
 
   return matches;
 }
-

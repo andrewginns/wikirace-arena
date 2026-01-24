@@ -1,6 +1,6 @@
-"use client";
-
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -17,7 +17,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { StatusChip } from "@/components/ui/status-chip";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -56,11 +55,10 @@ import {
   User,
   X,
 } from "lucide-react";
-import ForceDirectedGraph from "@/components/force-directed-graph";
 import ConfettiCanvas from "@/components/confetti-canvas";
 import WikiArticlePreview from "@/components/wiki-article-preview";
+import AddAiForm from "@/components/race/add-ai-form";
 import AddChallengersDialog from "@/components/race/add-challengers-dialog";
-import ModelPicker from "@/components/model-picker";
 import type { RaceDriver } from "@/lib/race-driver";
 import type { RaceMode, RaceRun, RaceState, RaceStep } from "@/lib/race-state";
 import {
@@ -71,6 +69,7 @@ import {
 import { addViewerDataset } from "@/lib/viewer-datasets";
 import { normalizeWikiTitle, wikiTitlesMatch } from "@/lib/wiki-title";
 
+const ForceDirectedGraph = lazy(() => import("@/components/force-directed-graph"));
 
 const DEFAULT_MAX_STEPS = 20;
 
@@ -336,15 +335,6 @@ function buildViewerDatasetFromRace({
   };
 }
 
-function toOptionalPositiveInt(value: string): number | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed)) return undefined;
-  const asInt = Math.floor(parsed);
-  return asInt > 0 ? asInt : undefined;
-}
-
 function runHops(run: RaceRun) {
   return typeof run.hops === "number" ? run.hops : computeHopsFromSteps(run.steps);
 }
@@ -414,7 +404,14 @@ function stepError(step: RaceStep) {
   return typeof error === "string" && error.trim().length > 0 ? error : null;
 }
 
-function stepMetrics(step: RaceStep) {
+type StepMetrics = {
+  latencyMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+};
+
+function stepMetrics(step: RaceStep): StepMetrics {
   if (!step.metadata) return {};
   const meta = step.metadata as Record<string, unknown>;
   const latencyMs =
@@ -516,23 +513,14 @@ export default function RaceArena({
   const [compareHop, setCompareHop] = useState(0);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
-  const [finishExportMenuOpen, setFinishExportMenuOpen] = useState(false);
-
-  const [addAiOpen, setAddAiOpen] = useState(false);
-  const [addAiPresetsOpen, setAddAiPresetsOpen] = useState(false);
-  const [addAiLoading, setAddAiLoading] = useState(false);
-  const [aiModel, setAiModel] = useState<string>("");
-  const [aiName, setAiName] = useState<string>("");
-  const [aiApiBase, setAiApiBase] = useState<string>("");
-  const [aiReasoningEffort, setAiReasoningEffort] = useState<string>("");
-  const [aiMaxSteps, setAiMaxSteps] = useState<string>("");
-  const [aiMaxLinks, setAiMaxLinks] = useState<string>("");
-  const [aiMaxTokens, setAiMaxTokens] = useState<string>("");
-  const [humanPaneMode, setHumanPaneMode] = useState<HumanPaneMode>(() =>
-    loadHumanPaneMode(
-      isMobile ? MOBILE_HUMAN_PANE_MODE_STORAGE_KEY : HUMAN_PANE_MODE_STORAGE_KEY
-    )
-  );
+	  const [finishExportMenuOpen, setFinishExportMenuOpen] = useState(false);
+	
+	  const [addAiOpen, setAddAiOpen] = useState(false);
+	  const [humanPaneMode, setHumanPaneMode] = useState<HumanPaneMode>(() =>
+	    loadHumanPaneMode(
+	      isMobile ? MOBILE_HUMAN_PANE_MODE_STORAGE_KEY : HUMAN_PANE_MODE_STORAGE_KEY
+	    )
+	  );
   const [linksSearchOpen, setLinksSearchOpen] = useState(false);
   const [arenaViewMode, setArenaViewMode] = useState<ArenaViewMode>("article");
   const [linkQuery, setLinkQuery] = useState<string>("");
@@ -1553,19 +1541,33 @@ export default function RaceArena({
   const wikiScale = wikiZoomValue / 100;
   const wikiZoomMultiplier = 1 / wikiScale;
 
+  const wikiPostMessageOrigin = useMemo((): string | null => {
+    if (typeof window === "undefined") return null;
+    if (!wikiSrc) return window.location.origin;
+
+    // Ensure we only send messages to the iframe's origin (dev: API origin; prod: same-origin).
+    try {
+      return new URL(wikiSrc, window.location.href).origin;
+    } catch {
+      return window.location.origin;
+    }
+  }, [wikiSrc]);
+
   const postWikiReplayMode = useCallback((enabled: boolean) => {
+    if (!wikiPostMessageOrigin) return;
     wikiIframeRef.current?.contentWindow?.postMessage(
       { type: "wikirace:setReplayMode", enabled },
-      "*"
+      wikiPostMessageOrigin
     );
-  }, []);
+  }, [wikiPostMessageOrigin]);
 
   const postWikiIncludeImageLinks = useCallback((enabled: boolean) => {
+    if (!wikiPostMessageOrigin) return;
     wikiIframeRef.current?.contentWindow?.postMessage(
       { type: "wikirace:setIncludeImageLinks", enabled },
-      "*"
+      wikiPostMessageOrigin
     );
-  }, []);
+  }, [wikiPostMessageOrigin]);
 
   useEffect(() => {
     if (!session) return;
@@ -1773,79 +1775,16 @@ export default function RaceArena({
   }
 
   const headerTitle = raceDisplayName(session);
-  const headerSubtitle =
-    session.title && session.title.trim().length > 0
-      ? `${session.start_article} → ${session.destination_article}`
-      : null;
-  const canAddAi = Boolean(driverValue?.addAi && driverValue.capabilities.canAddAi);
-  const defaultLayout = defaultLayoutForMode(session.mode);
-  const isMultiplayerMobile = isMobile && session.mode === "multiplayer";
-
-  const addAiPreset = async (
-    drafts: Array<{
-      model: string;
-      player_name?: string;
-      api_base?: string;
-      reasoning_effort?: string;
-    }>
-  ) => {
-    if (!driverValue?.addAi) return;
-
-    const fullRace = race ?? session;
-    const keyForDraft = (draft: {
-      model: string;
-      api_base?: string;
-      reasoning_effort?: string;
-    }) => {
-      return `llm:${draft.model}:${draft.api_base || ""}:${draft.reasoning_effort || ""}`;
-    };
-
-    const existingKeys = new Set(
-      fullRace.runs
-        .filter((run) => run.kind === "llm")
-        .map((run) =>
-          keyForDraft({
-            model: run.model || "",
-            api_base: run.api_base || undefined,
-            reasoning_effort: run.reasoning_effort || undefined,
-          })
-        )
-    );
-
-    setAddAiLoading(true);
-    try {
-      let addedAny = false;
-      for (const draft of drafts) {
-        const model = draft.model.trim();
-        if (!model) continue;
-
-        const key = keyForDraft({
-          model,
-          api_base: draft.api_base,
-          reasoning_effort: draft.reasoning_effort,
-        });
-        if (existingKeys.has(key)) continue;
-
-        const ok = await driverValue.addAi({
-          model,
-          player_name: draft.player_name,
-          api_base: draft.api_base,
-          reasoning_effort: draft.reasoning_effort,
-        });
-
-        if (!ok) break;
-        existingKeys.add(key);
-        addedAny = true;
-      }
-
-      if (addedAny) setAddAiOpen(false);
-    } finally {
-      setAddAiLoading(false);
-    }
-  };
-  const autoExpandRunDetails = Boolean(
-    selectedRun && selectedRun.status !== "running" && arenaViewMode === "results"
-  );
+	  const headerSubtitle =
+	    session.title && session.title.trim().length > 0
+	      ? `${session.start_article} → ${session.destination_article}`
+	      : null;
+	  const canAddAi = Boolean(driverValue?.addAi && driverValue.capabilities.canAddAi);
+	  const defaultLayout = defaultLayoutForMode(session.mode);
+	  const isMultiplayerMobile = isMobile && session.mode === "multiplayer";
+	  const autoExpandRunDetails = Boolean(
+	    selectedRun && selectedRun.status !== "running" && arenaViewMode === "results"
+	  );
   const sessionAllRunsFinished =
     session.runs.length > 0 && session.runs.every((r) => r.status !== "running");
   const mapOnTopInResults =
@@ -1919,201 +1858,35 @@ export default function RaceArena({
 	              />
 	            )}
 
-	            {canAddAi && !isMultiplayerMobile && (
-	              <Dialog open={addAiOpen} onOpenChange={setAddAiOpen}>
-	                <DialogTrigger asChild>
-	                  <Button variant="outline" size="sm">
-	                    Add AI
-	                  </Button>
-	                </DialogTrigger>
-	                <DialogContent className="sm:max-w-lg">
-	                  <DialogHeader>
-	                    <DialogTitle>Add AI racer</DialogTitle>
-	                    <DialogDescription>
-	                      The server will run this AI to completion.
-	                    </DialogDescription>
-	                  </DialogHeader>
+		            {canAddAi && !isMultiplayerMobile && (
+		              <Dialog open={addAiOpen} onOpenChange={setAddAiOpen}>
+		                <DialogTrigger asChild>
+		                  <Button variant="outline" size="sm">
+		                    Add AI
+		                  </Button>
+		                </DialogTrigger>
+		                <DialogContent className="sm:max-w-lg">
+		                  <DialogHeader>
+		                    <DialogTitle>Add AI racer</DialogTitle>
+		                    <DialogDescription>
+		                      The server will run this AI to completion.
+		                    </DialogDescription>
+		                  </DialogHeader>
 
-	                  <div className="space-y-3">
-	                    <Popover open={addAiPresetsOpen} onOpenChange={setAddAiPresetsOpen}>
-	                      <PopoverTrigger asChild>
-	                        <Button variant="outline" size="sm" disabled={addAiLoading}>
-	                          Presets
-	                        </Button>
-	                      </PopoverTrigger>
-	                      <PopoverContent className="p-1 w-72" align="start">
-	                        <div className="px-2 py-1.5 text-xs text-muted-foreground">
-	                          Add multiple AI racers at once (additive).
-	                        </div>
-	                        <Button
-	                          type="button"
-	                          variant="ghost"
-	                          className="w-full justify-start"
-	                          disabled={addAiLoading || modelList.length === 0}
-	                          onClick={() => {
-	                            setAddAiPresetsOpen(false);
-	                            const models = Array.from(
-	                              new Set(modelList.map((m) => m.trim()).filter(Boolean))
-	                            );
-	                            void addAiPreset(models.map((model) => ({ model })));
-	                          }}
-	                        >
-	                          All preset models
-	                        </Button>
-	                        <Button
-	                          type="button"
-	                          variant="ghost"
-	                          className="w-full justify-start"
-	                          disabled={addAiLoading}
-	                          onClick={() => {
-	                            setAddAiPresetsOpen(false);
-	                            const model = "gpt-5.2";
-	                            const variants: Array<{
-	                              label: string;
-	                              reasoning_effort?: string;
-	                            }> = [
-	                              { label: "none" },
-	                              { label: "low", reasoning_effort: "low" },
-	                              { label: "medium", reasoning_effort: "medium" },
-	                              { label: "high", reasoning_effort: "high" },
-	                              { label: "xhigh", reasoning_effort: "xhigh" },
-	                            ];
-
-	                            void addAiPreset(
-	                              variants.map((variant) => ({
-	                                model,
-	                                player_name: `${model} (${variant.label})`,
-	                                reasoning_effort: variant.reasoning_effort,
-	                              }))
-	                            );
-	                          }}
-	                        >
-	                          GPT-5.2 reasoning sweep
-	                        </Button>
-	                      </PopoverContent>
-	                    </Popover>
-
-	                    <ModelPicker
-	                      label="Model"
-	                      value={aiModel}
-	                      onValueChange={setAiModel}
-	                      options={modelList}
-	                      placeholder="Type any LiteLLM model string"
-	                    />
-
-	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-	                      <div>
-	                        <Label className="text-xs">Display name (optional)</Label>
-	                        <Input
-	                          value={aiName}
-	                          onChange={(e) => setAiName(e.target.value)}
-	                          placeholder="Bot #1"
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div>
-	                        <Label className="text-xs">Reasoning effort (optional)</Label>
-	                        <Input
-	                          value={aiReasoningEffort}
-	                          onChange={(e) => setAiReasoningEffort(e.target.value)}
-	                          placeholder="low / medium / high"
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div className="sm:col-span-2">
-	                        <Label className="text-xs">API base override (optional)</Label>
-	                        <Input
-	                          value={aiApiBase}
-	                          onChange={(e) => setAiApiBase(e.target.value)}
-	                          placeholder="http://localhost:8001/v1"
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                    </div>
-
-	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-	                      <div>
-	                        <Label className="text-xs">Max steps</Label>
-	                        <Input
-	                          value={aiMaxSteps}
-	                          onChange={(e) => setAiMaxSteps(e.target.value)}
-	                          inputMode="numeric"
-	                          placeholder={`Default (${session.rules.max_hops})`}
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div>
-	                        <Label className="text-xs">Max links</Label>
-	                        <Input
-	                          value={aiMaxLinks}
-	                          onChange={(e) => setAiMaxLinks(e.target.value)}
-	                          inputMode="numeric"
-	                          placeholder={
-	                            session.rules.max_links === null
-	                              ? "Default (Unlimited)"
-	                              : `Default (${session.rules.max_links})`
-	                          }
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                      <div>
-	                        <Label className="text-xs">Max tokens</Label>
-	                        <Input
-	                          value={aiMaxTokens}
-	                          onChange={(e) => setAiMaxTokens(e.target.value)}
-	                          inputMode="numeric"
-	                          placeholder={
-	                            session.rules.max_tokens === null
-	                              ? "Default (Unlimited)"
-	                              : `Default (${session.rules.max_tokens})`
-	                          }
-	                          className="mt-1"
-	                        />
-	                      </div>
-	                    </div>
-	                  </div>
-
-	                  <DialogFooter>
-	                    <DialogClose asChild>
-	                      <Button variant="outline">Cancel</Button>
-	                    </DialogClose>
-	                    <Button
-	                      disabled={addAiLoading || aiModel.trim().length === 0}
-	                      onClick={() => {
-	                        if (!driverValue?.addAi) return;
-	                        if (aiModel.trim().length === 0) return;
-	                        setAddAiLoading(true);
-	                        void (async () => {
-	                          try {
-	                            const ok = await driverValue.addAi({
-	                              model: aiModel.trim(),
-	                              player_name: aiName.trim() || undefined,
-	                              api_base: aiApiBase.trim() || undefined,
-	                              reasoning_effort: aiReasoningEffort.trim() || undefined,
-	                              max_steps: toOptionalPositiveInt(aiMaxSteps),
-	                              max_links: toOptionalPositiveInt(aiMaxLinks),
-	                              max_tokens: toOptionalPositiveInt(aiMaxTokens),
-	                            });
-	                            if (!ok) return;
-	                            setAiName("");
-	                            setAiApiBase("");
-	                            setAiReasoningEffort("");
-	                            setAiMaxSteps("");
-	                            setAiMaxLinks("");
-	                            setAiMaxTokens("");
-	                            setAddAiOpen(false);
-	                          } finally {
-	                            setAddAiLoading(false);
-	                          }
-	                        })();
-	                      }}
-	                    >
-	                      {addAiLoading ? "Adding…" : "Add AI"}
-	                    </Button>
-	                  </DialogFooter>
-	                </DialogContent>
-	              </Dialog>
-	            )}
+		                  <AddAiForm
+		                    mode="dialog"
+		                    modelList={modelList}
+		                    defaults={session.rules}
+		                    existingRuns={race?.runs ?? session.runs}
+		                    onAddAi={async (args) => {
+		                      if (!driverValue?.addAi) return false;
+		                      return driverValue.addAi(args);
+		                    }}
+		                    onClose={() => setAddAiOpen(false)}
+		                  />
+		                </DialogContent>
+		              </Dialog>
+		            )}
 	            {onNewRace && (
 	              <Button variant="secondary" size="sm" onClick={onNewRace}>
 	                New race
@@ -3401,12 +3174,20 @@ export default function RaceArena({
 		                                : "—"}
 		                            </div>
 		                          </div>
-		                          <div>
-		                            <div className="text-xs text-muted-foreground">LiteLLM params</div>
-		                            <div className="mt-0.5 text-xs text-muted-foreground">
-		                              api_base: {selectedRun.api_base || "(default)"}
+	                          <div>
+	                            <div className="text-xs text-muted-foreground">Model settings</div>
+	                            <div className="mt-0.5 text-xs text-muted-foreground">
+	                              api_base: {selectedRun.api_base || "(default)"}
 	                              {" • "}
-	                              reasoning_effort: {selectedRun.reasoning_effort || "(default)"}
+	                              openai_api_mode: {selectedRun.openai_api_mode || "(default)"}
+	                              {" • "}
+	                              openai_reasoning_effort:{" "}
+	                              {selectedRun.openai_reasoning_effort || "(default)"}
+	                              {" • "}
+	                              anthropic_thinking_budget_tokens:{" "}
+	                              {typeof selectedRun.anthropic_thinking_budget_tokens === "number"
+	                                ? selectedRun.anthropic_thinking_budget_tokens
+	                                : "(default)"}
 	                              {" • "}
 	                              max_tokens:{" "}
 	                              {typeof selectedRun.max_tokens === "number"
@@ -3959,23 +3740,31 @@ export default function RaceArena({
 
                 <Separator className="my-3" />
                 <div className="flex-1 min-h-0">
-                  <ForceDirectedGraph
-                    runs={forceGraphRuns}
-                    runId={selectedForceGraphRunId}
-                    focusColor={selectedRunColor ?? undefined}
-                    compareRunIds={compareEnabled ? compareRunIndices : undefined}
-                    compareColorByRunId={compareEnabled ? compareColorByRunId : undefined}
-                    compareHighlightStep={compareEnabled ? compareHopClamped : undefined}
-                    highlightStep={
-                      compareEnabled
-                        ? compareHopClamped
-                        : replayEnabled
-                        ? selectedReplayStepIndex
-                        : undefined
+                  <Suspense
+                    fallback={
+                      <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">
+                        Loading map...
+                      </div>
                     }
-                    onNodeSelect={handleMapNodeSelect}
-                    includeGraphLinks
-                  />
+                  >
+                    <ForceDirectedGraph
+                      runs={forceGraphRuns}
+                      runId={selectedForceGraphRunId}
+                      focusColor={selectedRunColor ?? undefined}
+                      compareRunIds={compareEnabled ? compareRunIndices : undefined}
+                      compareColorByRunId={compareEnabled ? compareColorByRunId : undefined}
+                      compareHighlightStep={compareEnabled ? compareHopClamped : undefined}
+                      highlightStep={
+                        compareEnabled
+                          ? compareHopClamped
+                          : replayEnabled
+                          ? selectedReplayStepIndex
+                          : undefined
+                      }
+                      onNodeSelect={handleMapNodeSelect}
+                      includeGraphLinks
+                    />
+                  </Suspense>
                 </div>
               </Card>
             </div>

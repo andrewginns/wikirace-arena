@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,6 +6,7 @@ import { StatusChip } from "@/components/ui/status-chip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { ErrorCallout, ServerOfflineCallout } from "@/components/ui/callouts";
 import {
   Dialog,
   DialogClose,
@@ -28,10 +27,22 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { VirtualizedCombobox } from "@/components/ui/virtualized-combobox";
 import ModelPicker from "@/components/model-picker";
 import WikiArticlePreview from "@/components/wiki-article-preview";
+import { pickRandom, pickRandomDistinctPair } from "@/lib/matchup-random";
+import {
+  allPresetModelDrafts,
+  DEFAULT_MODEL_ID,
+  gpt52ReasoningSweepDrafts,
+} from "@/lib/model-presets";
 import { prefersReducedMotion } from "@/lib/motion";
+import { RACE_PRESETS, type RacePresetId } from "@/lib/race-presets";
+import {
+  computeDuplicateSummary,
+  participantKey,
+  removeDuplicateDrafts,
+} from "@/lib/race-participants";
+import { makeId } from "@/lib/session-utils";
 import { cn } from "@/lib/utils";
 import {
-  AlertTriangle,
   ArrowLeftRight,
   Bot,
   HelpCircle,
@@ -41,93 +52,32 @@ import {
   Trash2,
   Trophy,
   Users,
-  WifiOff,
 } from "lucide-react";
 import popularNodes from "../../../results/popular_nodes.json";
 import type { RaceConfig, RaceParticipantDraft, RaceRules } from "./race-types";
 import { RaceSetupStickyBar } from "./race-setup-sticky-bar";
 
-function makeId(prefix: string) {
-  const randomId =
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return `${prefix}_${randomId}`;
-}
-
 function rulesEqual(a: RaceRules, b: RaceRules) {
   return a.maxHops === b.maxHops && a.maxLinks === b.maxLinks && a.maxTokens === b.maxTokens;
 }
 
-function participantKey(p: RaceParticipantDraft) {
-  if (p.kind === "human") {
-    const normalized = p.name.trim().toLowerCase();
-    return `human:${normalized || "human"}`;
-  }
-  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.reasoningEffort || ""}`;
-}
-
-function normalizedHumanName(name: string) {
-  const trimmed = name.trim();
-  return trimmed.length > 0 ? trimmed : "Human";
-}
-
-function participantDuplicateLabel(p: RaceParticipantDraft) {
-  if (p.kind === "human") return normalizedHumanName(p.name);
-  const model = p.model || "llm";
-  const effort = p.reasoningEffort?.trim();
-  const apiBase = p.apiBase?.trim();
-  const parts: string[] = [];
-  if (effort) parts.push(`effort: ${effort}`);
-  if (apiBase) parts.push(`api_base: ${apiBase}`);
-  return parts.length > 0 ? `${model} (${parts.join(" • ")})` : model;
-}
-
 type Preset = {
-  id: "sprint" | "classic" | "marathon";
+  id: RacePresetId;
   name: string;
   description: string;
   rules: RaceRules;
 };
 
-const PRESETS: Preset[] = [
-  {
-    id: "sprint",
-    name: "Sprint",
-    description: "Fast rounds. Great for humans.",
-    rules: {
-      maxHops: 12,
-      maxLinks: 200,
-      maxTokens: 1500,
-      includeImageLinks: false,
-      disableLinksView: false,
-    },
+const PRESETS: Preset[] = RACE_PRESETS.map((preset) => ({
+  id: preset.id,
+  name: preset.name,
+  description: preset.description,
+  rules: {
+    ...preset.budgets,
+    includeImageLinks: false,
+    disableLinksView: false,
   },
-  {
-    id: "classic",
-    name: "Classic",
-    description: "Balanced default.",
-    rules: {
-      maxHops: 20,
-      maxLinks: null,
-      maxTokens: null,
-      includeImageLinks: false,
-      disableLinksView: false,
-    },
-  },
-  {
-    id: "marathon",
-    name: "Marathon",
-    description: "More hops + more thinking time.",
-    rules: {
-      maxHops: 35,
-      maxLinks: null,
-      maxTokens: null,
-      includeImageLinks: false,
-      disableLinksView: false,
-    },
-  },
-];
+}));
 
 export default function RaceSetup({
   initialStartPage,
@@ -165,13 +115,15 @@ export default function RaceSetup({
     if (initialTargetPage) setTargetPage(initialTargetPage);
   }, [initialTargetPage]);
 
+  const preferredModel = DEFAULT_MODEL_ID;
+
   const [participants, setParticipants] = useState<RaceParticipantDraft[]>([
     { id: makeId("p"), kind: "human", name: "You" },
     {
       id: makeId("p"),
       kind: "llm",
       name: "",
-      model: modelList.includes("gpt-5-mini") ? "gpt-5-mini" : modelList[0],
+      model: modelList.includes(preferredModel) ? preferredModel : modelList[0],
     },
   ]);
 
@@ -201,46 +153,17 @@ export default function RaceSetup({
     targetPage.trim().length > 0 &&
     startPage.trim() !== targetPage.trim();
 
+  const randomPool = useMemo(() => {
+    if (popularNodes.length > 0) return popularNodes;
+    if (allArticles.length > 0) return allArticles;
+    return [startPage, targetPage];
+  }, [allArticles, startPage, targetPage]);
+
   const duplicateParticipants = useMemo(() => {
-    const counts = new Map<string, number>();
-    const firstByKey = new Map<string, RaceParticipantDraft>();
-
-    for (const p of participants) {
-      const key = participantKey(p);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-      if (!firstByKey.has(key)) firstByKey.set(key, p);
-    }
-
-    const duplicateKeys = new Set<string>();
-    const duplicateIds = new Set<string>();
-    const labels: Array<{ label: string; count: number }> = [];
-
-    for (const [key, count] of counts.entries()) {
-      if (count <= 1) continue;
-      duplicateKeys.add(key);
-      const first = firstByKey.get(key);
-      labels.push({
-        label: first ? participantDuplicateLabel(first) : key,
-        count,
-      });
-    }
-
-    labels.sort((a, b) => a.label.localeCompare(b.label));
-
-    for (const p of participants) {
-      const key = participantKey(p);
-      if (duplicateKeys.has(key)) duplicateIds.add(p.id);
-    }
-
-    return { duplicateKeys, duplicateIds, labels };
+    return computeDuplicateSummary(participants);
   }, [participants]);
 
-  const duplicateSummary =
-    duplicateParticipants.duplicateKeys.size > 0
-      ? duplicateParticipants.labels
-          .map(({ label, count }) => `${label} (×${count})`)
-          .join(", ")
-      : null;
+  const duplicateSummary = duplicateParticipants.summary;
 
   const errors: string[] = [];
   if (!pagesValid) errors.push("Pick two different pages.");
@@ -279,9 +202,22 @@ export default function RaceSetup({
   const applyParticipantPreset = (
     presetId: "you_vs_fast" | "you_vs_two" | "model_showdown" | "hotseat"
   ) => {
-    const fastModel = pickModel("gpt-5-mini", "gpt-5-nano", modelList[0]);
-    const secondModel = pickModel("gpt-5-nano", "gpt-5.2", modelList[1], modelList[0]);
-    const bigModel = pickModel("gpt-5.2", "gpt-5.1", modelList[0]);
+    const fastModel = pickModel(
+      DEFAULT_MODEL_ID,
+      "openai-responses:gpt-5-nano",
+      modelList[0]
+    );
+    const secondModel = pickModel(
+      "openai-responses:gpt-5-nano",
+      "openai-responses:gpt-5.2",
+      modelList[1],
+      modelList[0]
+    );
+    const bigModel = pickModel(
+      "openai-responses:gpt-5.2",
+      "openai-responses:gpt-5.1",
+      modelList[0]
+    );
 
     if (presetId === "you_vs_fast") {
       setParticipants([
@@ -317,26 +253,16 @@ export default function RaceSetup({
   };
 
   const selectRandomArticle = (setter: (article: string) => void) => {
-    if (popularNodes.length > 0) {
-      const randomIndex = Math.floor(Math.random() * popularNodes.length);
-      setter(popularNodes[randomIndex]);
-    }
+    const picked = pickRandom(randomPool);
+    if (!picked) return;
+    setter(picked);
   };
 
   const selectRandomMatchup = () => {
-    if (popularNodes.length === 0) return;
-    const pick = () => popularNodes[Math.floor(Math.random() * popularNodes.length)];
-
-    const start = pick();
-    let target = pick();
-    let tries = 0;
-    while (target === start && tries < 10) {
-      target = pick();
-      tries += 1;
-    }
-
-    setStartPage(start);
-    setTargetPage(target);
+    const matchup = pickRandomDistinctPair(randomPool);
+    if (!matchup) return;
+    setStartPage(matchup.start);
+    setTargetPage(matchup.target);
   };
 
   const applyRecommendedPlayers = (
@@ -359,7 +285,7 @@ export default function RaceSetup({
   };
 
   const addLlm = () => {
-    const model = modelList.includes("gpt-5-mini") ? "gpt-5-mini" : modelList[0];
+    const model = modelList.includes(preferredModel) ? preferredModel : modelList[0];
     setParticipants((prev) => [
       ...prev,
       {
@@ -389,33 +315,24 @@ export default function RaceSetup({
   };
 
   const addAllPresetModels = () => {
-    const models = Array.from(new Set(modelList)).filter(Boolean);
     addParticipantDrafts(
-      models.map((model) => ({
+      allPresetModelDrafts(modelList).map((draft) => ({
         id: makeId("p"),
         kind: "llm",
         name: "",
-        model,
+        model: draft.model,
       }))
     );
   };
 
   const addGpt52ReasoningSweep = () => {
-    const model = "gpt-5.2";
-    const variants: Array<{ label: string; reasoningEffort?: string }> = [
-      { label: "none" },
-      { label: "low", reasoningEffort: "low" },
-      { label: "medium", reasoningEffort: "medium" },
-      { label: "high", reasoningEffort: "high" },
-      { label: "xhigh", reasoningEffort: "xhigh" },
-    ];
     addParticipantDrafts(
-      variants.map((variant) => ({
+      gpt52ReasoningSweepDrafts().map((draft) => ({
         id: makeId("p"),
         kind: "llm",
-        name: `${model} (${variant.label})`,
-        model,
-        reasoningEffort: variant.reasoningEffort,
+        name: draft.name || "",
+        model: draft.model,
+        openaiReasoningEffort: draft.openaiReasoningEffort,
       }))
     );
   };
@@ -434,15 +351,7 @@ export default function RaceSetup({
   };
 
   const removeDuplicateParticipants = () => {
-    setParticipants((prev) => {
-      const seen = new Set<string>();
-      return prev.filter((p) => {
-        const key = participantKey(p);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    });
+    setParticipants((prev) => removeDuplicateDrafts(prev));
   };
 
   const startRace = () => {
@@ -1114,11 +1023,42 @@ export default function RaceSetup({
 	                  </div>
 	                ) : (
 	                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-	                    {participants.map((p) => {
-	                      const isDuplicate = duplicateParticipants.duplicateIds.has(p.id);
+							{participants.map((p) => {
+							  const isDuplicate = duplicateParticipants.duplicateIds.has(p.id);
+							  const optionDetails: string[] = [];
+							  if (p.kind === "llm") {
+							    const effort = p.openaiReasoningEffort?.trim();
+							    const apiMode = p.openaiApiMode?.trim();
+							    const apiBase = p.apiBase?.trim();
+							    const summary = p.openaiReasoningSummary?.trim();
+							    const anthropicBudget =
+							      typeof p.anthropicThinkingBudgetTokens === "number"
+							        ? p.anthropicThinkingBudgetTokens
+							        : null;
+							    const googleConfig = p.googleThinkingConfig;
 
-	                      return (
-	                        <div
+							    if (effort) optionDetails.push(`openai_reasoning_effort: ${effort}`);
+							    if (apiMode) optionDetails.push(`openai_api_mode: ${apiMode}`);
+							    if (summary) optionDetails.push(`openai_reasoning_summary: ${summary}`);
+							    if (anthropicBudget) {
+							      optionDetails.push(
+							        `anthropic_thinking_budget_tokens: ${anthropicBudget}`
+							      );
+							    }
+							    if (apiBase) optionDetails.push(`api_base: ${apiBase}`);
+							    if (googleConfig && Object.keys(googleConfig).length > 0) {
+							      try {
+							        optionDetails.push(
+							          `google_thinking_config: ${JSON.stringify(googleConfig)}`
+							        );
+							      } catch {
+							        optionDetails.push("google_thinking_config: (set)");
+							      }
+							    }
+							  }
+
+							  return (
+							    <div
 	                          key={p.id}
 	                          className={cn(
 	                            "rounded-lg border p-3 bg-card flex flex-col gap-3",
@@ -1139,14 +1079,14 @@ export default function RaceSetup({
 	                                {isDuplicate && (
 	                                  <StatusChip status="error">Duplicate</StatusChip>
 	                                )}
-	                                {p.kind === "llm" && p.reasoningEffort?.trim() && (
+	                                {p.kind === "llm" && p.openaiReasoningEffort?.trim() && (
 	                                  <Badge variant="outline" className="text-[11px]">
-	                                    effort: {p.reasoningEffort.trim()}
+	                                    openai_effort: {p.openaiReasoningEffort.trim()}
 	                                  </Badge>
 	                                )}
 	                              </div>
-	                            </div>
-	                            <Button
+							        </div>
+							        <Button
 	                              variant="ghost"
 	                              size="icon"
 	                              className="text-muted-foreground"
@@ -1155,10 +1095,38 @@ export default function RaceSetup({
 	                              disabled={participants.length <= 1}
 	                            >
 	                              <Trash2 className="h-4 w-4" />
-	                            </Button>
-	                          </div>
+							        </Button>
+							      </div>
 
-	                          <div className="grid grid-cols-1 gap-3">
+							      {p.kind === "llm" && optionDetails.length > 0 && (
+							        <TooltipProvider>
+							          <Tooltip>
+							            <TooltipTrigger asChild>
+							              <button
+							                type="button"
+							                className="inline-flex items-center gap-1 text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2"
+							              >
+							                <Settings2 className="h-3 w-3" aria-hidden="true" />
+							                Options set ({optionDetails.length})
+							              </button>
+							            </TooltipTrigger>
+							            <TooltipContent side="top" align="start" className="max-w-sm">
+							              <div className="space-y-1">
+							                <div className="text-xs font-medium">Model options</div>
+							                <div className="space-y-0.5">
+							                  {optionDetails.map((detail, idx) => (
+							                    <div key={`${idx}-${detail}`} className="text-xs">
+							                      {detail}
+							                    </div>
+							                  ))}
+							                </div>
+							              </div>
+							            </TooltipContent>
+							          </Tooltip>
+							        </TooltipProvider>
+							      )}
+
+							      <div className="grid grid-cols-1 gap-3">
 	                            {p.kind === "human" && (
 	                              <div className="space-y-2">
 	                                <Label className="text-xs text-muted-foreground">
@@ -1184,7 +1152,7 @@ export default function RaceSetup({
 	                                      updateParticipant(p.id, { model: v })
 	                                    }
 	                                    options={modelList}
-	                                    description="Pick from the list or type a LiteLLM model string."
+	                                    description="Pick from the list or type a PydanticAI model id."
 	                                  />
 	                                </div>
 
@@ -1223,16 +1191,54 @@ export default function RaceSetup({
 	                                    </div>
 	                                    <div className="space-y-2">
 	                                      <Label className="text-xs text-muted-foreground">
-	                                        `reasoning_effort` (optional)
+	                                        `openai_api_mode` (optional)
 	                                      </Label>
 	                                      <Input
-	                                        value={p.reasoningEffort || ""}
+	                                        value={p.openaiApiMode || ""}
 	                                        onChange={(e) =>
 	                                          updateParticipant(p.id, {
-	                                            reasoningEffort: e.target.value || undefined,
+	                                            openaiApiMode: e.target.value || undefined,
 	                                          })
 	                                        }
-	                                        placeholder="e.g. low / medium / high"
+	                                        placeholder="chat / responses"
+	                                      />
+	                                    </div>
+	                                    <div className="space-y-2">
+	                                      <Label className="text-xs text-muted-foreground">
+	                                        `openai_reasoning_effort` (optional)
+	                                      </Label>
+	                                      <Input
+	                                        value={p.openaiReasoningEffort || ""}
+	                                        onChange={(e) =>
+	                                          updateParticipant(p.id, {
+	                                            openaiReasoningEffort: e.target.value || undefined,
+	                                          })
+	                                        }
+	                                        placeholder="low / medium / high / xhigh"
+	                                      />
+	                                    </div>
+	                                    <div className="space-y-2">
+	                                      <Label className="text-xs text-muted-foreground">
+	                                        `anthropic_thinking_budget_tokens` (optional)
+	                                      </Label>
+	                                      <Input
+	                                        value={
+	                                          typeof p.anthropicThinkingBudgetTokens === "number"
+	                                            ? String(p.anthropicThinkingBudgetTokens)
+	                                            : ""
+	                                        }
+	                                        onChange={(e) => {
+	                                          const raw = e.target.value.trim();
+	                                          const parsed = raw.length > 0 ? Number(raw) : NaN;
+	                                          updateParticipant(p.id, {
+	                                            anthropicThinkingBudgetTokens:
+	                                              Number.isFinite(parsed) && parsed > 0
+	                                                ? parsed
+	                                                : undefined,
+	                                          });
+	                                        }}
+	                                        inputMode="numeric"
+	                                        placeholder="e.g. 1024"
 	                                      />
 	                                    </div>
 	                                  </div>
@@ -1254,43 +1260,37 @@ export default function RaceSetup({
 	                    "ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
 	                )}
 	                id="start-race-section"
-	              >
-	                {!isServerConnected && (
-	                  <div className="flex items-start gap-2 rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
-	                    <WifiOff className="mt-0.5 h-4 w-4 shrink-0 text-status-active" aria-hidden="true" />
-	                    <div>
-	                      Server connection issue. The game may be unavailable until the API
-	                      is running.
-	                    </div>
-	                  </div>
-	                )}
-
-	                {(errors.length > 0 || duplicateSummary) && (
-	                  <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground">
-	                    <div className="flex items-start gap-2">
-	                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
-	                      <div className="space-y-1">
-	                        {errors.map((err) => (
-	                          <div key={err}>{err}</div>
-	                        ))}
-	                        {duplicateSummary && (
-	                          <div className="flex flex-wrap items-center justify-between gap-2">
-	                            <div>Duplicates: {duplicateSummary}</div>
-	                            <Button
-	                              type="button"
-	                              variant="outline"
-	                              size="sm"
-	                              className="h-7"
-	                              onClick={removeDuplicateParticipants}
-	                            >
-	                              Remove duplicates
-	                            </Button>
-	                          </div>
-	                        )}
-	                      </div>
-	                    </div>
-	                  </div>
-	                )}
+		              >
+		                {!isServerConnected && (
+		                  <ServerOfflineCallout tone="active" size="xs">
+		                    Server connection issue. The game may be unavailable until the API is
+		                    running.
+		                  </ServerOfflineCallout>
+		                )}
+		
+		                {(errors.length > 0 || duplicateSummary) && (
+		                  <ErrorCallout size="xs">
+		                    <div className="space-y-1">
+		                      {errors.map((err) => (
+		                        <div key={err}>{err}</div>
+		                      ))}
+		                      {duplicateSummary && (
+		                        <div className="flex flex-wrap items-center justify-between gap-2">
+		                          <div>Duplicates: {duplicateSummary}</div>
+		                          <Button
+		                            type="button"
+		                            variant="outline"
+		                            size="sm"
+		                            className="h-7"
+		                            onClick={removeDuplicateParticipants}
+		                          >
+		                            Remove duplicates
+		                          </Button>
+		                        </div>
+		                      )}
+		                    </div>
+		                  </ErrorCallout>
+		                )}
 
 	                <div className="space-y-2">
 	                  <Button

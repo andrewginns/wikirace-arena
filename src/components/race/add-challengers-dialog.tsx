@@ -1,5 +1,3 @@
-"use client";
-
 import type { ReactElement } from "react";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -20,45 +18,24 @@ import { Badge } from "@/components/ui/badge";
 import { StatusChip } from "@/components/ui/status-chip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
+import { ErrorCallout, ServerOfflineCallout } from "@/components/ui/callouts";
 import { cn } from "@/lib/utils";
 import ModelPicker from "@/components/model-picker";
-import { AlertTriangle, Bot, Plus, Shuffle, Trash2, User, Users, WifiOff } from "lucide-react";
+import { Bot, Plus, Shuffle, Trash2, User, Users } from "lucide-react";
 import type { RaceParticipantDraft } from "./race-types";
+import {
+  allPresetModelDrafts,
+  DEFAULT_MODEL_ID,
+  gpt52ReasoningSweepDrafts,
+} from "@/lib/model-presets";
+import {
+  computeDuplicateSummary,
+  participantKey,
+  removeDuplicateDrafts,
+} from "@/lib/race-participants";
 import { startHumanRun, startLlmRun, useSessionsStore } from "@/lib/session-store";
-import { sessionDisplayName } from "@/lib/session-utils";
+import { makeId, sessionDisplayName } from "@/lib/session-utils";
 import type { RunV1 } from "@/lib/session-types";
-
-function makeId(prefix: string) {
-  const randomId =
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  return `${prefix}_${randomId}`;
-}
-
-function participantKey(p: RaceParticipantDraft) {
-  if (p.kind === "human") {
-    const normalized = p.name.trim().toLowerCase();
-    return `human:${normalized || "human"}`;
-  }
-  return `llm:${p.model || ""}:${p.apiBase || ""}:${p.reasoningEffort || ""}`;
-}
-
-function normalizedHumanName(name: string) {
-  const trimmed = name.trim();
-  return trimmed.length > 0 ? trimmed : "Human";
-}
-
-function participantDuplicateLabel(p: RaceParticipantDraft) {
-  if (p.kind === "human") return normalizedHumanName(p.name);
-  const model = p.model || "llm";
-  const effort = p.reasoningEffort?.trim();
-  const apiBase = p.apiBase?.trim();
-  const parts: string[] = [];
-  if (effort) parts.push(`effort: ${effort}`);
-  if (apiBase) parts.push(`api_base: ${apiBase}`);
-  return parts.length > 0 ? `${model} (${parts.join(" • ")})` : model;
-}
 
 const DEFAULT_RULES = { max_hops: 20, max_links: null, max_tokens: null };
 
@@ -83,45 +60,10 @@ export default function AddChallengersDialog({
   const rules = session?.rules || DEFAULT_RULES;
 
   const duplicateParticipants = useMemo(() => {
-    const counts = new Map<string, number>();
-    const firstByKey = new Map<string, RaceParticipantDraft>();
-
-    for (const p of participants) {
-      const key = participantKey(p);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-      if (!firstByKey.has(key)) firstByKey.set(key, p);
-    }
-
-    const duplicateKeys = new Set<string>();
-    const duplicateIds = new Set<string>();
-    const labels: Array<{ label: string; count: number }> = [];
-
-    for (const [key, count] of counts.entries()) {
-      if (count <= 1) continue;
-      duplicateKeys.add(key);
-      const first = firstByKey.get(key);
-      labels.push({
-        label: first ? participantDuplicateLabel(first) : key,
-        count,
-      });
-    }
-
-    labels.sort((a, b) => a.label.localeCompare(b.label));
-
-    for (const p of participants) {
-      const key = participantKey(p);
-      if (duplicateKeys.has(key)) duplicateIds.add(p.id);
-    }
-
-    return { duplicateKeys, duplicateIds, labels };
+    return computeDuplicateSummary(participants);
   }, [participants]);
 
-  const duplicateSummary =
-    duplicateParticipants.duplicateKeys.size > 0
-      ? duplicateParticipants.labels
-          .map(({ label, count }) => `${label} (×${count})`)
-          .join(", ")
-      : null;
+  const duplicateSummary = duplicateParticipants.summary;
 
   const canStart = Boolean(session) && participants.length > 0 && duplicateSummary === null;
   const disabledReason = useMemo(() => {
@@ -140,7 +82,8 @@ export default function AddChallengersDialog({
   };
 
   const addLlm = () => {
-    const model = modelList.includes("gpt-5-mini") ? "gpt-5-mini" : modelList[0] || "llm";
+    const model =
+      modelList.includes(DEFAULT_MODEL_ID) ? DEFAULT_MODEL_ID : modelList[0] || "llm";
     setParticipants((prev) => [
       ...prev,
       { id: makeId("p"), kind: "llm", name: "", model },
@@ -165,33 +108,24 @@ export default function AddChallengersDialog({
   };
 
   const addAllPresetModels = () => {
-    const models = Array.from(new Set(modelList)).filter(Boolean);
     addParticipantDrafts(
-      models.map((model) => ({
+      allPresetModelDrafts(modelList).map((draft) => ({
         id: makeId("p"),
         kind: "llm",
         name: "",
-        model,
+        model: draft.model,
       }))
     );
   };
 
   const addGpt52ReasoningSweep = () => {
-    const model = "gpt-5.2";
-    const variants: Array<{ label: string; reasoningEffort?: string }> = [
-      { label: "none" },
-      { label: "low", reasoningEffort: "low" },
-      { label: "medium", reasoningEffort: "medium" },
-      { label: "high", reasoningEffort: "high" },
-      { label: "xhigh", reasoningEffort: "xhigh" },
-    ];
     addParticipantDrafts(
-      variants.map((variant) => ({
+      gpt52ReasoningSweepDrafts().map((draft) => ({
         id: makeId("p"),
         kind: "llm",
-        name: `${model} (${variant.label})`,
-        model,
-        reasoningEffort: variant.reasoningEffort,
+        name: draft.name || "",
+        model: draft.model,
+        openaiReasoningEffort: draft.openaiReasoningEffort,
       }))
     );
   };
@@ -205,15 +139,7 @@ export default function AddChallengersDialog({
   };
 
   const removeDuplicateParticipants = () => {
-    setParticipants((prev) => {
-      const seen = new Set<string>();
-      return prev.filter((p) => {
-        const key = participantKey(p);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    });
+    setParticipants((prev) => removeDuplicateDrafts(prev));
   };
 
   const clearParticipants = () => {
@@ -244,7 +170,11 @@ export default function AddChallengersDialog({
           model,
           playerName: name.length > 0 && name !== model ? name : undefined,
           apiBase: p.apiBase,
-          reasoningEffort: p.reasoningEffort,
+          openaiApiMode: p.openaiApiMode,
+          openaiReasoningEffort: p.openaiReasoningEffort,
+          openaiReasoningSummary: p.openaiReasoningSummary,
+          anthropicThinkingBudgetTokens: p.anthropicThinkingBudgetTokens,
+          googleThinkingConfig: p.googleThinkingConfig,
           maxSteps: rules.max_hops,
           maxLinks: rules.max_links,
           maxTokens: rules.max_tokens,
@@ -387,9 +317,9 @@ export default function AddChallengersDialog({
                       {isDuplicate && (
                         <StatusChip status="error">Duplicate</StatusChip>
                       )}
-                      {p.kind === "llm" && p.reasoningEffort?.trim() && (
+                      {p.kind === "llm" && p.openaiReasoningEffort?.trim() && (
                         <Badge variant="outline" className="text-[11px]">
-                          effort: {p.reasoningEffort.trim()}
+                          openai_effort: {p.openaiReasoningEffort.trim()}
                         </Badge>
                       )}
                     </div>
@@ -424,7 +354,7 @@ export default function AddChallengersDialog({
                             value={p.model}
                             onValueChange={(v) => updateParticipant(p.id, { model: v })}
                             options={modelList}
-                            description="Pick from the list or type any LiteLLM model string."
+                            description="Pick from the list or type any PydanticAI model id."
                           />
                         </div>
 
@@ -459,16 +389,54 @@ export default function AddChallengersDialog({
                             </div>
                             <div className="space-y-2">
                               <Label className="text-xs text-muted-foreground">
-                                `reasoning_effort` (optional)
+                                `openai_api_mode` (optional)
                               </Label>
                               <Input
-                                value={p.reasoningEffort || ""}
+                                value={p.openaiApiMode || ""}
                                 onChange={(e) =>
                                   updateParticipant(p.id, {
-                                    reasoningEffort: e.target.value || undefined,
+                                    openaiApiMode: e.target.value || undefined,
                                   })
                                 }
-                                placeholder="e.g. low / medium / high"
+                                placeholder="chat / responses"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-xs text-muted-foreground">
+                                `openai_reasoning_effort` (optional)
+                              </Label>
+                              <Input
+                                value={p.openaiReasoningEffort || ""}
+                                onChange={(e) =>
+                                  updateParticipant(p.id, {
+                                    openaiReasoningEffort: e.target.value || undefined,
+                                  })
+                                }
+                                placeholder="low / medium / high / xhigh"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-xs text-muted-foreground">
+                                `anthropic_thinking_budget_tokens` (optional)
+                              </Label>
+                              <Input
+                                value={
+                                  typeof p.anthropicThinkingBudgetTokens === "number"
+                                    ? String(p.anthropicThinkingBudgetTokens)
+                                    : ""
+                                }
+                                onChange={(e) => {
+                                  const raw = e.target.value.trim();
+                                  const parsed = raw.length > 0 ? Number(raw) : NaN;
+                                  updateParticipant(p.id, {
+                                    anthropicThinkingBudgetTokens:
+                                      Number.isFinite(parsed) && parsed > 0
+                                        ? parsed
+                                        : undefined,
+                                  });
+                                }}
+                                inputMode="numeric"
+                                placeholder="e.g. 1024"
                               />
                             </div>
                           </div>
@@ -480,35 +448,33 @@ export default function AddChallengersDialog({
                 );
               })}
             </div>
-          )}
+	        )}
 
-          {!isServerConnected && (
-            <div className="flex items-start gap-2 rounded-md border border-status-active/30 bg-status-active/10 p-3 text-xs text-foreground">
-              <WifiOff className="mt-0.5 h-4 w-4 shrink-0 text-status-active" aria-hidden="true" />
-              <div>
-                Server connection issue. LLM runs may be unavailable until the API is running.
-              </div>
-            </div>
-          )}
-        </div>
+	        {!isServerConnected && (
+	          <ServerOfflineCallout tone="active" size="xs">
+	            Server connection issue. LLM runs may be unavailable until the API is running.
+	          </ServerOfflineCallout>
+	        )}
+	      </div>
 
-        {duplicateSummary && (
-          <div className="rounded-md border border-status-error/30 bg-status-error/10 p-3 text-xs text-foreground flex flex-wrap items-start justify-between gap-2">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-status-error" aria-hidden="true" />
-              <div>Duplicates: {duplicateSummary}</div>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7"
-              onClick={removeDuplicateParticipants}
-            >
-              Remove duplicates
-            </Button>
-          </div>
-        )}
+	      {duplicateSummary && (
+	        <ErrorCallout
+	          size="xs"
+	          right={
+	            <Button
+	              type="button"
+	              variant="outline"
+	              size="sm"
+	              className="h-7"
+	              onClick={removeDuplicateParticipants}
+	            >
+	              Remove duplicates
+	            </Button>
+	          }
+	        >
+	          <div>Duplicates: {duplicateSummary}</div>
+	        </ErrorCallout>
+	      )}
 
         <Separator />
 

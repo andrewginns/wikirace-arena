@@ -1,5 +1,3 @@
-"use client";
-
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useState, useEffect, useRef } from "react";
@@ -36,6 +34,8 @@ interface RunsListProps {
   onToggleRunSelected?: (runId: number) => void;
 }
 
+type AutoplaySpeed = "slow" | "normal" | "fast";
+
 export default function RunsList({
   runs,
   onSelectRun,
@@ -46,15 +46,19 @@ export default function RunsList({
   onToggleRunSelected,
 }: RunsListProps) {
   const [isPlaying, setIsPlaying] = useState(true);
-  const [autoplaySpeed, setAutoplaySpeed] = useState<"slow" | "normal" | "fast">(
-    "normal"
-  );
+  const [autoplaySpeed, setAutoplaySpeed] = useState<AutoplaySpeed>("normal");
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const runItemsRef = useRef<Map<number, HTMLDivElement>>(new Map());
   const userScrollLockRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   const programmaticScrollTimeoutRef = useRef<number | null>(null);
+
+  const handleAutoplaySpeedChange = (value: string) => {
+    if (value === "slow" || value === "normal" || value === "fast") {
+      setAutoplaySpeed(value);
+    }
+  };
 
   useEffect(() => {
     if (pauseToken === null || typeof pauseToken === "undefined") return;
@@ -214,7 +218,7 @@ export default function RunsList({
             <Tooltip>
               <TooltipTrigger asChild>
                 <div>
-                  <Select value={autoplaySpeed} onValueChange={setAutoplaySpeed}>
+                  <Select value={autoplaySpeed} onValueChange={handleAutoplaySpeedChange}>
                     <SelectTrigger className="h-9 w-[110px]">
                       <SelectValue placeholder="Speed" />
                     </SelectTrigger>
