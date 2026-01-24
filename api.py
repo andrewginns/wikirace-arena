@@ -3054,14 +3054,16 @@ def _fetch_remote_wiki_html_sync(remote_urls: list[tuple[str, str]]) -> str:
 
     class _ConnectTimeoutHTTPSConnection(http.client.HTTPSConnection):
         def connect(self) -> None:
-            original_timeout = self.timeout
-            try:
-                self.timeout = connect_timeout_seconds
-                super().connect()
-            finally:
-                self.timeout = original_timeout
-            if self.sock is not None:
-                self.sock.settimeout(timeout_seconds)
+            conn = self._create_connection(
+                (self.host, self.port), connect_timeout_seconds, self.source_address
+            )
+            conn.settimeout(timeout_seconds)
+            if self._tunnel_host:
+                self.sock = conn
+                self._tunnel()
+            server_hostname = self._tunnel_host or self.host
+            self.sock = self._context.wrap_socket(conn, server_hostname=server_hostname)
+            self.sock.settimeout(timeout_seconds)
 
     class _ConnectTimeoutHTTPHandler(urllib.request.HTTPHandler):
         def http_open(self, req: urllib.request.Request):
