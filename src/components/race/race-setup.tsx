@@ -53,7 +53,7 @@ import {
   Trophy,
   Users,
 } from "lucide-react";
-import popularNodes from "../../../results/popular_nodes.json";
+import popularNodes from "@/data/wiki/popular_nodes.json";
 import type { RaceConfig, RaceParticipantDraft, RaceRules } from "./race-types";
 import { RaceSetupStickyBar } from "./race-setup-sticky-bar";
 

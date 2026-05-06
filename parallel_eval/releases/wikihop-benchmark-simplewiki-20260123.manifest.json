@@ -1,0 +1,17 @@
+{
+  "name": "wikihop-benchmark-simplewiki-20260123",
+  "usage": "benchmarking",
+  "wiki": "simplewiki",
+  "dump_date": "20260123",
+  "created_at": "2026-02-07T14:57:13Z",
+  "git_sha": "5304c10991617da4df94690136c7968f3ca77817",
+  "db_sha256": "6bf6dd0d88c7ab2214a0888926cd76e6a674981d79ef251d93fea8fd3ab079ff",
+  "db_size_bytes": 288047104,
+  "compressed": {
+    "filename": "wikihop-benchmark-simplewiki-20260123.db.zst",
+    "sha256": "2dd04eb314f6e0f38da3d5b9e9f035521019a8e344d06291453c0a8d6d0a68d9",
+    "size_bytes": 51102981,
+    "codec": "zstd"
+  },
+  "notes": "Built from Wikimedia SQL dumps via get_wikihop.py. This artifact is intended for benchmarking reproducibility."
+}

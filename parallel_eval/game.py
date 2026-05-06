@@ -1,17 +1,22 @@
 from typing import List, Tuple, Dict, Optional
 import sqlite3
 import json
-import re
 import asyncio
 import argparse
+import time
 from functools import lru_cache
+from pathlib import Path
+from urllib.parse import quote
 
 from llm_client import achat
+from parallel_eval.benchmark.prompt import build_llm_prompt, extract_answer
 class SQLiteDB:
     def __init__(self, db_path: str):
         """Initialize the database with path to SQLite database"""
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        resolved_path = Path(db_path).resolve()
+        db_uri = f"file:{quote(str(resolved_path))}?mode=ro&immutable=1"
+        self.conn = sqlite3.connect(db_uri, uri=True)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
         self._article_count = self._get_article_count()
@@ -33,6 +38,60 @@ class SQLiteDB:
 
         links = json.loads(article["links_json"])
         return article["title"], links
+
+    def resolve_title(self, article_title: str) -> Optional[str]:
+        if not article_title:
+            return None
+
+        title = article_title.replace("_", " ").strip()
+        if not title:
+            return None
+
+        return self._resolve_title_normalized(title)
+
+    @lru_cache(maxsize=32768)
+    def _resolve_title_normalized(self, title: str) -> Optional[str]:
+        self.cursor.execute(
+            "SELECT title FROM core_articles WHERE title = ? LIMIT 1",
+            (title,),
+        )
+        row = self.cursor.fetchone()
+        if row:
+            return row[0]
+
+        self.cursor.execute(
+            "SELECT title FROM core_articles WHERE title = ? COLLATE NOCASE LIMIT 1",
+            (title,),
+        )
+        row = self.cursor.fetchone()
+        if row:
+            return row[0]
+
+        return None
+
+    @lru_cache(maxsize=16384)
+    def canonical_title(self, article_title: str) -> Optional[str]:
+        resolved = self.resolve_title(article_title)
+        if not resolved:
+            return None
+
+        current = resolved
+        seen = {current}
+
+        for _ in range(6):
+            title, links = self.get_article_with_links(current)
+            if not title:
+                break
+            if len(links) != 1:
+                break
+
+            candidate = self.resolve_title(links[0])
+            if not candidate or candidate in seen:
+                break
+            seen.add(candidate)
+            current = candidate
+
+        return current
 
 
 class Player:
@@ -61,6 +120,9 @@ class AgentPlayer(Player):
         target_article = None,
         openai_api_mode: Optional[str] = None,
         openai_reasoning_effort: Optional[str] = None,
+        openai_reasoning_summary: Optional[str] = None,
+        anthropic_thinking_budget_tokens: Optional[int] = None,
+        google_thinking_config: Optional[dict[str, object]] = None,
     ):
         super().__init__(model)
         self.model = model
@@ -71,111 +133,119 @@ class AgentPlayer(Player):
         self.target_article = target_article
         self.openai_api_mode = openai_api_mode
         self.openai_reasoning_effort = openai_reasoning_effort
+        self.openai_reasoning_summary = openai_reasoning_summary
+        self.anthropic_thinking_budget_tokens = anthropic_thinking_budget_tokens
+        self.google_thinking_config = google_thinking_config
 
     async def get_move(self, game_state: List[Dict]) -> Tuple[str, Dict]:
-        prompt = self.construct_prompt(game_state)
+        current = game_state[-1]["article"]
+        target = self.target_article
+        all_links = game_state[-1]["links"]
+        links = all_links
+        if isinstance(self.max_links, int) and self.max_links > 0:
+            links = all_links[: self.max_links]
+
+        path_so_far = [step["article"] for step in game_state]
+        base_prompt = build_llm_prompt(current, target, path_so_far, links)
+        prompt = base_prompt
+
         llm_outputs: list[str] = []
+        answer_errors: list[str] = []
+
+        prompt_tokens_sum = 0
+        completion_tokens_sum = 0
+        total_tokens_sum = 0
+        saw_prompt_tokens = False
+        saw_completion_tokens = False
+        saw_any_usage = False
+        latency_ms_sum = 0
+
+        chosen_index: Optional[int] = None
+        used_try: Optional[int] = None
 
         for try_number in range(self.max_tries):
+            started = time.monotonic()
             result = await achat(
                 model=self.model,
                 prompt=prompt,
                 api_base=self.api_base,
                 openai_api_mode=self.openai_api_mode,
                 openai_reasoning_effort=self.openai_reasoning_effort,
+                openai_reasoning_summary=self.openai_reasoning_summary,
+                anthropic_thinking_budget_tokens=self.anthropic_thinking_budget_tokens,
+                google_thinking_config=self.google_thinking_config,
             )
+            latency_ms_sum += int((time.monotonic() - started) * 1000)
+
             response_text = result.content
             llm_outputs.append(response_text)
 
-            answer, message = self._attempt_to_extract_answer(
-                response_text, maximum_answer=len(game_state[-1]["links"])
-            )
+            if result.usage is not None:
+                prompt_tokens = result.usage.prompt_tokens
+                completion_tokens = result.usage.completion_tokens
+                total_tokens = result.usage.total_tokens
 
-            # there was a problem with the answer so give the model another chance
-            if answer == -1:
-                prompt = f"{prompt}\n\nIMPORTANT: {message}"
-                continue
+                if isinstance(prompt_tokens, int):
+                    prompt_tokens_sum += prompt_tokens
+                    saw_prompt_tokens = True
+                    saw_any_usage = True
+                if isinstance(completion_tokens, int):
+                    completion_tokens_sum += completion_tokens
+                    saw_completion_tokens = True
+                    saw_any_usage = True
 
-            assert answer >= 1 and answer <= len(game_state[-1]["links"]), f"Answer {answer} is out of range"
+                if isinstance(total_tokens, int):
+                    total_tokens_sum += total_tokens
+                    saw_any_usage = True
+                elif isinstance(prompt_tokens, int) or isinstance(completion_tokens, int):
+                    total_tokens_sum += (
+                        (prompt_tokens if isinstance(prompt_tokens, int) else 0)
+                        + (completion_tokens if isinstance(completion_tokens, int) else 0)
+                    )
+                    saw_any_usage = True
 
-            # we found an answer so we can return it
+            answer, error = extract_answer(response_text, len(links))
+            if answer is not None:
+                chosen_index = answer
+                used_try = try_number
+                break
+
+            if error:
+                answer_errors.append(error)
+                prompt = f"{base_prompt}\n\nIMPORTANT: {error}"
+
+        if chosen_index is None:
             metadata: Dict[str, object] = {
-                "tries": try_number,
-                "llm_output": response_text,
+                "tries": self.max_tries,
+                "answer_errors": answer_errors,
+                "llm_output": llm_outputs[-1] if llm_outputs else None,
+                "latency_ms": latency_ms_sum,
             }
             if len(llm_outputs) > 1:
                 metadata["llm_outputs"] = llm_outputs
-            return game_state[-1]["links"][answer-1], metadata
+            if saw_any_usage:
+                if saw_prompt_tokens:
+                    metadata["prompt_tokens"] = prompt_tokens_sum
+                if saw_completion_tokens:
+                    metadata["completion_tokens"] = completion_tokens_sum
+                metadata["total_tokens"] = total_tokens_sum
+            return -1, metadata
 
-        # we tried the max number of times and still didn't find an answer
         metadata: Dict[str, object] = {
-            "tries": self.max_tries,
+            "tries": used_try or 0,
             "llm_output": llm_outputs[-1] if llm_outputs else None,
+            "latency_ms": latency_ms_sum,
         }
         if len(llm_outputs) > 1:
             metadata["llm_outputs"] = llm_outputs
-        return -1, metadata
+        if saw_any_usage:
+            if saw_prompt_tokens:
+                metadata["prompt_tokens"] = prompt_tokens_sum
+            if saw_completion_tokens:
+                metadata["completion_tokens"] = completion_tokens_sum
+            metadata["total_tokens"] = total_tokens_sum
 
-    def construct_prompt(self, game_state: List[Dict]) -> str:
-        current = game_state[-1]["article"]
-        target = self.target_article
-        available_links = game_state[-1]["links"]
-        formatted_links = "\n".join([f"{i+1}. {link}" for i, link in enumerate(available_links)])
-        path_so_far = [step["article"] for step in game_state]
-
-        try:
-            formatted_path = ' -> '.join(path_so_far)
-        except Exception as e:
-            print(f"Error formatting path: {e}")
-            print(game_state)
-            print("Path so far: ", path_so_far)
-            raise e
-        
-        return f"""You are playing WikiRun, trying to navigate from one Wikipedia article to another using only links.
-
-IMPORTANT: You MUST put your final answer in <answer>NUMBER</answer> tags, where NUMBER is the link number.
-For example, if you want to choose link 3, output <answer>3</answer>.
-
-Current article: {current}
-Target article: {target}
-Available links (numbered):
-{formatted_links}
-
-Your path so far: {formatted_path}
-
-Think about which link is most likely to lead you toward the target article.
-First, analyze each link briefly and how it connects to your goal, then select the most promising one.
-
-Remember to format your final answer by explicitly writing out the xml number tags like this: <answer>NUMBER</answer>
-        """
-
-    def _attempt_to_extract_answer(self, response: str, maximum_answer: Optional[int] = None) -> Tuple[int, str]:
-        'returns -1 and a message if no answer is found'
-
-        # Extract choice using format <answer>N</answer>
-        choice_match = re.search(r"<answer>(\d+)</answer>", response)
-
-        if choice_match is None:
-            return -1, f"No answer found in response. Please respond with a number between 1 and {maximum_answer} in <answer>NUMBER</answer> tags."
-
-        # check if there are multiple answers
-        multiple_answers = re.findall(r"<answer>(\d+)</answer>", response)
-        if len(multiple_answers) > 1:
-            return -1, "Multiple answers found in response. Please respond with just one."
-
-        answer = choice_match.group(1)
-
-        # try to convert to int
-        try:
-            answer = int(answer)
-        except ValueError:
-            return -1, f"You answered with {answer} but it could not be converted to an integer. Please respond with a number between 1 and {maximum_answer}."
-
-        # check if the answer is too high or too low
-        if answer > maximum_answer or answer < 1:
-            return -1, f"You answered with {answer} but you have to select a number between 1 and {maximum_answer}."
-
-        return answer, "" # we found an answer so we don't need to return a message
+        return links[chosen_index - 1], metadata
 
 class Game:
     def __init__(
@@ -247,6 +317,21 @@ class Game:
             if len(links) == 0:
                 self.steps.append(
                     {"type": "lose", "article": player_move, "metadata": metadata}
+                )
+                break
+
+            if self.steps_taken >= self.max_allowed_steps:
+                self.steps.append(
+                    {
+                        "type": "lose",
+                        "article": player_move,
+                        "links": links,
+                        "metadata": {
+                            **metadata,
+                            "reason": metadata.get("reason", "max_steps"),
+                            "max_steps": self.max_allowed_steps,
+                        },
+                    }
                 )
                 break
 

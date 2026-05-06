@@ -11,7 +11,7 @@ import { setupNewRound } from "@/lib/multiplayer-store";
 import type { MultiplayerRoomV1 } from "@/lib/multiplayer-types";
 import { cn } from "@/lib/utils";
 import { ArrowLeftRight, Shuffle } from "lucide-react";
-import popularNodes from "../../../results/popular_nodes.json";
+import popularNodes from "@/data/wiki/popular_nodes.json";
 
 export default function MultiplayerRoundSetup({
   room,

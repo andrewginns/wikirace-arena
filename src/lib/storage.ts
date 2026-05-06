@@ -19,23 +19,25 @@ export function safeStorageGetItem(kind: StorageKind, key: string): string | nul
   }
 }
 
-export function safeStorageSetItem(kind: StorageKind, key: string, value: string) {
+export function safeStorageSetItem(kind: StorageKind, key: string, value: string): boolean {
   const storage = getStorage(kind);
-  if (!storage) return;
+  if (!storage) return false;
   try {
     storage.setItem(key, value);
+    return true;
   } catch {
-    // ignore
+    return false;
   }
 }
 
-export function safeStorageRemoveItem(kind: StorageKind, key: string) {
+export function safeStorageRemoveItem(kind: StorageKind, key: string): boolean {
   const storage = getStorage(kind);
-  if (!storage) return;
+  if (!storage) return false;
   try {
     storage.removeItem(key);
+    return true;
   } catch {
-    // ignore
+    return false;
   }
 }
 
@@ -52,11 +54,23 @@ export function safeStorageGetJson<T>(kind: StorageKind, key: string): T | null 
   return safeJsonParse<T>(safeStorageGetItem(kind, key));
 }
 
-export function safeStorageSetJson(kind: StorageKind, key: string, value: unknown) {
+export function safeLocalStorageGetJsonWithStatus<T>(key: string): {
+  value: T | null;
+  parseFailed: boolean;
+} {
+  const raw = safeLocalStorageGetItem(key);
+  const value = safeJsonParse<T>(raw);
+  return {
+    value,
+    parseFailed: raw !== null && value === null,
+  };
+}
+
+export function safeStorageSetJson(kind: StorageKind, key: string, value: unknown): boolean {
   try {
-    safeStorageSetItem(kind, key, JSON.stringify(value));
+    return safeStorageSetItem(kind, key, JSON.stringify(value));
   } catch {
-    // ignore (e.g. circular structures)
+    return false;
   }
 }
 
@@ -64,39 +78,38 @@ export function safeLocalStorageGetItem(key: string) {
   return safeStorageGetItem("local", key);
 }
 
-export function safeLocalStorageSetItem(key: string, value: string) {
-  safeStorageSetItem("local", key, value);
+export function safeLocalStorageSetItem(key: string, value: string): boolean {
+  return safeStorageSetItem("local", key, value);
 }
 
-export function safeLocalStorageRemoveItem(key: string) {
-  safeStorageRemoveItem("local", key);
+export function safeLocalStorageRemoveItem(key: string): boolean {
+  return safeStorageRemoveItem("local", key);
 }
 
 export function safeLocalStorageGetJson<T>(key: string): T | null {
   return safeStorageGetJson<T>("local", key);
 }
 
-export function safeLocalStorageSetJson(key: string, value: unknown) {
-  safeStorageSetJson("local", key, value);
+export function safeLocalStorageSetJson(key: string, value: unknown): boolean {
+  return safeStorageSetJson("local", key, value);
 }
 
 export function safeSessionStorageGetItem(key: string) {
   return safeStorageGetItem("session", key);
 }
 
-export function safeSessionStorageSetItem(key: string, value: string) {
-  safeStorageSetItem("session", key, value);
+export function safeSessionStorageSetItem(key: string, value: string): boolean {
+  return safeStorageSetItem("session", key, value);
 }
 
-export function safeSessionStorageRemoveItem(key: string) {
-  safeStorageRemoveItem("session", key);
+export function safeSessionStorageRemoveItem(key: string): boolean {
+  return safeStorageRemoveItem("session", key);
 }
 
 export function safeSessionStorageGetJson<T>(key: string): T | null {
   return safeStorageGetJson<T>("session", key);
 }
 
-export function safeSessionStorageSetJson(key: string, value: unknown) {
-  safeStorageSetJson("session", key, value);
+export function safeSessionStorageSetJson(key: string, value: unknown): boolean {
+  return safeStorageSetJson("session", key, value);
 }
-

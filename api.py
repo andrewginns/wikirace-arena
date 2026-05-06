@@ -4,6 +4,8 @@ import os
 import re
 import asyncio
 import time
+import base64
+import hashlib
 import secrets
 import string
 import socket
@@ -12,11 +14,12 @@ import sys
 import ipaddress
 import urllib.error
 import urllib.request
+from html.parser import HTMLParser
 from dotenv import dotenv_values, load_dotenv
 from dataclasses import dataclass
 from threading import Lock
 from collections import OrderedDict
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 from typing import Tuple, List, Optional, Any
 from functools import lru_cache
 from datetime import datetime, timezone
@@ -26,7 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import uvicorn
-import logfire
+from logfire_compat import logfire
 from opentelemetry import trace
 from opentelemetry import context as otel_context
 from opentelemetry.propagate import extract, inject
@@ -50,17 +53,12 @@ def _load_local_env() -> None:
 _load_local_env()
 
 from llm_client import achat, configure_observability, run_span_name
+from parallel_eval.benchmark.prompt import (
+    build_llm_prompt as benchmark_build_llm_prompt,
+    extract_answer as benchmark_extract_answer,
+)
 
 app = FastAPI(title="WikiSpeedia API")
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
-)
 
 
 SIMPLEWIKI_ORIGIN = "https://simple.wikipedia.org"
@@ -233,6 +231,7 @@ class CreateRoomRequest(BaseModel):
 class CreateRoomResponse(BaseModel):
     room_id: str
     owner_player_id: str
+    owner_player_token: str
     join_url: str
     room: RoomStateV1
 
@@ -243,6 +242,7 @@ class JoinRoomRequest(BaseModel):
 
 class JoinRoomResponse(BaseModel):
     player_id: str
+    player_token: str
     room: RoomStateV1
 
 
@@ -313,27 +313,43 @@ class RoomRunControlRequest(BaseModel):
     requested_by_player_id: str
 
 
+class RoomWsTicketRequest(BaseModel):
+    player_id: str
+
+
+class RoomWsTicketResponse(BaseModel):
+    player_id: str
+    ws_ticket: str
+
+
 class SQLiteDB:
     def __init__(self, db_path: str):
         """Initialize the database with path to SQLite database"""
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
+        self.lock = Lock()
         self._article_count = self._get_article_count()
         print(f"Connected to SQLite database with {self._article_count} articles")
 
     def _get_article_count(self):
-        self.cursor.execute("SELECT COUNT(*) FROM core_articles")
-        return self.cursor.fetchone()[0]
+        with self.lock:
+            self.cursor.execute("SELECT COUNT(*) FROM core_articles")
+            return self.cursor.fetchone()[0]
 
     @lru_cache(maxsize=8192)
     def get_article_with_links(self, article_title: str) -> Tuple[str, List[str]]:
-        self.cursor.execute(
-            "SELECT title, links_json FROM core_articles WHERE title = ?",
-            (article_title,),
-        )
-        article = self.cursor.fetchone()
+        title = _strip_wiki_fragment(article_title).replace("_", " ").strip()
+        if not title:
+            return None, []
+
+        with self.lock:
+            self.cursor.execute(
+                "SELECT title, links_json FROM core_articles WHERE title = ?",
+                (title,),
+            )
+            article = self.cursor.fetchone()
         if not article:
             return None, []
 
@@ -341,8 +357,9 @@ class SQLiteDB:
         return article["title"], links
 
     def get_all_articles(self):
-        self.cursor.execute("SELECT title FROM core_articles")
-        return [row[0] for row in self.cursor.fetchall()]
+        with self.lock:
+            self.cursor.execute("SELECT title FROM core_articles")
+            return [row[0] for row in self.cursor.fetchall()]
 
     def resolve_title(self, article_title: str) -> Optional[str]:
         """Return the canonical title for an article if it exists.
@@ -356,7 +373,7 @@ class SQLiteDB:
         if not article_title:
             return None
 
-        title = article_title.replace("_", " ").strip()
+        title = _strip_wiki_fragment(article_title).replace("_", " ").strip()
         if not title:
             return None
 
@@ -364,19 +381,21 @@ class SQLiteDB:
 
     @lru_cache(maxsize=32768)
     def _resolve_title_normalized(self, title: str) -> Optional[str]:
-        self.cursor.execute(
-            "SELECT title FROM core_articles WHERE title = ? LIMIT 1",
-            (title,),
-        )
-        row = self.cursor.fetchone()
+        with self.lock:
+            self.cursor.execute(
+                "SELECT title FROM core_articles WHERE title = ? LIMIT 1",
+                (title,),
+            )
+            row = self.cursor.fetchone()
         if row:
             return row[0]
 
-        self.cursor.execute(
-            "SELECT title FROM core_articles WHERE title = ? COLLATE NOCASE LIMIT 1",
-            (title,),
-        )
-        row = self.cursor.fetchone()
+        with self.lock:
+            self.cursor.execute(
+                "SELECT title FROM core_articles WHERE title = ? COLLATE NOCASE LIMIT 1",
+                (title,),
+            )
+            row = self.cursor.fetchone()
         if row:
             return row[0]
 
@@ -435,7 +454,12 @@ db = SQLiteDB(db_path)
 ROOMS: dict[str, dict[str, Any]] = {}
 ROOM_LOCKS: dict[str, asyncio.Lock] = {}
 ROOM_CONNECTIONS: dict[str, set[WebSocket]] = {}
+ROOM_CONNECTION_OWNERS: dict[WebSocket, tuple[str, str]] = {}
+ROOM_PLAYER_CONNECTION_COUNTS: dict[str, dict[str, int]] = {}
+ROOM_PLAYER_TOKENS: dict[str, dict[str, str]] = {}
+ROOM_WS_TICKETS: dict[str, dict[str, dict[str, float]]] = {}
 ROOM_TASKS: dict[str, dict[str, asyncio.Task]] = {}
+ROOM_TASK_GENERATIONS: dict[str, dict[str, int]] = {}
 
 
 @dataclass
@@ -445,6 +469,13 @@ class LocalRunTrace:
     span_name: str
     started_at: float
     last_seen: float
+
+
+@dataclass(frozen=True)
+class PublicHostConfig:
+    scheme: Optional[str]
+    host: str
+    port: Optional[int]
 
 
 LOCAL_RUN_TRACES: dict[str, LocalRunTrace] = {}
@@ -473,6 +504,22 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _env_nonnegative_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+def _env_csv(name: str) -> list[str]:
+    raw = os.getenv(name) or ""
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _local_run_trace_key(session_id: str, run_id: str) -> str:
     return f"{session_id}:{run_id}"
 
@@ -488,6 +535,7 @@ def _touch_local_run_trace(session_id: str, run_id: str) -> None:
 
 WIKIRACE_MAX_LLM_RUNS_PER_ROOM = _env_positive_int("WIKIRACE_MAX_LLM_RUNS_PER_ROOM", 8)
 WIKIRACE_MAX_CONCURRENT_LLM_CALLS = _env_positive_int("WIKIRACE_MAX_CONCURRENT_LLM_CALLS", 3)
+WIKIRACE_ROOM_WS_TICKET_TTL_SECONDS = _env_positive_int("WIKIRACE_ROOM_WS_TICKET_TTL_SECONDS", 30)
 LOCAL_RUN_TRACE_IDLE_TTL_SECONDS = _env_positive_int("WIKIRACE_LOCAL_RUN_TTL_SECONDS", 3600)
 LOCAL_RUN_TRACE_CLEANUP_INTERVAL_SECONDS = _env_positive_int(
     "WIKIRACE_LOCAL_RUN_CLEANUP_INTERVAL_SECONDS", 300
@@ -512,11 +560,57 @@ WIKIRACE_WIKI_USER_AGENT = (
     or "wikirace-arena (local dev; +https://github.com/openai/wikirace-arena)"
 )
 LLM_CALL_SEMAPHORE = asyncio.Semaphore(WIKIRACE_MAX_CONCURRENT_LLM_CALLS)
+LLM_CANCEL_DRAIN_TIMEOUT_SECONDS = _env_nonnegative_float(
+    "WIKIRACE_LLM_CANCEL_DRAIN_TIMEOUT_SECONDS",
+    0.25,
+)
+ROOM_TASK_CANCEL_DRAIN_TIMEOUT_SECONDS = _env_nonnegative_float(
+    "WIKIRACE_ROOM_TASK_CANCEL_DRAIN_TIMEOUT_SECONDS",
+    0.5,
+)
 
 
 _WIKI_PROXY_CACHE: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
 _WIKI_PROXY_INFLIGHT: dict[str, asyncio.Task[str]] = {}
 _WIKI_PROXY_LOCK = asyncio.Lock()
+_WIKI_SANITIZER_DROP_CONTENT_TAGS = {
+    "applet",
+    "embed",
+    "frame",
+    "frameset",
+    "iframe",
+    "math",
+    "noscript",
+    "object",
+    "script",
+    "style",
+    "svg",
+    "template",
+}
+_WIKI_SANITIZER_DROP_TAGS = {
+    "base",
+    "button",
+    "form",
+    "input",
+    "keygen",
+    "link",
+    "meta",
+    "option",
+    "select",
+    "textarea",
+}
+_WIKI_SANITIZER_URL_ATTRS = {
+    "action",
+    "background",
+    "cite",
+    "data",
+    "formaction",
+    "href",
+    "poster",
+    "src",
+}
+_WIKI_SANITIZER_SRCSET_ATTRS = {"imagesrcset", "srcset"}
+_WIKI_SANITIZER_ATTR_NAME_RE = re.compile(r"^[A-Za-z_:][A-Za-z0-9_.:-]*$")
 
 
 def _wiki_http_headers() -> dict[str, str]:
@@ -536,7 +630,10 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _titles_match(a: str, b: str) -> bool:
-    return a.replace("_", " ").strip().lower() == b.replace("_", " ").strip().lower()
+    return (
+        _strip_wiki_fragment(a).replace("_", " ").strip().lower()
+        == _strip_wiki_fragment(b).replace("_", " ").strip().lower()
+    )
 
 
 def _strip_wiki_fragment(title: str) -> str:
@@ -566,10 +663,52 @@ def _make_code(prefix: str, length: int = 10) -> str:
     return f"{prefix}_{token}"
 
 
-def _detect_lan_ip() -> Optional[str]:
+def _public_host_config() -> Optional[PublicHostConfig]:
     override = (os.getenv("WIKIRACE_PUBLIC_HOST") or "").strip()
-    if override:
-        return override
+    if not override:
+        return None
+
+    raw = override if "://" in override else f"//{override}"
+    parsed_scheme: Optional[str] = None
+    try:
+        parsed = urlparse(raw)
+        host = parsed.hostname
+        port = parsed.port
+        if parsed.scheme in {"http", "https"}:
+            parsed_scheme = parsed.scheme
+    except ValueError:
+        host = None
+        port = None
+
+    if not host:
+        host = _header_hostname(override)
+    if not host:
+        return None
+
+    return PublicHostConfig(scheme=parsed_scheme, host=host, port=port)
+
+
+def _format_netloc(host: str, port: Optional[int] = None) -> str:
+    display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{display_host}:{port}" if isinstance(port, int) else display_host
+
+
+def _public_host_origin(
+    *,
+    fallback_scheme: str = "http",
+    fallback_port: Optional[int] = None,
+) -> Optional[str]:
+    config = _public_host_config()
+    if config is None:
+        return None
+    scheme = config.scheme or fallback_scheme
+    port = config.port
+    if port is None and config.scheme is None:
+        port = fallback_port
+    return f"{scheme}://{_format_netloc(config.host, port)}"
+
+
+def _detect_lan_ip() -> Optional[str]:
 
     def is_usable(ip: str) -> bool:
         try:
@@ -659,6 +798,408 @@ def _detect_lan_ip() -> Optional[str]:
     return None
 
 
+ROOM_PLAYER_TOKEN_HEADER = "x-wikirace-player-token"
+LLM_PROXY_SECRET_HEADER = "x-wikirace-llm-proxy-secret"
+WIKIRACE_ALLOW_REMOTE_LLM_API = _env_bool("WIKIRACE_ALLOW_REMOTE_LLM_API", False)
+WIKIRACE_LLM_PROXY_SHARED_SECRET = (
+    (os.getenv("WIKIRACE_LLM_PROXY_SHARED_SECRET") or "").strip() or None
+)
+WIKIRACE_ALLOWED_LLM_API_BASES = {
+    normalized
+    for raw_base in _env_csv("WIKIRACE_ALLOWED_LLM_API_BASES")
+    if (normalized := urlunparse(urlparse(raw_base)._replace(params="", query="", fragment="")).rstrip("/"))
+}
+
+
+def _is_loopback_host(hostname: Optional[str]) -> bool:
+    host = (hostname or "").strip().lower()
+    if host in {"localhost", "testclient", "testserver"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _header_hostname(raw_host: Optional[str]) -> Optional[str]:
+    value = (raw_host or "").strip()
+    if not value:
+        return None
+    try:
+        return urlparse(f"//{value}").hostname or value
+    except ValueError:
+        return value
+
+
+def _request_host_header_is_loopback(request: Request) -> bool:
+    header_hostname = _header_hostname(request.headers.get("host"))
+    return header_hostname is None or _is_loopback_host(header_hostname)
+
+
+def _request_forwarded_client_is_loopback(request: Request) -> bool:
+    proxy_headers = (
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    )
+    return not any((request.headers.get(header) or "").strip() for header in proxy_headers)
+
+
+def _public_host_requires_llm_proxy_secret() -> bool:
+    public_host = _public_host_config()
+    return bool(public_host and not _is_loopback_host(public_host.host))
+
+
+def _request_client_is_loopback(request: Optional[Request]) -> bool:
+    if request is None:
+        return True
+    if WIKIRACE_LLM_PROXY_SHARED_SECRET or _public_host_requires_llm_proxy_secret():
+        return False
+    host = request.client.host if request.client else ""
+    if not _is_loopback_host(host):
+        return False
+    return (
+        _request_host_header_is_loopback(request)
+        and _request_forwarded_client_is_loopback(request)
+    )
+
+
+def _request_has_trusted_llm_proxy_secret(request: Optional[Request]) -> bool:
+    if not WIKIRACE_LLM_PROXY_SHARED_SECRET or request is None:
+        return False
+
+    provided = request.headers.get(LLM_PROXY_SECRET_HEADER)
+    return (
+        isinstance(provided, str)
+        and bool(provided.strip())
+        and secrets.compare_digest(provided.strip(), WIKIRACE_LLM_PROXY_SHARED_SECRET)
+    )
+
+
+def _request_has_llm_route_access(request: Optional[Request]) -> bool:
+    return _request_client_is_loopback(request) or _request_has_trusted_llm_proxy_secret(request)
+
+
+def _detach_task_exception(task: asyncio.Task) -> None:
+    try:
+        _ = task.exception()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
+def _release_llm_call_slot_when_task_done(
+    task: asyncio.Task,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    _detach_task_exception(task)
+    semaphore.release()
+
+
+async def _drain_cancelled_task_with_timeout(
+    task: asyncio.Task,
+    timeout_seconds: float,
+) -> None:
+    if task.done():
+        _detach_task_exception(task)
+        return
+
+    task.cancel()
+    timeout_seconds = max(0.0, float(timeout_seconds))
+    if timeout_seconds > 0:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+            _detach_task_exception(task)
+            return
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+    task.add_done_callback(_detach_task_exception)
+
+
+def _default_cors_allowed_origins() -> list[str]:
+    origins = {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    }
+
+    public_host = _public_host_config()
+    if public_host:
+        if public_host.scheme or public_host.port is not None:
+            public_origin = _public_host_origin()
+            if public_origin:
+                origins.add(public_origin)
+        else:
+            for port in (5173, 4173, 8000):
+                public_origin = _public_host_origin(fallback_port=port)
+                if public_origin:
+                    origins.add(public_origin)
+    elif (lan_ip := _detect_lan_ip()):
+        for port in (5173, 4173, 8000):
+            origins.add(f"http://{lan_ip}:{port}")
+
+    for origin in _env_csv("WIKIRACE_ALLOWED_CORS_ORIGINS"):
+        origins.add(origin.rstrip("/"))
+
+    return sorted(origins)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_default_cors_allowed_origins(),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _normalize_api_base(
+    api_base: Optional[str],
+    *,
+    request: Optional[Request] = None,
+) -> Optional[str]:
+    raw = api_base.strip() if isinstance(api_base, str) and api_base.strip() else None
+    if not raw:
+        return None
+
+    parsed = urlparse(raw)
+    hostname = (parsed.hostname or "").strip()
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        raise HTTPException(status_code=400, detail="api_base must be an http(s) URL")
+    if parsed.username or parsed.password:
+        raise HTTPException(
+            status_code=400,
+            detail="api_base must not include username or password",
+        )
+    if parsed.params or parsed.query or parsed.fragment:
+        raise HTTPException(
+            status_code=400,
+            detail="api_base must not include params, query, or fragment",
+        )
+
+    normalized = urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path.rstrip("/"),
+            "",
+            "",
+            "",
+        )
+    )
+
+    if normalized in WIKIRACE_ALLOWED_LLM_API_BASES:
+        return normalized
+
+    if _is_loopback_host(hostname):
+        if _request_client_is_loopback(request):
+            return normalized
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Loopback api_base is only available from localhost requests. "
+                "For remote callers, add that endpoint to WIKIRACE_ALLOWED_LLM_API_BASES."
+            ),
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "api_base is not allowlisted. Use a localhost endpoint or set "
+            "WIKIRACE_ALLOWED_LLM_API_BASES."
+        ),
+    )
+
+
+def _require_local_llm_request(request: Request) -> None:
+    if WIKIRACE_ALLOW_REMOTE_LLM_API:
+        return
+
+    if _request_has_llm_route_access(request):
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Remote /llm access is disabled. Run from localhost or set "
+            "WIKIRACE_ALLOW_REMOTE_LLM_API=1."
+        ),
+    )
+
+
+def _issue_room_player_token(room_id: str, player_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    ROOM_PLAYER_TOKENS.setdefault(room_id, {})[player_id] = token
+    return token
+
+
+def _room_player_token_valid(room_id: str, player_id: str, token: Optional[str]) -> bool:
+    expected = ROOM_PLAYER_TOKENS.get(room_id, {}).get(player_id)
+    return (
+        isinstance(expected, str)
+        and bool(expected)
+        and isinstance(token, str)
+        and bool(token)
+        and secrets.compare_digest(expected, token)
+    )
+
+
+def _require_room_player_token(
+    *,
+    room_id: str,
+    player_id: Optional[str],
+    token: Optional[str],
+) -> str:
+    checked_player_id = player_id.strip() if isinstance(player_id, str) else ""
+    if not checked_player_id or not _room_player_token_valid(room_id, checked_player_id, token):
+        raise HTTPException(status_code=403, detail="Invalid room credentials")
+    return checked_player_id
+
+
+def _require_room_owner(
+    *,
+    room_id: str,
+    room: dict[str, Any],
+    player_id: Optional[str],
+    token: Optional[str],
+) -> None:
+    checked_player_id = _require_room_player_token(
+        room_id=room_id,
+        player_id=player_id,
+        token=token,
+    )
+    if checked_player_id != room.get("owner_player_id"):
+        raise HTTPException(status_code=403, detail="Only the host can perform this action")
+
+
+def _prune_room_ws_tickets(room_id: str, now: Optional[float] = None) -> None:
+    room_id = _normalize_room_id(room_id)
+    issued = ROOM_WS_TICKETS.get(room_id)
+    if not issued:
+        return
+
+    now_value = time.time() if now is None else now
+    for player_id, tickets in list(issued.items()):
+        if not isinstance(tickets, dict):
+            issued.pop(player_id, None)
+            continue
+
+        for ticket, expires_at in list(tickets.items()):
+            if (
+                not isinstance(ticket, str)
+                or not isinstance(expires_at, (int, float))
+                or expires_at <= now_value
+            ):
+                tickets.pop(ticket, None)
+        if not tickets:
+            issued.pop(player_id, None)
+
+    if not issued:
+        ROOM_WS_TICKETS.pop(room_id, None)
+
+
+def _issue_room_ws_ticket(room_id: str, player_id: str) -> str:
+    room_id = _normalize_room_id(room_id)
+    now_value = time.time()
+    _prune_room_ws_tickets(room_id, now=now_value)
+    ticket = secrets.token_urlsafe(32)
+    expires_at = now_value + WIKIRACE_ROOM_WS_TICKET_TTL_SECONDS
+    tickets = ROOM_WS_TICKETS.setdefault(room_id, {}).setdefault(player_id, {})
+    tickets[ticket] = expires_at
+    return ticket
+
+
+def _consume_room_ws_ticket(room_id: str, player_id: str, ticket: Optional[str]) -> bool:
+    room_id = _normalize_room_id(room_id)
+    checked_player_id = player_id.strip() if isinstance(player_id, str) else ""
+    if not checked_player_id or not isinstance(ticket, str) or not ticket.strip():
+        return False
+
+    now_value = time.time()
+    _prune_room_ws_tickets(room_id, now=now_value)
+    issued = ROOM_WS_TICKETS.get(room_id)
+    if not issued:
+        return False
+
+    tickets = issued.get(checked_player_id)
+
+    if not isinstance(tickets, dict):
+        issued.pop(checked_player_id, None)
+        if not issued:
+            ROOM_WS_TICKETS.pop(room_id, None)
+        return False
+
+    checked_ticket = ticket.strip()
+    matched_ticket = next(
+        (
+            stored_ticket
+            for stored_ticket in tickets
+            if secrets.compare_digest(stored_ticket, checked_ticket)
+        ),
+        None,
+    )
+    if matched_ticket is None:
+        return False
+
+    expires_at = tickets.get(matched_ticket)
+    if not isinstance(expires_at, (int, float)) or expires_at <= now_value:
+        tickets.pop(matched_ticket, None)
+        if not tickets:
+            issued.pop(checked_player_id, None)
+        if not issued:
+            ROOM_WS_TICKETS.pop(room_id, None)
+        return False
+
+    tickets.pop(matched_ticket, None)
+    if not tickets:
+        issued.pop(checked_player_id, None)
+    if not issued:
+        ROOM_WS_TICKETS.pop(room_id, None)
+    return True
+
+
+async def _close_room_connections(room_id: str) -> None:
+    room_id = _normalize_room_id(room_id)
+    conns = list(ROOM_CONNECTIONS.pop(room_id, set()))
+    for ws in conns:
+        ROOM_CONNECTION_OWNERS.pop(ws, None)
+        try:
+            await ws.close(code=1001)
+        except Exception:
+            pass
+
+
+async def _close_room_ws_with_error(websocket: WebSocket, *, code: int, detail: str) -> None:
+    try:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "room_error",
+                    "detail": detail,
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception:
+        pass
+
+    try:
+        await websocket.close(code=code)
+    except Exception:
+        pass
+
+
 def _normalize_room_rules(raw: Optional[RoomRulesV1]) -> dict[str, Any]:
     default = {
         "max_hops": 20,
@@ -724,6 +1265,15 @@ def _room_run_by_id(room: dict[str, Any], run_id: str) -> Optional[dict[str, Any
     return None
 
 
+def _room_has_startable_llm_runs(room: dict[str, Any]) -> bool:
+    return any(
+        isinstance(run, dict)
+        and run.get("kind") == "llm"
+        and run.get("status") == "not_started"
+        for run in room.get("runs", [])
+    )
+
+
 async def _broadcast_room(room_id: str) -> None:
     room_id = _normalize_room_id(room_id)
     room = ROOMS.get(room_id)
@@ -743,108 +1293,190 @@ async def _broadcast_room(room_id: str) -> None:
         except Exception:
             dead.append(ws)
 
+    disconnected = False
     for ws in dead:
-        try:
-            conns.remove(ws)
-        except KeyError:
-            pass
+        disconnected = await _discard_room_connection(room_id, ws, broadcast=False) or disconnected
+
+    if disconnected and ROOM_CONNECTIONS.get(room_id):
+        await _broadcast_room(room_id)
 
 
-async def _set_player_connected(room_id: str, player_id: str, connected: bool) -> None:
+async def _discard_room_connection(
+    room_id: str,
+    websocket: WebSocket,
+    *,
+    broadcast: bool = True,
+) -> bool:
+    room_id = _normalize_room_id(room_id)
+    conns = ROOM_CONNECTIONS.get(room_id)
+    if conns:
+        conns.discard(websocket)
+
+    owner = ROOM_CONNECTION_OWNERS.pop(websocket, None)
+    if not owner:
+        return False
+
+    owner_room_id, owner_player_id = owner
+    if owner_room_id != room_id:
+        return False
+
+    return await _set_player_connected(
+        room_id,
+        owner_player_id,
+        False,
+        broadcast=broadcast,
+    )
+
+
+async def _set_player_connected(
+    room_id: str,
+    player_id: str,
+    connected: bool,
+    *,
+    broadcast: bool = True,
+) -> bool:
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
     room = ROOMS.get(room_id)
     if not lock or not room:
-        return
+        return False
 
     async with lock:
+        room_counts = ROOM_PLAYER_CONNECTION_COUNTS.setdefault(room_id, {})
+        current_count = room_counts.get(player_id, 0)
+        next_count = current_count + 1 if connected else max(0, current_count - 1)
+        if next_count > 0:
+            room_counts[player_id] = next_count
+        else:
+            room_counts.pop(player_id, None)
+        if not room_counts:
+            ROOM_PLAYER_CONNECTION_COUNTS.pop(room_id, None)
+
+        next_connected = next_count > 0
         changed = False
         for player in room.get("players", []):
             if player.get("id") != player_id:
                 continue
-            if bool(player.get("connected")) == connected:
+            if bool(player.get("connected")) == next_connected:
                 break
-            player["connected"] = connected
+            player["connected"] = next_connected
             changed = True
             break
 
         if changed:
             room["updated_at"] = _now_iso()
 
-    if changed:
+    if changed and broadcast:
         await _broadcast_room(room_id)
 
+    return changed
 
-def _cancel_room_task(room_id: str, run_id: str) -> None:
+
+def _cancel_room_task(room_id: str, run_id: str) -> Optional[asyncio.Task]:
     room_id = _normalize_room_id(room_id)
     tasks = ROOM_TASKS.get(room_id)
     if not tasks:
-        return
+        return None
 
-    task = tasks.pop(run_id, None)
-    if task:
+    task = tasks.get(run_id)
+    if task and not task.done():
+        _advance_room_task_generation(room_id, run_id)
         task.cancel()
+        return task
+
+    if task:
+        tasks.pop(run_id, None)
+        _clear_room_task_generation(room_id, run_id)
 
     if not tasks:
         ROOM_TASKS.pop(room_id, None)
 
+    return task
 
-def _cancel_room_tasks(room_id: str) -> None:
+
+def _cancel_room_tasks(room_id: str) -> list[asyncio.Task]:
     room_id = _normalize_room_id(room_id)
-    tasks = ROOM_TASKS.pop(room_id, None)
+    tasks = ROOM_TASKS.get(room_id)
+    if not tasks:
+        return []
+
+    cancelled_tasks = list(tasks.values())
+    for run_id, task in list(tasks.items()):
+        if not task.done():
+            _advance_room_task_generation(room_id, run_id)
+            task.cancel()
+            continue
+        tasks.pop(run_id, None)
+        _clear_room_task_generation(room_id, run_id)
+    if not tasks:
+        ROOM_TASKS.pop(room_id, None)
+    return cancelled_tasks
+
+
+def _advance_room_task_generation(room_id: str, run_id: str) -> int:
+    room_id = _normalize_room_id(room_id)
+    generations = ROOM_TASK_GENERATIONS.setdefault(room_id, {})
+    next_generation = generations.get(run_id, 0) + 1
+    generations[run_id] = next_generation
+    return next_generation
+
+
+def _room_task_generation_is_current(
+    room_id: str,
+    run_id: str,
+    generation: Optional[int],
+) -> bool:
+    if generation is None:
+        return True
+    room_id = _normalize_room_id(room_id)
+    current_generation = ROOM_TASK_GENERATIONS.get(room_id, {}).get(run_id)
+    return current_generation == generation
+
+
+def _clear_room_task_generation(room_id: str, run_id: str) -> None:
+    room_id = _normalize_room_id(room_id)
+    generations = ROOM_TASK_GENERATIONS.get(room_id)
+    if not generations:
+        return
+    generations.pop(run_id, None)
+    if not generations:
+        ROOM_TASK_GENERATIONS.pop(room_id, None)
+
+
+async def _await_cancelled_room_tasks(tasks: list[asyncio.Task]) -> None:
     if not tasks:
         return
 
-    for task in tasks.values():
-        task.cancel()
+    drain_future = asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(drain_future),
+            timeout=max(0.0, ROOM_TASK_CANCEL_DRAIN_TIMEOUT_SECONDS),
+        )
+        return
+    except asyncio.TimeoutError:
+        pass
+    except asyncio.CancelledError:
+        for task in tasks:
+            if task.done():
+                _detach_task_exception(task)
+            else:
+                task.add_done_callback(_detach_task_exception)
+        raise
+
+    for task in tasks:
+        if task.done():
+            _detach_task_exception(task)
+        else:
+            task.add_done_callback(_detach_task_exception)
 
 
 def _build_llm_prompt(current: str, target: str, path_so_far: list[str], links: list[str]) -> str:
-    formatted_links = "\n".join(f"{idx + 1}. {title}" for idx, title in enumerate(links))
-    formatted_path = " -> ".join(path_so_far)
-    return (
-        "You are playing WikiRun, trying to navigate from one Wikipedia article to another using only links.\n\n"
-        "IMPORTANT: You MUST put your final answer in <answer>NUMBER</answer> tags, where NUMBER is the link number.\n"
-        "For example, if you want to choose link 3, output <answer>3</answer>.\n\n"
-        f"Current article: {current}\n"
-        f"Target article: {target}\n"
-        "Available links (numbered):\n"
-        f"{formatted_links}\n\n"
-        f"Your path so far: {formatted_path}\n\n"
-        "Think about which link is most likely to lead you toward the target article.\n"
-        "First, analyze each link briefly and how it connects to your goal, then select the most promising one.\n\n"
-        "Remember to format your final answer by explicitly writing out the xml number tags like this: <answer>NUMBER</answer>"
-    )
-
-
-ANSWER_TAG_RE = re.compile(r"<answer>(\d+)</answer>", flags=re.IGNORECASE)
+    return benchmark_build_llm_prompt(current, target, path_so_far, links)
 
 
 def _extract_answer(response: str, maximum_answer: int) -> tuple[Optional[int], Optional[str]]:
-    matches = ANSWER_TAG_RE.findall(response or "")
-    if not matches:
-        return (
-            None,
-            f"No <answer>NUMBER</answer> found. Choose a number between 1 and {maximum_answer}.",
-        )
-    if len(matches) > 1:
-        return None, "Multiple <answer> tags found. Respond with exactly one."
-
-    try:
-        value = int(matches[0])
-    except ValueError:
-        return (
-            None,
-            f"Answer is not a number. Choose a number between 1 and {maximum_answer}.",
-        )
-
-    if value < 1 or value > maximum_answer:
-        return (
-            None,
-            f"Answer out of bounds. Choose a number between 1 and {maximum_answer}.",
-        )
-
-    return value, None
+    return benchmark_extract_answer(response, maximum_answer)
 
 
 async def _call_llm(
@@ -858,9 +1490,14 @@ async def _call_llm(
     openai_reasoning_summary: Optional[str],
     anthropic_thinking_budget_tokens: Optional[int],
     google_thinking_config: Optional[dict[str, Any]],
-) -> tuple[str, Optional[dict[str, int]]]:
-    async with LLM_CALL_SEMAPHORE:
-        result = await achat(
+) -> tuple[str, Optional[dict[str, int]], int, int]:
+    queued_at = time.monotonic()
+    semaphore = LLM_CALL_SEMAPHORE
+    await semaphore.acquire()
+    started = time.monotonic()
+    queue_wait_ms = int((started - queued_at) * 1000)
+    llm_task = asyncio.create_task(
+        achat(
             model=model,
             prompt=prompt,
             max_tokens=max_tokens,
@@ -871,6 +1508,29 @@ async def _call_llm(
             anthropic_thinking_budget_tokens=anthropic_thinking_budget_tokens,
             google_thinking_config=google_thinking_config,
         )
+    )
+    release_in_finally = True
+    try:
+        try:
+            result = await asyncio.shield(llm_task)
+        except asyncio.CancelledError:
+            await _drain_cancelled_task_with_timeout(
+                llm_task,
+                LLM_CANCEL_DRAIN_TIMEOUT_SECONDS,
+            )
+            if not llm_task.done():
+                release_in_finally = False
+                llm_task.add_done_callback(
+                    lambda task: _release_llm_call_slot_when_task_done(
+                        task,
+                        semaphore,
+                    )
+                )
+            raise
+    finally:
+        if release_in_finally:
+            semaphore.release()
+    latency_ms = int((time.monotonic() - started) * 1000)
 
     usage_payload: Optional[dict[str, int]] = None
     if result.usage is not None:
@@ -889,7 +1549,7 @@ async def _call_llm(
         if not usage_payload:
             usage_payload = None
 
-    return result.content, usage_payload
+    return result.content, usage_payload, latency_ms, queue_wait_ms
 
 
 async def _choose_llm_link(
@@ -920,13 +1580,15 @@ async def _choose_llm_link(
     saw_prompt_tokens = False
     saw_completion_tokens = False
     saw_any_usage = False
+    latency_ms_sum = 0
+    queue_wait_ms_sum = 0
 
     chosen_index: Optional[int] = None
     used_try: Optional[int] = None
     answer_errors: list[str] = []
 
     for try_num in range(max_tries):
-        response_text, usage_payload = await _call_llm(
+        response_text, usage_payload, latency_ms, queue_wait_ms = await _call_llm(
             prompt,
             model=model,
             max_tokens=max_tokens,
@@ -938,6 +1600,8 @@ async def _choose_llm_link(
             google_thinking_config=google_thinking_config,
         )
 
+        latency_ms_sum += latency_ms
+        queue_wait_ms_sum += queue_wait_ms
         llm_outputs.append(response_text)
         last_output = response_text
 
@@ -980,6 +1644,7 @@ async def _choose_llm_link(
             "tries": max_tries,
             "answer_errors": answer_errors,
             "llm_output": last_output,
+            "latency_ms": latency_ms_sum,
         }
         if len(llm_outputs) > 1:
             metadata["llm_outputs"] = llm_outputs
@@ -989,11 +1654,14 @@ async def _choose_llm_link(
             if saw_completion_tokens:
                 metadata["completion_tokens"] = completion_tokens_sum
             metadata["total_tokens"] = total_tokens_sum
+        if queue_wait_ms_sum > 0:
+            metadata["queue_wait_ms"] = queue_wait_ms_sum
         return None, metadata
 
     metadata = {
         "tries": used_try or 0,
         "llm_output": last_output,
+        "latency_ms": latency_ms_sum,
     }
     if len(llm_outputs) > 1:
         metadata["llm_outputs"] = llm_outputs
@@ -1003,6 +1671,8 @@ async def _choose_llm_link(
         if saw_completion_tokens:
             metadata["completion_tokens"] = completion_tokens_sum
         metadata["total_tokens"] = total_tokens_sum
+    if queue_wait_ms_sum > 0:
+        metadata["queue_wait_ms"] = queue_wait_ms_sum
 
     return chosen_index, metadata
 
@@ -1013,9 +1683,11 @@ def _path_so_far(start_article: str, steps: list[dict[str, Any]]) -> list[str]:
         if not isinstance(step, dict):
             continue
         article = step.get("article")
-        if not isinstance(article, str) or not article:
+        if not isinstance(article, str) or not article.strip():
             continue
-        if path and path[-1] == article:
+        if not _strip_wiki_fragment(article).strip():
+            continue
+        if path and _titles_match(path[-1], article):
             continue
         path.append(article)
 
@@ -1023,10 +1695,44 @@ def _path_so_far(start_article: str, steps: list[dict[str, Any]]) -> list[str]:
     if not path:
         return [start_value] if start_value else []
 
-    if start_value and path[0] != start_value:
+    if start_value and not _titles_match(path[0], start_value):
         path.insert(0, start_value)
 
     return path
+
+
+def _hop_count_from_steps(
+    start_article: Optional[str],
+    steps: list[dict[str, Any]],
+) -> int:
+    current_article = start_article.strip() if isinstance(start_article, str) else ""
+    hops = 0
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+
+        step_type = step.get("type")
+        article = step.get("article")
+        if not isinstance(article, str) or not article.strip():
+            article = current_article
+        elif not _strip_wiki_fragment(article).strip():
+            article = current_article
+
+        if step_type == "start":
+            current_article = article
+            continue
+
+        if step_type in ("move", "win", "lose") and article and not _titles_match(
+            article,
+            current_article,
+        ):
+            hops += 1
+
+        if article:
+            current_article = article
+
+    return hops
 
 
 async def _compute_llm_next_step(
@@ -1107,7 +1813,7 @@ async def _compute_llm_next_step(
     return "move", selected, {"selected_index": chosen_index, **llm_metadata}
 
 
-async def _run_llm_room_task(room_id: str, run_id: str) -> None:
+async def _run_llm_room_task(room_id: str, run_id: str, task_generation: int) -> None:
     room_id = _normalize_room_id(room_id)
 
     configure_observability()
@@ -1122,6 +1828,8 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
 
     async with lock:
         if room.get("status") != "running":
+            return
+        if not _room_task_generation_is_current(room_id, run_id, task_generation):
             return
 
         run = _room_run_by_id(room, run_id)
@@ -1177,6 +1885,8 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
                 async with lock:
                     if room.get("status") != "running":
                         return
+                    if not _room_task_generation_is_current(room_id, run_id, task_generation):
+                        return
 
                     run = _room_run_by_id(room, run_id)
                     if not run:
@@ -1200,7 +1910,10 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
                     if not isinstance(destination_article, str) or not destination_article:
                         return
 
-                    current_hops = max(0, len(steps) - 1)
+                    current_hops = _hop_count_from_steps(
+                        room.get("start_article"),
+                        steps,
+                    )
                     next_hops = current_hops + 1
 
                     max_steps = run.get("max_steps")
@@ -1287,6 +2000,7 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
                         room_id,
                         run_id,
                         snapshot_current,
+                        expected_task_generation=task_generation,
                         reason="llm_error",
                         error="Missing model",
                     )
@@ -1314,6 +2028,7 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
                         room_id,
                         run_id,
                         snapshot_current,
+                        expected_task_generation=task_generation,
                         reason="llm_error",
                         error=str(exc),
                     )
@@ -1327,6 +2042,7 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
                     metadata=metadata,
                     forced_article=snapshot_destination if step_type == "win" else None,
                     expected_current=snapshot_current,
+                    expected_task_generation=task_generation,
                 )
 
                 if step_type in ("win", "lose"):
@@ -1335,7 +2051,14 @@ async def _run_llm_room_task(room_id: str, run_id: str) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await _fail_llm_run(room_id, run_id, None, reason="llm_error", error=str(exc))
+            await _fail_llm_run(
+                room_id,
+                run_id,
+                None,
+                expected_task_generation=task_generation,
+                reason="llm_error",
+                error=str(exc),
+            )
 
 
 async def _finish_llm_run(
@@ -1347,6 +2070,7 @@ async def _finish_llm_run(
     metadata: Optional[dict[str, Any]] = None,
     forced_article: Optional[str] = None,
     expected_current: Optional[str] = None,
+    expected_task_generation: Optional[int] = None,
 ) -> None:
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
@@ -1362,6 +2086,12 @@ async def _finish_llm_run(
         if not room:
             return
         if room.get("status") != "running":
+            return
+        if not _room_task_generation_is_current(
+            room_id,
+            run_id,
+            expected_task_generation,
+        ):
             return
 
         run = _room_run_by_id(room, run_id)
@@ -1409,6 +2139,7 @@ async def _fail_llm_run(
     run_id: str,
     article: Optional[str],
     *,
+    expected_task_generation: Optional[int] = None,
     reason: str,
     error: Optional[str] = None,
 ) -> None:
@@ -1424,6 +2155,12 @@ async def _fail_llm_run(
     async with lock:
         room = ROOMS.get(room_id)
         if not room:
+            return
+        if not _room_task_generation_is_current(
+            room_id,
+            run_id,
+            expected_task_generation,
+        ):
             return
         run = _room_run_by_id(room, run_id)
         if not run or run.get("status") != "running":
@@ -1462,14 +2199,23 @@ async def _fail_llm_run(
     return
 
 
-def _start_llm_room_task(room_id: str, run_id: str) -> None:
+def _start_llm_room_task(
+    room_id: str,
+    run_id: str,
+    *,
+    replace_existing: bool = False,
+) -> None:
     room_id = _normalize_room_id(room_id)
     tasks = ROOM_TASKS.setdefault(room_id, {})
     existing = tasks.get(run_id)
-    if existing and not existing.done():
+    if existing and not existing.done() and not replace_existing:
         return
 
-    task = asyncio.create_task(_run_llm_room_task(room_id, run_id))
+    if existing and not existing.done():
+        existing.cancel()
+
+    task_generation = _advance_room_task_generation(room_id, run_id)
+    task = asyncio.create_task(_run_llm_room_task(room_id, run_id, task_generation))
     tasks[run_id] = task
 
     def _cleanup(_: asyncio.Task) -> None:
@@ -1479,6 +2225,7 @@ def _start_llm_room_task(room_id: str, run_id: str) -> None:
         current = tasks_map.get(run_id)
         if current is task:
             tasks_map.pop(run_id, None)
+            _clear_room_task_generation(room_id, run_id)
         if not tasks_map:
             ROOM_TASKS.pop(room_id, None)
 
@@ -1514,10 +2261,14 @@ async def _start_room_cleanup_task():
                 expired.append(room_id)
 
             for room_id in expired:
-                _cancel_room_tasks(room_id)
+                await _await_cancelled_room_tasks(_cancel_room_tasks(room_id))
+                await _close_room_connections(room_id)
                 ROOMS.pop(room_id, None)
                 ROOM_LOCKS.pop(room_id, None)
-                ROOM_CONNECTIONS.pop(room_id, None)
+                ROOM_PLAYER_CONNECTION_COUNTS.pop(room_id, None)
+                ROOM_PLAYER_TOKENS.pop(room_id, None)
+                ROOM_WS_TICKETS.pop(room_id, None)
+                ROOM_TASK_GENERATIONS.pop(room_id, None)
 
     asyncio.create_task(_cleanup_loop())
 
@@ -1553,7 +2304,13 @@ async def _start_local_run_trace_cleanup_task():
 @app.on_event("shutdown")
 async def _shutdown_room_tasks():
     for room_id in list(ROOM_TASKS.keys()):
-        _cancel_room_tasks(room_id)
+        await _await_cancelled_room_tasks(_cancel_room_tasks(room_id))
+    for room_id in list(ROOM_CONNECTIONS.keys()):
+        await _close_room_connections(room_id)
+    ROOM_CONNECTION_OWNERS.clear()
+    ROOM_PLAYER_CONNECTION_COUNTS.clear()
+    ROOM_PLAYER_TOKENS.clear()
+    ROOM_WS_TICKETS.clear()
 
 
 @app.on_event("shutdown")
@@ -1581,13 +2338,114 @@ def _inject_base_href(html: str) -> str:
     return html[:insert_at] + base_tag + html[insert_at:]
 
 
-def _strip_script_tags(html: str) -> str:
-    # Prevent third-party scripts from interfering; we only need the content.
-    return re.sub(r"(?is)<script\b.*?</script>", "", html)
+def _html_attr_local_name(name: str) -> str:
+    return name.rsplit(":", 1)[-1].lower()
 
 
-def _inject_wiki_bridge(html: str) -> str:
-    script = """
+def _html_attr_is_safe_url(value: str) -> bool:
+    compact = re.sub(r"[\x00-\x20]+", "", (value or "")).lower()
+    parsed = urlparse(compact)
+    if parsed.scheme and parsed.scheme not in {"http", "https", "mailto"}:
+        return False
+    return True
+
+
+def _html_attr_is_safe_srcset(value: str) -> bool:
+    for candidate in (value or "").split(","):
+        url = candidate.strip().split(None, 1)[0] if candidate.strip() else ""
+        if url and not _html_attr_is_safe_url(url):
+            return False
+    return True
+
+
+def _sanitize_wiki_attrs(attrs: list[tuple[str, Optional[str]]]) -> str:
+    safe_attrs: list[str] = []
+    for raw_name, raw_value in attrs:
+        name = (raw_name or "").strip()
+        attr_name = name.lower()
+        local_name = _html_attr_local_name(attr_name)
+        if not name or not _WIKI_SANITIZER_ATTR_NAME_RE.match(name):
+            continue
+        if attr_name.startswith("on") or local_name.startswith("on"):
+            continue
+        if local_name in {"style", "srcdoc"}:
+            continue
+
+        value = raw_value if raw_value is not None else None
+        if value is not None:
+            if local_name in _WIKI_SANITIZER_URL_ATTRS and not _html_attr_is_safe_url(value):
+                continue
+            if local_name in _WIKI_SANITIZER_SRCSET_ATTRS and not _html_attr_is_safe_srcset(value):
+                continue
+
+        if value is None:
+            safe_attrs.append(f" {attr_name}")
+        else:
+            safe_attrs.append(f' {attr_name}="{_escape_html(value)}"')
+
+    return "".join(safe_attrs)
+
+
+class _WikiHtmlSanitizer(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.parts: list[str] = []
+        self._drop_stack: list[str] = []
+
+    def _dropping_content(self) -> bool:
+        return bool(self._drop_stack)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        tag_name = tag.lower()
+        if tag_name in _WIKI_SANITIZER_DROP_CONTENT_TAGS:
+            self._drop_stack.append(tag_name)
+            return
+        if self._dropping_content():
+            return
+        if tag_name in _WIKI_SANITIZER_DROP_TAGS:
+            return
+        self.parts.append(f"<{tag_name}{_sanitize_wiki_attrs(attrs)}>")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        tag_name = tag.lower()
+        if self._dropping_content() or tag_name in _WIKI_SANITIZER_DROP_CONTENT_TAGS:
+            return
+        if tag_name in _WIKI_SANITIZER_DROP_TAGS:
+            return
+        self.parts.append(f"<{tag_name}{_sanitize_wiki_attrs(attrs)}>")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_name = tag.lower()
+        if self._drop_stack:
+            if tag_name == self._drop_stack[-1]:
+                self._drop_stack.pop()
+            return
+        if tag_name in _WIKI_SANITIZER_DROP_TAGS or tag_name in _WIKI_SANITIZER_DROP_CONTENT_TAGS:
+            return
+        self.parts.append(f"</{tag_name}>")
+
+    def handle_data(self, data: str) -> None:
+        if not self._dropping_content():
+            self.parts.append(_escape_html(data))
+
+    def handle_entityref(self, name: str) -> None:
+        if not self._dropping_content():
+            self.parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if not self._dropping_content():
+            self.parts.append(f"&#{name};")
+
+
+def _sanitize_wiki_html(html: str) -> str:
+    parser = _WikiHtmlSanitizer()
+    parser.feed(html or "")
+    parser.close()
+    return "".join(parser.parts)
+
+
+def _wiki_bridge_script_tag() -> str:
+    return """
 <script>
 (function () {
   var replayMode = false
@@ -1768,7 +2626,7 @@ def _inject_wiki_bridge(html: str) -> str:
         if (settled) return
         settled = true
         delete pendingNavigate[requestId]
-        resolve({ handled: false, allow: true })
+        resolve({ handled: false, allow: false })
       }, 700)
     })
   }
@@ -1913,7 +2771,7 @@ def _inject_wiki_bridge(html: str) -> str:
       // Default: only count links with a visible label. Image-only links (e.g. flag
       // icons) can be clickable but their destination isn't visible as text.
       try {
-        var label = (anchor.innerText || "").replace(/\s+/g, " ").trim()
+        var label = (anchor.innerText || "").replace(/\\s+/g, " ").trim()
         if (!label && !includeImageLinks) continue
       } catch {
         // ignore
@@ -1992,7 +2850,7 @@ def _inject_wiki_bridge(html: str) -> str:
 
       if (!includeImageLinks) {
         try {
-          var label = (anchor.innerText || "").replace(/\s+/g, " ").trim()
+          var label = (anchor.innerText || "").replace(/\\s+/g, " ").trim()
           if (!label) {
             event.preventDefault()
             return
@@ -2045,6 +2903,9 @@ def _inject_wiki_bridge(html: str) -> str:
 </script>
 """
 
+
+def _inject_wiki_bridge(html: str) -> str:
+    script = _wiki_bridge_script_tag()
     body_close_match = re.search(r"</body\s*>", html, flags=re.IGNORECASE)
     if not body_close_match:
         return html + script
@@ -2053,8 +2914,41 @@ def _inject_wiki_bridge(html: str) -> str:
     return html[:insert_at] + script + html[insert_at:]
 
 
+@lru_cache(maxsize=1)
+def _wiki_bridge_script_hash() -> str:
+    script_tag = _wiki_bridge_script_tag()
+    match = re.search(
+        r"<script[^>]*>(?P<body>.*)</script>",
+        script_tag,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    script_body = match.group("body") if match else ""
+    digest = hashlib.sha256(script_body.encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+@lru_cache(maxsize=1)
+def _wiki_proxy_csp_header() -> str:
+    script_hash = _wiki_bridge_script_hash()
+    frame_ancestors = " ".join(["'self'", *_default_cors_allowed_origins()])
+    return (
+        "default-src 'none'; "
+        f"script-src 'sha256-{script_hash}'; "
+        "script-src-attr 'none'; "
+        "connect-src 'self'; "
+        "img-src https: data:; "
+        "style-src 'self' 'unsafe-inline' https:; "
+        "font-src https: data:; "
+        "frame-src 'none'; "
+        "object-src 'none'; "
+        "base-uri https://simple.wikipedia.org; "
+        "form-action 'none'; "
+        f"frame-ancestors {frame_ancestors}"
+    )
+
+
 def _rewrite_wiki_html(html: str) -> str:
-    html = _strip_script_tags(html)
+    html = _sanitize_wiki_html(html)
     html = _inject_base_href(html)
     html = _inject_wiki_bridge(html)
     return html
@@ -2130,6 +3024,7 @@ async def create_room(request: Request, body: CreateRoomRequest):
         room_id = _make_code("room", 8)
 
     owner_player_id = _make_code("player", 10)
+    owner_player_token = _issue_room_player_token(room_id, owner_player_id)
     owner_run_id = _make_code("run", 10)
 
     room: dict[str, Any] = {
@@ -2171,6 +3066,7 @@ async def create_room(request: Request, body: CreateRoomRequest):
     ROOMS[room_id] = room
     ROOM_LOCKS[room_id] = asyncio.Lock()
     ROOM_CONNECTIONS[room_id] = set()
+    ROOM_PLAYER_CONNECTION_COUNTS[room_id] = {}
 
     print(
         "Created room "
@@ -2190,7 +3086,10 @@ async def create_room(request: Request, body: CreateRoomRequest):
     join_scheme = request.url.scheme
 
     join_url = f"{origin}/?room={room_id}"
-    if join_host in ("localhost", "127.0.0.1", "0.0.0.0"):
+    public_origin = _public_host_origin(fallback_scheme=join_scheme, fallback_port=join_port)
+    if public_origin:
+        join_url = f"{public_origin}/?room={room_id}"
+    elif join_host in ("localhost", "127.0.0.1", "0.0.0.0"):
         lan_ip = _detect_lan_ip()
         if lan_ip:
             netloc = f"{lan_ip}:{join_port}" if join_port else lan_ip
@@ -2198,13 +3097,21 @@ async def create_room(request: Request, body: CreateRoomRequest):
     return {
         "room_id": room_id,
         "owner_player_id": owner_player_id,
+        "owner_player_token": owner_player_token,
         "join_url": join_url,
         "room": room,
     }
 
 
 @app.get("/rooms/{room_id}", response_model=RoomStateV1)
-async def get_room(room_id: str):
+async def get_room(room_id: str, request: Request, player_id: Optional[str] = None):
+    room_id = _normalize_room_id(room_id)
+    _room_state(room_id)
+    _require_room_player_token(
+        room_id=room_id,
+        player_id=player_id,
+        token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+    )
     return _room_state(room_id)
 
 
@@ -2228,6 +3135,7 @@ async def join_room(room_id: str, body: JoinRoomRequest):
 
     joined_at = _now_iso()
     player_id = _make_code("player", 10)
+    player_token = ""
 
     async with lock:
         status = room.get("status")
@@ -2242,6 +3150,7 @@ async def join_room(room_id: str, body: JoinRoomRequest):
         existing_ids = {p.get("id") for p in room.get("players", []) if isinstance(p, dict)}
         while player_id in existing_ids:
             player_id = _make_code("player", 10)
+        player_token = _issue_room_player_token(room_id, player_id)
 
         run_id = _make_code("run", 10)
         room.setdefault("players", []).append(
@@ -2277,11 +3186,30 @@ async def join_room(room_id: str, body: JoinRoomRequest):
         room["updated_at"] = joined_at
 
     await _broadcast_room(room_id)
-    return {"player_id": player_id, "room": room}
+    return {"player_id": player_id, "player_token": player_token, "room": room}
+
+
+@app.post("/rooms/{room_id}/ws_ticket", response_model=RoomWsTicketResponse)
+async def issue_room_ws_ticket(
+    room_id: str,
+    body: RoomWsTicketRequest,
+    request: Request,
+):
+    room_id = _normalize_room_id(room_id)
+    _room_state(room_id)
+    checked_player_id = _require_room_player_token(
+        room_id=room_id,
+        player_id=body.player_id,
+        token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+    )
+    return {
+        "player_id": checked_player_id,
+        "ws_ticket": _issue_room_ws_ticket(room_id, checked_player_id),
+    }
 
 
 @app.post("/rooms/{room_id}/start", response_model=RoomStateV1)
-async def start_room(room_id: str, body: StartRoomRequest):
+async def start_room(room_id: str, body: StartRoomRequest, request: Request):
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
     room = ROOMS.get(room_id)
@@ -2297,10 +3225,16 @@ async def start_room(room_id: str, body: StartRoomRequest):
     llm_run_ids: list[str] = []
 
     async with lock:
-        if body.player_id != room.get("owner_player_id"):
-            raise HTTPException(status_code=403, detail="Only the host can start the race")
+        _require_room_owner(
+            room_id=room_id,
+            room=room,
+            player_id=body.player_id,
+            token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+        )
         if room.get("status") != "lobby":
             return room
+        if _room_has_startable_llm_runs(room):
+            _require_local_llm_request(request)
 
         started_at = _now_iso()
         room["status"] = "running"
@@ -2326,12 +3260,12 @@ async def start_room(room_id: str, body: StartRoomRequest):
     await _broadcast_room(room_id)
 
     for run_id in llm_run_ids:
-        _start_llm_room_task(room_id, run_id)
+        _start_llm_room_task(room_id, run_id, replace_existing=True)
     return room
 
 
 @app.post("/rooms/{room_id}/new_round", response_model=RoomStateV1)
-async def new_round(room_id: str, body: NewRoundRequest):
+async def new_round(room_id: str, body: NewRoundRequest, request: Request):
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
     room = ROOMS.get(room_id)
@@ -2359,13 +3293,18 @@ async def new_round(room_id: str, body: NewRoundRequest):
         raise HTTPException(status_code=400, detail="Start and target must be different")
 
     updated_at = _now_iso()
+    cancelled_tasks: list[asyncio.Task] = []
 
     async with lock:
-        if body.player_id != room.get("owner_player_id"):
-            raise HTTPException(status_code=403, detail="Only the host can start a new round")
+        _require_room_owner(
+            room_id=room_id,
+            room=room,
+            player_id=body.player_id,
+            token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+        )
 
         # Stop any in-flight LLM tasks from the previous round.
-        _cancel_room_tasks(room_id)
+        cancelled_tasks = _cancel_room_tasks(room_id)
 
         room["start_article"] = start_resolved
         room["destination_article"] = destination_resolved
@@ -2391,6 +3330,7 @@ async def new_round(room_id: str, body: NewRoundRequest):
 
         room["updated_at"] = updated_at
 
+    await _await_cancelled_room_tasks(cancelled_tasks)
     await _broadcast_room(room_id)
     return room
 
@@ -2406,6 +3346,8 @@ def _validate_human_move(
 ) -> tuple[bool, Optional[dict[str, Any]]]:
     to_raw = _strip_wiki_fragment(to_article).replace("_", " ").strip()
     if not to_raw:
+        if "#" in to_article and to_article.strip().startswith("#"):
+            return True, None
         raise HTTPException(status_code=400, detail="to_article is required")
 
     resolved = db.resolve_title(to_raw)
@@ -2479,7 +3421,7 @@ def _validate_human_move(
 
 
 @app.post("/rooms/{room_id}/move", response_model=RoomStateV1)
-async def room_move(room_id: str, body: MoveRoomRequest):
+async def room_move(room_id: str, body: MoveRoomRequest, request: Request):
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
     room = ROOMS.get(room_id)
@@ -2496,10 +3438,15 @@ async def room_move(room_id: str, body: MoveRoomRequest):
     changed = False
 
     async with lock:
+        player_id = _require_room_player_token(
+            room_id=room_id,
+            player_id=body.player_id,
+            token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+        )
         if room.get("status") != "running":
             raise HTTPException(status_code=409, detail="Room is not running")
 
-        run = _room_run_for_player(room, body.player_id)
+        run = _room_run_for_player(room, player_id)
         if not run:
             raise HTTPException(status_code=404, detail="Player not in room")
         if run.get("status") != "running":
@@ -2512,7 +3459,7 @@ async def room_move(room_id: str, body: MoveRoomRequest):
         if not isinstance(current_article, str) or not current_article:
             current_article = room.get("start_article")
 
-        current_hops = max(0, len(steps) - 1)
+        current_hops = _hop_count_from_steps(room.get("start_article"), steps)
         max_hops = room.get("rules", {}).get("max_hops")
         max_hops = max_hops if isinstance(max_hops, int) and max_hops > 0 else 20
         destination_article = room.get("destination_article")
@@ -2570,7 +3517,8 @@ async def local_validate_move(body: ValidateMoveRequest):
 
 
 @app.post("/rooms/{room_id}/add_llm", response_model=RoomStateV1)
-async def add_llm_run(room_id: str, body: AddLlmRunRequest):
+async def add_llm_run(room_id: str, body: AddLlmRunRequest, request: Request):
+    _require_local_llm_request(request)
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
     room = ROOMS.get(room_id)
@@ -2592,8 +3540,12 @@ async def add_llm_run(room_id: str, body: AddLlmRunRequest):
     new_run_id: Optional[str] = None
 
     async with lock:
-        if body.requested_by_player_id != room.get("owner_player_id"):
-            raise HTTPException(status_code=403, detail="Only the host can add AI players")
+        _require_room_owner(
+            room_id=room_id,
+            room=room,
+            player_id=body.requested_by_player_id,
+            token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+        )
 
         room_status = room.get("status")
         if room_status == "finished":
@@ -2627,18 +3579,22 @@ async def add_llm_run(room_id: str, body: AddLlmRunRequest):
         if not isinstance(max_steps, int) or max_steps <= 0:
             max_steps = 20
 
-        if "max_links" in body.__fields_set__:
+        body_fields_set = getattr(body, "model_fields_set", None)
+        if body_fields_set is None:
+            body_fields_set = getattr(body, "__fields_set__", set())
+
+        if "max_links" in body_fields_set:
             max_links = body.max_links if isinstance(body.max_links, int) and body.max_links > 0 else None
         else:
             max_links = rules.get("max_links") if isinstance(rules.get("max_links"), int) else None
 
-        if "max_tokens" in body.__fields_set__:
+        if "max_tokens" in body_fields_set:
             max_tokens = body.max_tokens if isinstance(body.max_tokens, int) and body.max_tokens > 0 else None
         else:
             max_tokens = rules.get("max_tokens") if isinstance(rules.get("max_tokens"), int) else None
 
         player_name = body.player_name.strip() if isinstance(body.player_name, str) else ""
-        api_base = body.api_base.strip() if isinstance(body.api_base, str) else ""
+        api_base = _normalize_api_base(body.api_base, request=request) or ""
 
         openai_api_mode = (
             body.openai_api_mode.strip() if isinstance(body.openai_api_mode, str) else ""
@@ -2703,7 +3659,12 @@ async def add_llm_run(room_id: str, body: AddLlmRunRequest):
 
 
 @app.post("/rooms/{room_id}/runs/{run_id}/cancel", response_model=RoomStateV1)
-async def cancel_room_run(room_id: str, run_id: str, body: RoomRunControlRequest):
+async def cancel_room_run(
+    room_id: str,
+    run_id: str,
+    body: RoomRunControlRequest,
+    request: Request,
+):
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
     room = ROOMS.get(room_id)
@@ -2720,8 +3681,12 @@ async def cancel_room_run(room_id: str, run_id: str, body: RoomRunControlRequest
     changed = False
 
     async with lock:
-        if body.requested_by_player_id != room.get("owner_player_id"):
-            raise HTTPException(status_code=403, detail="Only the host can cancel runs")
+        _require_room_owner(
+            room_id=room_id,
+            room=room,
+            player_id=body.requested_by_player_id,
+            token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+        )
 
         run = _room_run_by_id(room, run_id)
         if not run:
@@ -2771,16 +3736,26 @@ async def cancel_room_run(room_id: str, run_id: str, body: RoomRunControlRequest
         # Keep the room open for additional players/runs even if all current
         # runs have finished.
 
-    _cancel_room_task(room_id, run_id)
+        cancelled_task = _cancel_room_task(room_id, run_id)
+        if status == "not_started":
+            _clear_room_task_generation(room_id, run_id)
+
     if changed:
         await _broadcast_room(room_id)
+    if cancelled_task is not None:
+        await _await_cancelled_room_tasks([cancelled_task])
     # Keep the room open for additional players/runs even if all current runs
     # have finished.
     return room
 
 
 @app.post("/rooms/{room_id}/runs/{run_id}/abandon", response_model=RoomStateV1)
-async def abandon_room_run(room_id: str, run_id: str, body: RoomRunControlRequest):
+async def abandon_room_run(
+    room_id: str,
+    run_id: str,
+    body: RoomRunControlRequest,
+    request: Request,
+):
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
     room = ROOMS.get(room_id)
@@ -2797,6 +3772,11 @@ async def abandon_room_run(room_id: str, run_id: str, body: RoomRunControlReques
     changed = False
 
     async with lock:
+        request_player_id = _require_room_player_token(
+            room_id=room_id,
+            player_id=body.requested_by_player_id,
+            token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+        )
         run = _room_run_by_id(room, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -2805,7 +3785,7 @@ async def abandon_room_run(room_id: str, run_id: str, body: RoomRunControlReques
             raise HTTPException(status_code=400, detail="Only human runs can be abandoned")
 
         run_player_id = run.get("player_id")
-        if not run_player_id or body.requested_by_player_id != run_player_id:
+        if not run_player_id or request_player_id != run_player_id:
             raise HTTPException(status_code=403, detail="Only the owning player can abandon")
 
         if run.get("status") == "finished":
@@ -2845,7 +3825,12 @@ async def abandon_room_run(room_id: str, run_id: str, body: RoomRunControlReques
 
 
 @app.post("/rooms/{room_id}/runs/{run_id}/restart", response_model=RoomStateV1)
-async def restart_room_run(room_id: str, run_id: str, body: RoomRunControlRequest):
+async def restart_room_run(
+    room_id: str,
+    run_id: str,
+    body: RoomRunControlRequest,
+    request: Request,
+):
     room_id = _normalize_room_id(room_id)
     lock = ROOM_LOCKS.get(room_id)
     room = ROOMS.get(room_id)
@@ -2860,10 +3845,15 @@ async def restart_room_run(room_id: str, run_id: str, body: RoomRunControlReques
 
     updated_at = _now_iso()
     should_start = False
+    cancelled_task: Optional[asyncio.Task] = None
 
     async with lock:
-        if body.requested_by_player_id != room.get("owner_player_id"):
-            raise HTTPException(status_code=403, detail="Only the host can restart runs")
+        _require_room_owner(
+            room_id=room_id,
+            room=room,
+            player_id=body.requested_by_player_id,
+            token=request.headers.get(ROOM_PLAYER_TOKEN_HEADER),
+        )
 
         # Allow restarting AI runs even after all players finished.
 
@@ -2874,10 +3864,12 @@ async def restart_room_run(room_id: str, run_id: str, body: RoomRunControlReques
         if run.get("kind") != "llm":
             raise HTTPException(status_code=400, detail="Only AI runs can be restarted")
 
-        _cancel_room_task(room_id, run_id)
-
         room_status = room.get("status")
         should_start = room_status == "running"
+        if should_start:
+            _require_local_llm_request(request)
+
+        cancelled_task = _cancel_room_task(room_id, run_id)
 
         run["result"] = None
         run["finished_at"] = None
@@ -2900,30 +3892,57 @@ async def restart_room_run(room_id: str, run_id: str, body: RoomRunControlReques
         room["updated_at"] = updated_at
 
     await _broadcast_room(room_id)
+    if cancelled_task is not None:
+        await _await_cancelled_room_tasks([cancelled_task])
     if should_start:
-        _start_llm_room_task(room_id, run_id)
+        _start_llm_room_task(room_id, run_id, replace_existing=True)
     return room
 
 
 @app.websocket("/rooms/{room_id}/ws")
-async def room_ws(websocket: WebSocket, room_id: str, player_id: Optional[str] = None):
+async def room_ws(
+    websocket: WebSocket,
+    room_id: str,
+    player_id: Optional[str] = None,
+    ws_ticket: Optional[str] = None,
+):
+    await websocket.accept()
+
     room_id = _normalize_room_id(room_id)
     room = ROOMS.get(room_id)
     if not room:
-        await websocket.close(code=1008)
+        await _close_room_ws_with_error(
+            websocket,
+            code=1001,
+            detail="This room is no longer available. Please create or join a new room.",
+        )
         return
 
-    await websocket.accept()
-    ROOM_CONNECTIONS.setdefault(room_id, set()).add(websocket)
+    checked_player_id = player_id.strip() if isinstance(player_id, str) else ""
+    if not checked_player_id or not _consume_room_ws_ticket(
+        room_id,
+        checked_player_id,
+        ws_ticket,
+    ):
+        await _close_room_ws_with_error(
+            websocket,
+            code=1008,
+            detail="Room credentials are invalid or expired. Please join the room again.",
+        )
+        return
 
-    if player_id:
-        await _set_player_connected(room_id, player_id, True)
-
-    await websocket.send_text(
-        json.dumps({"type": "room_state", "room": room}, ensure_ascii=False)
-    )
-
+    registered = False
     try:
+        ROOM_CONNECTIONS.setdefault(room_id, set()).add(websocket)
+        ROOM_CONNECTION_OWNERS[websocket] = (room_id, checked_player_id)
+        registered = True
+
+        await _set_player_connected(room_id, checked_player_id, True)
+
+        await websocket.send_text(
+            json.dumps({"type": "room_state", "room": room}, ensure_ascii=False)
+        )
+
         while True:
             _ = await websocket.receive_text()
     except WebSocketDisconnect:
@@ -2931,11 +3950,8 @@ async def room_ws(websocket: WebSocket, room_id: str, player_id: Optional[str] =
     except Exception:
         pass
     finally:
-        conns = ROOM_CONNECTIONS.get(room_id)
-        if conns:
-            conns.discard(websocket)
-        if player_id:
-            await _set_player_connected(room_id, player_id, False)
+        if registered:
+            await _discard_room_connection(room_id, websocket)
 
 
 def _escape_html(value: str) -> str:
@@ -3004,6 +4020,9 @@ def _wiki_proxy_headers(cache_status: str) -> dict[str, str]:
     max_age = max(0, int(WIKIRACE_WIKI_CACHE_TTL_SECONDS))
     return {
         "Cache-Control": f"public, max-age={max_age}",
+        "Content-Security-Policy": _wiki_proxy_csp_header(),
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
         "X-Wiki-Proxy-Cache": cache_status,
     }
 
@@ -3028,6 +4047,20 @@ def _wiki_proxy_cache_set(key: str, html: str, now: float) -> None:
 
     while len(_WIKI_PROXY_CACHE) > WIKIRACE_WIKI_CACHE_MAX_ENTRIES:
         _WIKI_PROXY_CACHE.popitem(last=False)
+
+
+async def _forget_wiki_proxy_inflight(cache_key: str, task: asyncio.Task[str]) -> None:
+    async with _WIKI_PROXY_LOCK:
+        if _WIKI_PROXY_INFLIGHT.get(cache_key) is task:
+            _WIKI_PROXY_INFLIGHT.pop(cache_key, None)
+
+
+def _on_wiki_proxy_inflight_done(cache_key: str, task: asyncio.Task[str]) -> None:
+    _detach_task_exception(task)
+    try:
+        task.get_loop().create_task(_forget_wiki_proxy_inflight(cache_key, task))
+    except RuntimeError:
+        pass
 
 
 async def _fetch_remote_wiki_html(remote_urls: list[tuple[str, str]]) -> str:
@@ -3096,10 +4129,13 @@ async def wiki_proxy(article_title: str):
         inflight = _WIKI_PROXY_INFLIGHT.get(cache_key)
         if inflight is None:
             inflight = asyncio.create_task(_fetch_rewritten_wiki_html(remote_urls))
+            inflight.add_done_callback(
+                lambda task, key=cache_key: _on_wiki_proxy_inflight_done(key, task)
+            )
             _WIKI_PROXY_INFLIGHT[cache_key] = inflight
 
     try:
-        rewritten_html = await inflight
+        rewritten_html = await asyncio.shield(inflight)
 
         async with _WIKI_PROXY_LOCK:
             if _WIKI_PROXY_INFLIGHT.get(cache_key) is inflight:
@@ -3126,7 +4162,11 @@ async def wiki_proxy(article_title: str):
 
 
 @app.post("/llm/local_run/start", response_model=LocalRunTraceStartResponse)
-async def llm_local_run_start(request: LocalRunTraceStartRequest):
+async def llm_local_run_start(
+    request: LocalRunTraceStartRequest,
+    http_request: Request,
+):
+    _require_local_llm_request(http_request)
     configure_observability()
 
     session_id = request.session_id.strip() if isinstance(request.session_id, str) else ""
@@ -3140,11 +4180,7 @@ async def llm_local_run_start(request: LocalRunTraceStartRequest):
         if isinstance(request.openai_reasoning_effort, str) and request.openai_reasoning_effort.strip()
         else None
     )
-    api_base = (
-        request.api_base.strip()
-        if isinstance(request.api_base, str) and request.api_base.strip()
-        else None
-    )
+    api_base = _normalize_api_base(request.api_base, request=http_request)
     openai_api_mode = (
         request.openai_api_mode.strip()
         if isinstance(request.openai_api_mode, str) and request.openai_api_mode.strip()
@@ -3231,7 +4267,8 @@ async def llm_local_run_start(request: LocalRunTraceStartRequest):
 
 
 @app.post("/llm/local_run/end")
-async def llm_local_run_end(request: LocalRunTraceEndRequest):
+async def llm_local_run_end(request: LocalRunTraceEndRequest, http_request: Request):
+    _require_local_llm_request(http_request)
     session_id = request.session_id.strip() if isinstance(request.session_id, str) else ""
     run_id = request.run_id.strip() if isinstance(request.run_id, str) else ""
     if not session_id or not run_id:
@@ -3253,6 +4290,7 @@ async def llm_local_run_end(request: LocalRunTraceEndRequest):
 
 @app.post("/llm/local_run/step", response_model=LocalLlmStepResponse)
 async def llm_local_run_step(payload: LocalLlmStepRequest, http_request: Request):
+    _require_local_llm_request(http_request)
     trace_session_id = (http_request.headers.get("x-wikirace-session-id") or "").strip()
     trace_run_id = (http_request.headers.get("x-wikirace-run-id") or "").strip()
     if trace_session_id and trace_run_id:
@@ -3287,7 +4325,7 @@ async def llm_local_run_step(payload: LocalLlmStepRequest, http_request: Request
         if not isinstance(current_article, str) or not current_article.strip():
             current_article = start_article
 
-        current_hops = max(0, len(steps) - 1)
+        current_hops = _hop_count_from_steps(start_article, steps)
         next_hops = current_hops + 1
 
         max_steps = request.max_steps if isinstance(request.max_steps, int) and request.max_steps > 0 else 20
@@ -3295,7 +4333,7 @@ async def llm_local_run_step(payload: LocalLlmStepRequest, http_request: Request
         max_links = request.max_links if isinstance(request.max_links, int) and request.max_links > 0 else None
         max_tokens = request.max_tokens if isinstance(request.max_tokens, int) and request.max_tokens > 0 else None
 
-        api_base = request.api_base.strip() if isinstance(request.api_base, str) and request.api_base.strip() else None
+        api_base = _normalize_api_base(request.api_base, request=http_request)
         openai_api_mode = (
             request.openai_api_mode.strip()
             if isinstance(request.openai_api_mode, str) and request.openai_api_mode.strip()
@@ -3365,6 +4403,7 @@ async def llm_local_run_step(payload: LocalLlmStepRequest, http_request: Request
 
 @app.post("/llm/choose_link", response_model=LLMChooseLinkResponse)
 async def llm_choose_link(payload: LLMChooseLinkRequest, http_request: Request):
+    _require_local_llm_request(http_request)
     trace_session_id = (http_request.headers.get("x-wikirace-session-id") or "").strip()
     trace_run_id = (http_request.headers.get("x-wikirace-run-id") or "").strip()
     if trace_session_id and trace_run_id:
@@ -3416,11 +4455,7 @@ async def llm_choose_link(payload: LLMChooseLinkRequest, http_request: Request):
             if isinstance(request.max_tokens, int) and request.max_tokens > 0
             else None
         )
-        api_base = (
-            request.api_base.strip()
-            if isinstance(request.api_base, str) and request.api_base.strip()
-            else None
-        )
+        api_base = _normalize_api_base(request.api_base, request=http_request)
         openai_api_mode = (
             request.openai_api_mode.strip()
             if isinstance(request.openai_api_mode, str) and request.openai_api_mode.strip()
@@ -3493,15 +4528,19 @@ async def llm_choose_link(payload: LLMChooseLinkRequest, http_request: Request):
 
 
 @app.post("/llm/chat", response_model=LLMChatResponse)
-async def llm_chat(request: LLMChatRequest):
+async def llm_chat(request: LLMChatRequest, http_request: Request):
     """LLM chat endpoint backed by PydanticAI.
 
     The frontend uses this to generate an agent move.
     """
 
+    _require_local_llm_request(http_request)
+
     model = request.model.strip() if isinstance(request.model, str) else ""
     if not model:
         raise HTTPException(status_code=400, detail="Missing model")
+
+    api_base = _normalize_api_base(request.api_base, request=http_request)
 
     try:
         result = await achat(
@@ -3509,7 +4548,7 @@ async def llm_chat(request: LLMChatRequest):
             prompt=request.prompt,
             max_tokens=request.max_tokens if isinstance(request.max_tokens, int) else None,
             temperature=request.temperature,
-            api_base=request.api_base,
+            api_base=api_base,
             openai_api_mode=request.openai_api_mode,
             openai_reasoning_effort=request.openai_reasoning_effort,
             openai_reasoning_summary=request.openai_reasoning_summary,

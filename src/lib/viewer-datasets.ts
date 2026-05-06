@@ -10,6 +10,7 @@ export type ViewerDatasetRecord = {
 
 type StoreState = {
   datasets: ViewerDatasetRecord[]
+  selected_dataset_id: string | null
 }
 
 const STORAGE_KEY = 'wikirace:viewer-datasets:v1'
@@ -17,12 +18,19 @@ const STORAGE_KEY = 'wikirace:viewer-datasets:v1'
 function loadInitialState(): StoreState {
   const stored = safeLocalStorageGetJson<StoreState>(STORAGE_KEY)
   if (!stored || !Array.isArray(stored.datasets)) {
-    return { datasets: [] }
+    return { datasets: [], selected_dataset_id: null }
   }
-  return stored
+  return {
+    datasets: stored.datasets,
+    selected_dataset_id:
+      typeof stored.selected_dataset_id === 'string' ? stored.selected_dataset_id : null,
+  }
 }
 
-let state: StoreState = typeof window === 'undefined' ? { datasets: [] } : loadInitialState()
+let state: StoreState =
+  typeof window === 'undefined'
+    ? { datasets: [], selected_dataset_id: null }
+    : loadInitialState()
 
 const listeners = new Set<() => void>()
 
@@ -61,12 +69,21 @@ export function addViewerDataset({ name, data }: { name: string; data: unknown }
     created_at: nowIso(),
     data,
   }
-  setState({ datasets: [record, ...state.datasets] })
+  setState({ ...state, datasets: [record, ...state.datasets] })
   return record
 }
 
 export function removeViewerDataset(id: string) {
-  setState({ datasets: state.datasets.filter((d) => d.id !== id) })
+  const nextSelectedId = state.selected_dataset_id === id ? null : state.selected_dataset_id
+  setState({
+    ...state,
+    datasets: state.datasets.filter((d) => d.id !== id),
+    selected_dataset_id: nextSelectedId,
+  })
+}
+
+export function selectViewerDataset(id: string | null) {
+  setState({ ...state, selected_dataset_id: id })
 }
 
 export function listViewerDatasets() {
@@ -86,6 +103,6 @@ export function useViewerDatasetsStore() {
   return useSyncExternalStore(
     subscribeViewerDatasets,
     getViewerDatasetsSnapshot,
-    () => ({ datasets: [] })
+    () => ({ datasets: [], selected_dataset_id: null })
   )
 }

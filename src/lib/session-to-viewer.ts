@@ -10,10 +10,8 @@ export function buildViewerDatasetFromSession({
   runs: RunV1[]
   name: string
 }) {
-  const maxSteps = Math.max(
-    20,
-    ...runs.map((r) => (typeof r.hops === 'number' ? r.hops + 1 : r.steps.length))
-  )
+  const maxSteps =
+    typeof session.rules?.max_hops === 'number' ? session.rules.max_hops : 20
 
   return {
     name,
@@ -24,7 +22,7 @@ export function buildViewerDatasetFromSession({
     agent_settings: {
       model: 'mixed',
       api_base: null,
-      max_links: 200,
+      max_links: session.rules?.max_links ?? null,
       max_tries: 3,
     },
     runs: runs.map((run) => ({
@@ -33,7 +31,29 @@ export function buildViewerDatasetFromSession({
           ? `human/${run.player_name || 'Human'}`
           : run.model || 'llm',
       api_base: run.api_base || null,
-      max_links: 200,
+      openai_api_mode: run.openai_api_mode || null,
+      openai_reasoning_effort: run.openai_reasoning_effort || null,
+      openai_reasoning_summary: run.openai_reasoning_summary || null,
+      anthropic_thinking_budget_tokens: run.anthropic_thinking_budget_tokens ?? null,
+      google_thinking_config: run.google_thinking_config || null,
+      max_steps:
+        typeof run.max_steps === 'number'
+          ? run.max_steps
+          : typeof session.rules?.max_hops === 'number'
+            ? session.rules.max_hops
+            : null,
+      max_links:
+        run.max_links === null
+          ? null
+          : typeof run.max_links === 'number'
+            ? run.max_links
+            : session.rules?.max_links ?? null,
+      max_tokens:
+        run.max_tokens === null
+          ? null
+          : typeof run.max_tokens === 'number'
+            ? run.max_tokens
+            : session.rules?.max_tokens ?? null,
       max_tries: 3,
       result: viewerResultFromRun(run),
       start_article: session.start_article,
@@ -42,4 +62,3 @@ export function buildViewerDatasetFromSession({
     })),
   }
 }
-

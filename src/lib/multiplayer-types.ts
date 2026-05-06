@@ -79,6 +79,7 @@ export type CreateRoomRequest = {
 export type CreateRoomResponse = {
   room_id: string;
   owner_player_id: string;
+  owner_player_token: string;
   join_url: string;
   room: MultiplayerRoomV1;
 };
@@ -89,7 +90,13 @@ export type JoinRoomRequest = {
 
 export type JoinRoomResponse = {
   player_id: string;
+  player_token: string;
   room: MultiplayerRoomV1;
+};
+
+export type RoomWsTicketResponse = {
+  player_id: string;
+  ws_ticket: string;
 };
 
 export type StartRoomRequest = {

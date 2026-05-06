@@ -8,8 +8,9 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { safeLocalStorageGetItem, safeLocalStorageSetItem } from "@/lib/storage";
 
 const ViewerTab = lazy(() => import("@/components/viewer-tab"));
+const LeaderboardTab = lazy(() => import("@/components/leaderboard-tab"));
 
-type TabValue = "view" | "play" | "about";
+type TabValue = "view" | "leaderboard" | "play" | "about";
 
 const LAST_TAB_STORAGE_KEY = "wikirace:last-tab:v1";
 const SEEN_PLAY_TAB_STORAGE_KEY = "wikirace:seen-play-tab:v1";
@@ -19,7 +20,7 @@ function loadStoredTab(): TabValue {
   const params = new URLSearchParams(window.location.search);
   if (params.has("room")) return "play";
   const stored = safeLocalStorageGetItem(LAST_TAB_STORAGE_KEY);
-  if (stored === "view" || stored === "play" || stored === "about") return stored;
+  if (stored === "view" || stored === "leaderboard" || stored === "play" || stored === "about") return stored;
   return "view";
 }
 
@@ -87,6 +88,7 @@ export default function Home() {
       >
         <TabsList className="mb-4 mt-6">
           <TabsTrigger value="view">View Runs</TabsTrigger>
+          <TabsTrigger value="leaderboard">Leaderboard</TabsTrigger>
           <TabsTrigger value="play">
             Play Game
           </TabsTrigger>
@@ -104,6 +106,16 @@ export default function Home() {
               onGoToPlayTab={() => setSelectedTab("play")}
               showPlayCta={!hasSeenPlayTab}
             />
+          </Suspense>
+        </TabsContent>
+
+        <TabsContent value="leaderboard">
+          <Suspense
+            fallback={
+              <div className="p-4 text-sm text-muted-foreground">Loading leaderboard...</div>
+            }
+          >
+            <LeaderboardTab onOpenViewer={() => setSelectedTab("view")} />
           </Suspense>
         </TabsContent>
 

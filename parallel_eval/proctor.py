@@ -1,14 +1,18 @@
 from pathlib import Path
 
 try:
+    from parallel_eval.benchmark.semantics import hop_rows_from_steps
     from parallel_eval.game import AgentPlayer, SQLiteDB, Game
 except ModuleNotFoundError:
+    from benchmark.semantics import hop_rows_from_steps
     from game import AgentPlayer, SQLiteDB, Game
-import logfire
+from logfire_compat import logfire
 import os
 import json
 import asyncio
 import argparse
+import tempfile
+import hashlib
 
 from llm_client import configure_observability, run_span_name
 
@@ -21,6 +25,123 @@ def _resolve_local_path(path: str) -> str:
     if p.is_absolute():
         return str(p)
     return str((SCRIPT_DIR / p).resolve())
+
+
+def _db_identity(db_path: str) -> dict[str, object]:
+    resolved_path = Path(db_path).resolve()
+    try:
+        stat = resolved_path.stat()
+    except OSError:
+        return {
+            "path": str(resolved_path),
+            "exists": False,
+        }
+
+    return {
+        "path": str(resolved_path),
+        "exists": True,
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _build_run_config(
+    *,
+    agent_settings: dict,
+    max_steps: int,
+    db_path: str,
+) -> dict[str, object]:
+    return {
+        "model": agent_settings.get("model"),
+        "api_base": agent_settings.get("api_base"),
+        "max_steps": max_steps,
+        "max_links": agent_settings.get("max_links"),
+        "max_tries": agent_settings.get("max_tries"),
+        "openai_api_mode": agent_settings.get("openai_api_mode"),
+        "openai_reasoning_effort": agent_settings.get("openai_reasoning_effort"),
+        "openai_reasoning_summary": agent_settings.get("openai_reasoning_summary"),
+        "anthropic_thinking_budget_tokens": agent_settings.get("anthropic_thinking_budget_tokens"),
+        "google_thinking_config": agent_settings.get("google_thinking_config"),
+        "db": _db_identity(db_path),
+    }
+
+
+def _run_config_hash(run_config: dict[str, object]) -> str:
+    payload = json.dumps(run_config, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _run_output_is_valid(
+    output: object,
+    *,
+    start_article: str,
+    destination_article: str,
+    run_config_hash: str,
+) -> bool:
+    if not isinstance(output, dict):
+        return False
+
+    steps = output.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return False
+    if not all(isinstance(step, dict) for step in steps):
+        return False
+
+    result = output.get("result")
+    if result not in ("win", "lose"):
+        return False
+
+    if output.get("run_config_hash") != run_config_hash:
+        return False
+
+    return (
+        output.get("start_article") == start_article
+        and output.get("destination_article") == destination_article
+        and steps[-1].get("type") == result
+    )
+
+
+def _existing_run_output_is_valid(
+    output_file: str,
+    *,
+    start_article: str,
+    destination_article: str,
+    run_config_hash: str,
+) -> bool:
+    try:
+        with open(output_file, "r", encoding="utf-8") as f:
+            output = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    return _run_output_is_valid(
+        output,
+        start_article=start_article,
+        destination_article=destination_article,
+        run_config_hash=run_config_hash,
+    )
+
+
+def _write_json_atomic(output_file: str, output: object) -> None:
+    output_path = Path(output_file)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=output_path.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(output, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, output_path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 
 class Proctor:
@@ -46,6 +167,12 @@ class Proctor:
         self.output_dir = output_dir
         self.proctor_id = proctor_id
         self.db = SQLiteDB(self.db_path)
+        self.run_config = _build_run_config(
+            agent_settings=self.agent_settings,
+            max_steps=self.max_steps,
+            db_path=self.db_path,
+        )
+        self.run_config_hash = _run_config_hash(self.run_config)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -70,25 +197,39 @@ class Proctor:
                             self.output_dir,
                             self.verbose,
                             run_id,
+                            self.run_config,
+                            self.run_config_hash,
                         )
                     )
                     print(f"Setup run {run_id}")
 
     async def run(self):
-        semaphore = asyncio.Semaphore(self.num_workers)
-        tasks = []
+        if not self.runs:
+            self.analyze_runs()
+            return
 
-        async def run_with_semaphore(run_instance):
-            async with semaphore:
+        worker_count = min(max(1, self.num_workers), len(self.runs))
+        queue: asyncio.Queue[Run] = asyncio.Queue()
+        for run_instance in self.runs:
+            queue.put_nowait(run_instance)
+
+        async def worker():
+            while True:
+                try:
+                    run_instance = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+
                 if self.verbose:
                     print(f"Starting run {run_instance.id}")
-                await run_instance.run()
-                if self.verbose:
-                    print(f"Finished run {run_instance.id}")
+                try:
+                    await run_instance.run()
+                finally:
+                    if self.verbose:
+                        print(f"Finished run {run_instance.id}")
+                    queue.task_done()
 
-        for run_instance in self.runs:
-            tasks.append(asyncio.create_task(run_with_semaphore(run_instance)))
-
+        tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
         await asyncio.gather(*tasks)
 
         self.analyze_runs()
@@ -114,14 +255,21 @@ class Proctor:
                 final_results["runs"].append(result)
                 if result["result"] == "win":
                     win_count += 1
-                    hops_distribution.append(len(result["steps"]) - 1)
+                    _, hops = hop_rows_from_steps(
+                        result.get("steps", []),
+                        result.get("start_article", run.start_article),
+                    )
+                    hops_distribution.append(hops)
                 else:
                     lose_count += 1
 
+        run_count = len(self.runs)
         final_results["hops_distribution"] = hops_distribution
-        final_results["average_hops"] = sum(hops_distribution) / len(hops_distribution)
-        final_results["win_rate"] = win_count / len(self.runs)
-        final_results["lose_rate"] = lose_count / len(self.runs)
+        final_results["average_hops"] = (
+            sum(hops_distribution) / len(hops_distribution) if hops_distribution else None
+        )
+        final_results["win_rate"] = win_count / run_count if run_count else 0.0
+        final_results["lose_rate"] = lose_count / run_count if run_count else 0.0
 
         with open(f"{self.output_dir}/{self.proctor_id}-final-results.json", "w") as f:
             json.dump(final_results, f, indent=4)
@@ -138,6 +286,8 @@ class Run:
         output_dir: str,
         verbose: bool,
         id: str,
+        run_config: dict[str, object],
+        run_config_hash: str,
     ):
         self.start_article = start_article
         self.destination_article = destination_article
@@ -147,11 +297,18 @@ class Run:
         self.output_dir = output_dir
         self.verbose = verbose
         self.id = id
+        self.run_config = run_config
+        self.run_config_hash = run_config_hash
 
         self.output_file = f"{self.output_dir}/run_{self.id}.json"
 
     async def run(self):
-        if os.path.exists(self.output_file):
+        if _existing_run_output_is_valid(
+            self.output_file,
+            start_article=self.start_article,
+            destination_article=self.destination_article,
+            run_config_hash=self.run_config_hash,
+        ):
             return
 
         configure_observability()
@@ -195,6 +352,11 @@ class Run:
                 verbose=False,
                 openai_api_mode=self.agent_settings.get("openai_api_mode"),
                 openai_reasoning_effort=self.agent_settings.get("openai_reasoning_effort"),
+                openai_reasoning_summary=self.agent_settings.get("openai_reasoning_summary"),
+                anthropic_thinking_budget_tokens=self.agent_settings.get(
+                    "anthropic_thinking_budget_tokens"
+                ),
+                google_thinking_config=self.agent_settings.get("google_thinking_config"),
             )
 
             game = Game(
@@ -213,14 +375,23 @@ class Run:
                 "api_base": self.agent_settings["api_base"],
                 "max_links": self.agent_settings["max_links"],
                 "max_tries": self.agent_settings["max_tries"],
+                "max_steps": self.max_steps,
+                "openai_api_mode": self.agent_settings.get("openai_api_mode"),
+                "openai_reasoning_effort": self.agent_settings.get("openai_reasoning_effort"),
+                "openai_reasoning_summary": self.agent_settings.get("openai_reasoning_summary"),
+                "anthropic_thinking_budget_tokens": self.agent_settings.get(
+                    "anthropic_thinking_budget_tokens"
+                ),
+                "google_thinking_config": self.agent_settings.get("google_thinking_config"),
+                "run_config": self.run_config,
+                "run_config_hash": self.run_config_hash,
                 "start_article": self.start_article,
                 "destination_article": self.destination_article,
                 "steps": steps,
                 "result": steps[-1]["type"],
             }
 
-            with open(self.output_file, "w") as f:
-                json.dump(output, f, indent=4)
+            _write_json_atomic(self.output_file, output)
 
             print(f"Run {self.id} completed in {len(steps)} steps")
 

@@ -1,0 +1,171 @@
+{
+  "benchmark_label": "Frontier 200",
+  "benchmark_role": "standard",
+  "benchmark_visibility": "published",
+  "benchmark_description": "Frontier 200 is the standard benchmark for separating frontier models on Simple Wikipedia graph navigation. It tests whether models can recover from plausible wrong turns, get through bottleneck pages, and finish routes that are easy to derail.",
+  "item_count": 200,
+  "composition": {
+    "hard99": 99,
+    "companion101": 101
+  },
+  "family_counts": {
+    "core_rank_v1": 74,
+    "diag_bridge_pressure_v1": 13,
+    "diag_dead_end_prone_v1": 7,
+    "diag_target_rarity_v1": 5,
+    "route_fragility_v1": 29,
+    "target_rarity_coupled_v1": 28,
+    "diag_dead_end_prone_v2": 24,
+    "diag_bridge_pressure_v2": 20
+  },
+  "focus_areas": [
+    "Recovering from wrong turns",
+    "Bottleneck links",
+    "Easy-to-break routes",
+    "Hard-to-find targets under pressure",
+    "Handling dead ends"
+  ],
+  "methodology_notes": [
+    "All 200 items use exact shortest-path ground truth from the same Simple Wikipedia graph snapshot.",
+    "The benchmark mixes core navigation tasks with easy-to-break routes, hard-to-find targets, bottleneck links, and dead ends.",
+    "Scores reflect staying on track within the step limit as much as recognizing the target: many failures happen near the right topic but on the wrong nearby page."
+  ],
+  "coverage_notes": [
+    "Frontier 200 is tuned for model separation rather than broad regression coverage.",
+    "The set still leans toward bottlenecks, narrow routes, and recovery failures, so it is best read alongside task-group breakdowns and run traces."
+  ],
+  "model_summaries": {
+    "google/gemini-3-flash-preview": {
+      "headline": "Best published Frontier 200 result so far.",
+      "summary": "Gemini Flash is strongest when the run depends on avoiding broad pages and recovering after drifting into the wrong topic area. It stays competitive on the hardest navigation-heavy tasks without paying a large response-time or token cost.",
+      "strengths": [
+        "Avoids drift through broad pages better than the published GPT-5.4 medium cell",
+        "Stays competitive on bottleneck-link and easy-to-break-route tasks",
+        "Delivers that performance with much lower response time and token use than GPT-5.4 medium"
+      ],
+      "watchouts": [
+        "Still loses many runs after reaching the right neighborhood",
+        "Weaker on sparse final routes than its best wrong-turn recovery suggests"
+      ]
+    },
+    "gpt-5.1 low": {
+      "headline": "Strongest published OpenAI result on Frontier 200.",
+      "summary": "GPT-5.1 low currently gives the best published OpenAI balance of success rate and robustness on Frontier 200. It raises overall quality without changing the benchmark's main failure pattern: recovering from wrong turns and finishing the last few clicks are still the main bottlenecks.",
+      "strengths": [
+        "Highest published OpenAI success rate on the standard set",
+        "More balanced quality across task groups than the anchor cells",
+        "Stronger overall conversion once it reaches the right topic area"
+      ],
+      "watchouts": [
+        "Still pays a large penalty on loop-prone and narrow-route tasks",
+        "Higher quality comes with higher cost than the Gemini Flash publish cell"
+      ]
+    },
+    "gpt-5.2 none": {
+      "headline": "Baseline OpenAI anchor for the published Frontier 200 board.",
+      "summary": "GPT-5.2 none is useful as a lower-budget anchor because it makes the benchmark's navigation-control demands easy to see. It falls behind once the run requires recovering from plausible but unproductive moves or staying on track through a narrow route.",
+      "strengths": [
+        "Simple low-thought anchor for tracking movement on the standard set",
+        "Reasonable cost profile relative to the higher-effort OpenAI cells",
+        "Useful baseline for seeing whether gains come from better navigation control or just more budget"
+      ],
+      "watchouts": [
+        "Struggles under bottlenecks and narrow-route pressure",
+        "Frequently runs out of steps on hard navigation items before finishing the route"
+      ]
+    },
+    "gpt-5.4 medium": {
+      "headline": "Strong at the final clicks, weaker on harder navigation groups.",
+      "summary": "GPT-5.4 medium often reaches the right topic area and then finishes exact local targets that other models miss. Its published Frontier 200 score is held back by the harder navigation task groups, where broad pages and wrong-turn traps still cost too many runs.",
+      "strengths": [
+        "Good at exact final clicks once it has found the right topic area",
+        "Competitive on the newer companion tasks, especially where the route becomes locally precise",
+        "Cleaner route completion on some hard-to-find-target items"
+      ],
+      "watchouts": [
+        "Falls behind Gemini Flash on the harder navigation half of the benchmark",
+        "Much slower and more expensive than Gemini Flash at nearly the same overall score"
+      ]
+    }
+  },
+  "pairwise_summaries": [
+    {
+      "models": [
+        "google/gemini-3-flash-preview",
+        "gpt-5.4 medium"
+      ],
+      "headline": "Gemini Flash is slightly ahead overall because it loses fewer runs on the harder navigation groups in Frontier 200.",
+      "summary": "GPT-5.4 medium finishes a few more locally precise companion items, but Gemini's edge on narrow routes, bottleneck links, and wrong-turn recovery is larger overall. The result is a small quality lead for Gemini at much lower response time and token cost.",
+      "differences": [
+        "Gemini is better at avoiding drift through broad pages and recovering from wrong turns.",
+        "GPT-5.4 medium is slightly stronger once the task reduces to the final exact clicks.",
+        "Both models still fail mostly by running out of steps rather than by tooling errors."
+      ]
+    },
+    {
+      "models": [
+        "gpt-5.1 low",
+        "google/gemini-3-flash-preview"
+      ],
+      "headline": "GPT-5.1 low leads on raw quality, while Gemini Flash keeps a stronger efficiency profile.",
+      "summary": "The main gap is overall conversion rate, not one dramatic task-group collapse. GPT-5.1 low succeeds more often across the standard set, while Gemini Flash stays closer than the headline gap suggests because it remains strong on the harder navigation tasks at much lower cost.",
+      "differences": [
+        "GPT-5.1 low currently sets the stronger OpenAI quality mark on the standard set.",
+        "Gemini Flash remains the lower-response-time, lower-token option.",
+        "Both still show the same broad failure pattern: plausible wrong turns are expensive to recover from."
+      ]
+    },
+    {
+      "models": [
+        "gpt-5.2 none",
+        "google/gemini-3-flash-preview"
+      ],
+      "headline": "Gemini Flash is stronger on Frontier 200, while GPT-5.2 none mainly serves as the low-thought baseline.",
+      "summary": "The quality gap comes from Gemini holding onto more bottleneck-link, easy-to-break-route, and wrong-turn-recovery tasks. GPT-5.2 none is still useful as a simple anchor, but its failure rate rises quickly once the route demands recovery after a plausible wrong move.",
+      "differences": [
+        "Gemini Flash succeeds more often across the standard set.",
+        "GPT-5.2 none exposes the benchmark's navigation-control pressure clearly because it loses many narrow-route tasks.",
+        "Neither model solves the final exact-click problem consistently once the path becomes sparse."
+      ]
+    },
+    {
+      "models": [
+        "gpt-5.1 low",
+        "gpt-5.4 medium"
+      ],
+      "headline": "GPT-5.1 low is the better all-round published OpenAI cell, while GPT-5.4 medium keeps a narrower final-click advantage.",
+      "summary": "GPT-5.4 medium does well on some precise companion routes, but GPT-5.1 low is stronger overall across the full Frontier 200 mix. The difference is mainly breadth: GPT-5.1 low loses fewer runs before the route becomes locally precise.",
+      "differences": [
+        "GPT-5.1 low has the stronger overall success rate on the standard set.",
+        "GPT-5.4 medium retains some advantage on exact final clicks.",
+        "Both still lose too many hard navigation runs to loops and wrong turns."
+      ]
+    },
+    {
+      "models": [
+        "gpt-5.1 low",
+        "gpt-5.2 none"
+      ],
+      "headline": "This comparison mostly shows what extra reasoning quality buys inside the same model family.",
+      "summary": "GPT-5.1 low converts materially more of the standard set than GPT-5.2 none, especially once a route needs repeated local discrimination rather than one obvious bridge page. GPT-5.2 none remains useful as the cheaper anchor and sanity check.",
+      "differences": [
+        "GPT-5.1 low is the stronger quality cell across the full benchmark.",
+        "GPT-5.2 none remains the simpler baseline for cost-sensitive tracking.",
+        "The gap grows on tasks that punish plausible but unproductive recovery moves."
+      ]
+    },
+    {
+      "models": [
+        "gpt-5.2 none",
+        "gpt-5.4 medium"
+      ],
+      "headline": "GPT-5.4 medium is the more capable model, but Frontier 200 keeps that lead narrow by stressing hard navigation failures.",
+      "summary": "GPT-5.4 medium picks up some extra wins once the route becomes locally exact, but it does not dominate the benchmark because narrow routes, easy-to-break paths, and wrong-turn traps still cost it many runs. GPT-5.2 none remains close enough to show that stronger local reasoning is only part of the story.",
+      "differences": [
+        "GPT-5.4 medium leads on overall quality.",
+        "GPT-5.2 none remains a useful anchor because the benchmark compresses the gap between these cells.",
+        "Both models are still bottlenecked more by navigation control than by raw topic recognition."
+      ]
+    }
+  ]
+}

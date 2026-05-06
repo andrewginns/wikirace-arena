@@ -1,0 +1,32 @@
+{
+  "suite_id": "frontier_local_simplewiki_standard_v1",
+  "source_frontier_dataset": "benchmarks/matchups/frontier_local_simplewiki_v1_1/all.jsonl",
+  "source_frontier_audit": "benchmarks/matchups/frontier_local_simplewiki_v1_1/audit/frontier200_item_audit.v0_1.jsonl",
+  "source_companion_dataset": "benchmarks/matchups/frontier_local_simplewiki_v1_1_companion101_v2_1/all.jsonl",
+  "counts": {
+    "hard99": 99,
+    "companion101": 101,
+    "merged": 200
+  },
+  "slice_counts": {
+    "core_rank_v1": 74,
+    "diag_dead_end_prone_v1": 7,
+    "diag_target_rarity_v1": 5,
+    "diag_bridge_pressure_v1": 13,
+    "route_fragility_v1": 29,
+    "target_rarity_coupled_v1": 28,
+    "diag_dead_end_prone_v2": 24,
+    "diag_bridge_pressure_v2": 20
+  },
+  "generated_at": "2026-03-16T14:17:19.320549Z",
+  "db_path": "parallel_eval/releases/wikihop-benchmark-simplewiki-20260123.db",
+  "db_sha256": "6bf6dd0d88c7ab2214a0888926cd76e6a674981d79ef251d93fea8fd3ab079ff",
+  "generator_version": "frontier_local_simplewiki_standard_v1_alias1",
+  "alias_of": "frontier_local_simplewiki_v1_2",
+  "alias_kind": "standard",
+  "seed": 0,
+  "notes": [
+    "Standard SOTA-separating benchmark alias backed by the merged Frontier 200.",
+    "Alias materializes checked-in frozen data from frontier_local_simplewiki_v1_2."
+  ]
+}

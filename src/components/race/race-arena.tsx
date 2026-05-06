@@ -62,6 +62,7 @@ import AddChallengersDialog from "@/components/race/add-challengers-dialog";
 import type { RaceDriver } from "@/lib/race-driver";
 import type { RaceMode, RaceRun, RaceState, RaceStep } from "@/lib/race-state";
 import {
+  computeHopCountsByStepIndex,
   computeHopsFromSteps,
   currentArticleFromSteps,
   sumTokenUsageFromSteps,
@@ -107,8 +108,16 @@ type ArenaCssVars = CSSProperties & {
 };
 
 type DirectLinkMiss = {
-  hopIndex: number;
+  hopCount: number;
+  stepIndex: number;
   fromArticle: string;
+};
+
+type IframeNavigateState = {
+  title: string;
+  at: number;
+  status: "pending" | "allowed" | "blocked";
+  promise?: Promise<boolean>;
 };
 
 type WikiZoom = 60 | 75 | 90 | 100;
@@ -296,6 +305,17 @@ function viewerResultFromRaceRun(run: RaceRun): "win" | "lose" {
   return "lose";
 }
 
+function budgetDisplayValue(
+  runBudget: number | null | undefined,
+  fallbackBudget: number | null | undefined
+) {
+  if (typeof runBudget === "number") return runBudget;
+  if (runBudget === null) return "unlimited";
+  if (fallbackBudget === null) return "unlimited";
+  if (typeof fallbackBudget === "number") return fallbackBudget;
+  return "(default)";
+}
+
 function buildViewerDatasetFromRace({
   race,
   runs,
@@ -305,7 +325,7 @@ function buildViewerDatasetFromRace({
   runs: RaceRun[];
   name: string;
 }) {
-  const maxSteps = Math.max(20, ...runs.map((r) => Math.max(1, r.steps.length)));
+  const maxSteps = typeof race.rules?.max_hops === "number" ? race.rules.max_hops : 20;
 
   return {
     name,
@@ -316,17 +336,44 @@ function buildViewerDatasetFromRace({
     agent_settings: {
       model: "mixed",
       api_base: null,
-      max_links: 200,
+      max_links: race.rules?.max_links ?? null,
       max_tries: 3,
     },
     runs: runs.map((run) => ({
+      id: run.id,
+      kind: run.kind,
       model:
         run.kind === "human"
           ? `human/${run.display_name || "Human"}`
           : run.model || "llm",
       api_base: run.api_base || null,
-      max_links: 200,
+      openai_api_mode: run.openai_api_mode || null,
+      openai_reasoning_effort: run.openai_reasoning_effort || null,
+      openai_reasoning_summary: run.openai_reasoning_summary || null,
+      anthropic_thinking_budget_tokens: run.anthropic_thinking_budget_tokens ?? null,
+      google_thinking_config: run.google_thinking_config || null,
+      max_steps:
+        typeof run.max_steps === "number"
+          ? run.max_steps
+          : typeof race.rules?.max_hops === "number"
+            ? race.rules.max_hops
+            : null,
+      max_links:
+        run.max_links === null
+          ? null
+          : typeof run.max_links === "number"
+            ? run.max_links
+            : race.rules?.max_links ?? null,
+      max_tokens:
+        run.max_tokens === null
+          ? null
+          : typeof run.max_tokens === "number"
+            ? run.max_tokens
+            : race.rules?.max_tokens ?? null,
       max_tries: 3,
+      started_at: run.started_at || null,
+      finished_at: run.finished_at || null,
+      duration_ms: typeof run.duration_ms === "number" ? run.duration_ms : null,
       result: viewerResultFromRaceRun(run),
       start_article: race.start_article,
       destination_article: race.destination_article,
@@ -335,8 +382,23 @@ function buildViewerDatasetFromRace({
   };
 }
 
-function runHops(run: RaceRun) {
-  return typeof run.hops === "number" ? run.hops : computeHopsFromSteps(run.steps);
+function runHops(run: RaceRun, startArticle?: string | null) {
+  return computeHopsFromSteps(run.steps, startArticle);
+}
+
+function replayStepIndexForHop(hopCounts: readonly number[], replayHop: number) {
+  if (hopCounts.length === 0) return 0;
+
+  const maxHop = hopCounts[hopCounts.length - 1] ?? 0;
+  const targetHop = clampNumber(replayHop, 0, maxHop);
+
+  let stepIndex = 0;
+  for (let idx = 0; idx < hopCounts.length; idx += 1) {
+    const hop = hopCounts[idx] ?? 0;
+    if (hop > targetHop) break;
+    if (hop === targetHop) stepIndex = idx;
+  }
+  return stepIndex;
 }
 
 function runMaxSteps(run: RaceRun) {
@@ -533,7 +595,7 @@ export default function RaceArena({
   const [mapPreviewArticle, setMapPreviewArticle] = useState<string | null>(null);
   const [directLinkMiss, setDirectLinkMiss] = useState<DirectLinkMiss | null>(null);
   const couldHaveWonLinkCacheRef = useRef<Map<string, Set<string> | null>>(new Map());
-  const lastIframeNavigateRef = useRef<{ title: string; at: number } | null>(null);
+  const lastIframeNavigateRef = useRef<IframeNavigateState | null>(null);
   const wikiIframeRef = useRef<HTMLIFrameElement | null>(null);
   const winToastTimeoutRef = useRef<number | null>(null);
   const prevSessionIdRef = useRef<string | null>(null);
@@ -616,8 +678,8 @@ export default function RaceArena({
   }, []);
 
   const triggerWinToast = useCallback(
-    (run: RaceRun) => {
-      const hops = runHops(run);
+    (run: RaceRun, startArticle: string) => {
+      const hops = runHops(run, startArticle);
       const message = `${runDisplayName(run)} won in ${hops} hop${hops === 1 ? "" : "s"}`;
       setWinToast({ runId: run.id, message });
 
@@ -676,7 +738,7 @@ export default function RaceArena({
       if (prevKey === key) continue;
 
       if (run.status !== "finished" || run.result !== "win") continue;
-      triggerWinToast(run);
+      triggerWinToast(run, session.start_article);
       if (run.kind === "human") {
         setWinCelebrationRunId(run.id);
       }
@@ -770,7 +832,7 @@ export default function RaceArena({
           continue;
         }
         if (step.type === "win") {
-          const hops = runHops(run);
+          const hops = runHops(run, session.start_article);
           newEvents.push({
             id: `win-${run.id}-${now}-${serial++}`,
             kind: "win",
@@ -831,10 +893,14 @@ export default function RaceArena({
     setArenaViewMode(defaultMode);
   }, [selectedRunId, selectedRunKindForView, selectedRunStatusForView]);
 
+  const selectedReplayHopCounts = useMemo(() => {
+    if (!selectedRun) return [0];
+    return computeHopCountsByStepIndex(selectedRun.steps, session?.start_article);
+  }, [selectedRun, session?.start_article]);
+
   const selectedReplayMaxHop = useMemo(() => {
-    if (!selectedRun) return 0;
-    return Math.max(0, selectedRun.steps.length - 1);
-  }, [selectedRun]);
+    return selectedReplayHopCounts[selectedReplayHopCounts.length - 1] ?? 0;
+  }, [selectedReplayHopCounts]);
 
   useEffect(() => {
     if (!replayEnabled && replayPlaying) {
@@ -910,12 +976,15 @@ export default function RaceArena({
   }, [session, selectedRun]);
 
   const selectedReplayStepIndex = useMemo(() => {
-    if (!session) return 0;
     if (!selectedRun) return 0;
     const maxIdx = Math.max(0, selectedRun.steps.length - 1);
     if (!replayEnabled) return maxIdx;
-    return clampNumber(replayHop, 0, maxIdx);
-  }, [session, selectedRun, replayEnabled, replayHop]);
+    return replayStepIndexForHop(selectedReplayHopCounts, replayHop);
+  }, [selectedRun, selectedReplayHopCounts, replayEnabled, replayHop]);
+
+  const selectedReplayHopCount = useMemo(() => {
+    return selectedReplayHopCounts[selectedReplayStepIndex] ?? 0;
+  }, [selectedReplayHopCounts, selectedReplayStepIndex]);
 
   const displayedArticle = useMemo(() => {
     if (!session) return "";
@@ -1022,13 +1091,16 @@ export default function RaceArena({
   }, [selectedRunId, wikiArticle]);
 
   const fetchOutgoingLinkSet = useCallback(async (articleTitle: string) => {
+    const articleWithoutFragment = articleTitle.split("#", 1)[0]?.trim() || "";
+    if (!articleWithoutFragment) return null;
+
     const cache = couldHaveWonLinkCacheRef.current;
-    const key = normalizeWikiTitle(articleTitle);
+    const key = normalizeWikiTitle(articleWithoutFragment);
     if (cache.has(key)) return cache.get(key) ?? null;
 
     try {
       const response = await fetch(
-        `${API_BASE}/get_article_with_links/${encodeURIComponent(articleTitle)}`
+        `${API_BASE}/get_article_with_links/${encodeURIComponent(articleWithoutFragment)}`
       );
       if (!response.ok) {
         cache.set(key, null);
@@ -1068,10 +1140,18 @@ export default function RaceArena({
     const normalizedDestination = normalizeWikiTitle(destination);
 
     void (async () => {
-      for (let hopIndex = 0; hopIndex < selectedRun.steps.length - 1; hopIndex += 1) {
-        const fromArticle = selectedRun.steps[hopIndex]?.article;
-        const nextArticle = selectedRun.steps[hopIndex + 1]?.article;
+      for (
+        let stepIndex = 0;
+        stepIndex < selectedRun.steps.length - 1;
+        stepIndex += 1
+      ) {
+        const fromArticle =
+          selectedRun.steps[stepIndex]?.article?.split("#", 1)[0]?.trim() || "";
+        const nextArticle = selectedRun.steps[stepIndex + 1]?.article;
         if (!fromArticle || !nextArticle) continue;
+        if ((selectedReplayHopCounts[stepIndex + 1] ?? 0) <= (selectedReplayHopCounts[stepIndex] ?? 0)) {
+          continue;
+        }
         if (wikiTitlesMatch(nextArticle, destination)) continue;
 
         const outgoing = await fetchOutgoingLinkSet(fromArticle);
@@ -1079,7 +1159,11 @@ export default function RaceArena({
         if (!outgoing) continue;
 
         if (outgoing.has(normalizedDestination)) {
-          setDirectLinkMiss({ hopIndex, fromArticle });
+          setDirectLinkMiss({
+            hopCount: selectedReplayHopCounts[stepIndex] ?? 0,
+            stepIndex,
+            fromArticle,
+          });
           return;
         }
       }
@@ -1088,7 +1172,13 @@ export default function RaceArena({
     return () => {
       cancelled = true;
     };
-  }, [fetchOutgoingLinkSet, selectedRun, selectedRunFinished, session]);
+  }, [
+    fetchOutgoingLinkSet,
+    selectedReplayHopCounts,
+    selectedRun,
+    selectedRunFinished,
+    session,
+  ]);
 
   const leaderboardSections = useMemo(() => {
     if (!session) {
@@ -1105,7 +1195,8 @@ export default function RaceArena({
     const ranked = session.runs
       .filter((r) => r.status !== "running" && r.result === "win")
       .sort((a, b) => {
-        const hopsDiff = runHops(a) - runHops(b);
+        const hopsDiff =
+          runHops(a, session.start_article) - runHops(b, session.start_article);
         if (hopsDiff !== 0) return hopsDiff;
         const durationDiff = runDurationMs(a) - runDurationMs(b);
         if (durationDiff !== 0) return durationDiff;
@@ -1128,9 +1219,12 @@ export default function RaceArena({
       const steps = run.steps
         .filter((s) => s.type === "start" || s.type === "move" || s.type === "win" || s.type === "lose")
         .reduce((acc: { type: string; article: string }[], step) => {
+          const normalizedArticle = normalizeWikiTitle(step.article);
+          if (!normalizedArticle) return acc;
+          const article = step.article.split("#", 1)[0];
           const last = acc[acc.length - 1];
-          if (!last || last.article !== step.article) {
-            acc.push({ type: step.type, article: step.article });
+          if (!last || normalizeWikiTitle(last.article) !== normalizedArticle) {
+            acc.push({ type: step.type, article });
           }
           return acc;
         }, [] as { type: string; article: string }[]);
@@ -1177,11 +1271,12 @@ export default function RaceArena({
     if (compareRunIndices.length < 2) return 0;
     let maxHop = 0;
     for (const runIndex of compareRunIndices) {
-      const steps = forceGraphRuns[runIndex]?.steps ?? [];
-      maxHop = Math.max(maxHop, Math.max(0, steps.length - 1));
+      const run = session?.runs[runIndex];
+      if (!run) continue;
+      maxHop = Math.max(maxHop, runHops(run, session?.start_article));
     }
     return maxHop;
-  }, [compareRunIndices, forceGraphRuns]);
+  }, [compareRunIndices, session]);
 
   const compareHopClamped = useMemo(() => {
     return clampNumber(compareHop, 0, compareMaxHop);
@@ -1221,7 +1316,7 @@ export default function RaceArena({
         setMapPreviewArticle(null);
         setReplayEnabled(true);
         setReplayPlaying(false);
-        setReplayHop(matchedIdx);
+        setReplayHop(selectedReplayHopCounts[matchedIdx] ?? 0);
       } else if (selectedRun.status !== "running") {
         setMapPreviewArticle(nodeTitle);
         setReplayEnabled(false);
@@ -1234,7 +1329,7 @@ export default function RaceArena({
         setArenaViewMode("article");
       }
     },
-    [arenaViewMode, selectedRun]
+    [arenaViewMode, selectedReplayHopCounts, selectedRun]
   );
 
   const [links, setLinks] = useState<string[]>([]);
@@ -1400,6 +1495,7 @@ export default function RaceArena({
 
     const handleMessage = (event: MessageEvent) => {
       if (!allowedOrigins.has(event.origin)) return;
+      if (event.source !== wikiIframeRef.current?.contentWindow) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
       const msg = data as {
@@ -1440,27 +1536,52 @@ export default function RaceArena({
         const now = Date.now();
         const last = lastIframeNavigateRef.current;
         if (last && last.title === title && now - last.at < 1000) {
-          respond(true);
+          if (last.status === "pending" && last.promise) {
+            void last.promise.then(respond, () => respond(false));
+            return;
+          }
+          respond(last.status === "allowed");
           return;
         }
-        lastIframeNavigateRef.current = { title, at: now };
 
         const isSelectedHumanRunning =
           selectedRunKind === "human" && selectedRunStatus === "running";
         if (isSelectedHumanRunning) {
           if (!canControlSelectedRun) {
+            lastIframeNavigateRef.current = { title, at: now, status: "allowed" };
             setMapPreviewArticle(title);
             respond(true);
             return;
           }
 
-          void (async () => {
-            const ok = await moveSelectedRunRef.current(title);
-            respond(ok);
-          })();
+          const validationPromise = moveSelectedRunRef
+            .current(title)
+            .then(
+              (ok) => ok,
+              () => false
+            )
+            .then((ok) => {
+              const current = lastIframeNavigateRef.current;
+              if (current?.promise === validationPromise) {
+                lastIframeNavigateRef.current = {
+                  title,
+                  at: Date.now(),
+                  status: ok ? "allowed" : "blocked",
+                };
+              }
+              return ok;
+            });
+          lastIframeNavigateRef.current = {
+            title,
+            at: now,
+            status: "pending",
+            promise: validationPromise,
+          };
+          void validationPromise.then(respond, () => respond(false));
           return;
         }
 
+        lastIframeNavigateRef.current = { title, at: now, status: "allowed" };
         setMapPreviewArticle(title);
         respond(true);
         return;
@@ -1488,7 +1609,7 @@ export default function RaceArena({
       const now = Date.now();
       const last = lastIframeNavigateRef.current;
       if (last && last.title === title && now - last.at < 1000) return;
-      lastIframeNavigateRef.current = { title, at: now };
+      lastIframeNavigateRef.current = { title, at: now, status: "allowed" };
 
       const isSelectedHumanRunning =
         selectedRunKind === "human" && selectedRunStatus === "running";
@@ -1621,7 +1742,7 @@ export default function RaceArena({
       lines.push("Results:");
       for (let i = 0; i < finishedRuns.length; i++) {
         const run = finishedRuns[i]!;
-        const hops = runHops(run);
+        const hops = runHops(run, session.start_article);
         const durationSeconds = Math.max(0, Math.floor(runDurationMs(run) / 1000));
         const result = run.result || run.status;
         lines.push(
@@ -2036,7 +2157,7 @@ export default function RaceArena({
             {leaderboardSections.ranked.length > 0 ? (
               <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
                 {leaderboardSections.ranked.slice(0, 3).map((run, idx) => {
-                  const hops = runHops(run);
+                  const hops = runHops(run, session.start_article);
                   const durationSeconds = Math.max(0, Math.floor(runDurationMs(run) / 1000));
                   const color = getRunColor(run.id);
                   return (
@@ -2199,7 +2320,7 @@ export default function RaceArena({
               {leaderboardSections.running.map((r) => {
                   const isActive = r.id === selectedRunId;
                   const isSelected = selectedRunIds.has(r.id);
-                  const hops = runHops(r);
+                  const hops = runHops(r, session.start_article);
                   const maxSteps = runMaxSteps(r);
                   const last = r.steps[r.steps.length - 1]?.article || session.start_article;
                   const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
@@ -2292,7 +2413,7 @@ export default function RaceArena({
               {leaderboardSections.ranked.map((r, idx) => {
                   const isActive = r.id === selectedRunId;
                   const isSelected = selectedRunIds.has(r.id);
-                  const hops = runHops(r);
+                  const hops = runHops(r, session.start_article);
                   const maxSteps = runMaxSteps(r);
                   const last = r.steps[r.steps.length - 1]?.article || session.start_article;
                   const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
@@ -2379,7 +2500,7 @@ export default function RaceArena({
               {leaderboardSections.unranked.map((r) => {
                   const isActive = r.id === selectedRunId;
                   const isSelected = selectedRunIds.has(r.id);
-                  const hops = runHops(r);
+                  const hops = runHops(r, session.start_article);
                   const maxSteps = runMaxSteps(r);
                   const last = r.steps[r.steps.length - 1]?.article || session.start_article;
                   const elapsed = Math.max(0, Math.floor(runElapsedMs(r, nowTick) / 1000));
@@ -2578,9 +2699,9 @@ export default function RaceArena({
 	                            <Footprints className="h-3.5 w-3.5" />
 	                            Hops:{" "}
 	                            <span className="font-medium">
-	                              {replayEnabled
-	                                ? selectedReplayStepIndex
-	                                : runHops(selectedRun)}{" "}
+                              {replayEnabled
+                                ? selectedReplayHopCount
+                                : runHops(selectedRun, session.start_article)}{" "}
 	                              / {runMaxSteps(selectedRun)}
 	                            </span>
 	                          </span>
@@ -3148,7 +3269,7 @@ export default function RaceArena({
 	                      <div>
 	                        <div className="text-xs text-muted-foreground">Hops</div>
 	                        <div className="mt-0.5">
-	                          {runHops(selectedRun)} / {runMaxSteps(selectedRun)}
+		                          {runHops(selectedRun, session.start_article)} / {runMaxSteps(selectedRun)}
 	                        </div>
 	                      </div>
 	                      <div>
@@ -3188,26 +3309,20 @@ export default function RaceArena({
 	                              {typeof selectedRun.anthropic_thinking_budget_tokens === "number"
 	                                ? selectedRun.anthropic_thinking_budget_tokens
 	                                : "(default)"}
-	                              {" • "}
-	                              max_tokens:{" "}
-	                              {typeof selectedRun.max_tokens === "number"
-	                                ? selectedRun.max_tokens
-	                                : session?.rules?.max_tokens === null
-	                                ? "unlimited"
-	                                : typeof session?.rules?.max_tokens === "number"
-	                                ? session.rules.max_tokens
-	                                : "(default)"}
-	                              {" • "}
-	                              max_links:{" "}
-	                              {typeof selectedRun.max_links === "number"
-	                                ? selectedRun.max_links
-	                                : session?.rules?.max_links === null
-	                                ? "unlimited"
-	                                : typeof session?.rules?.max_links === "number"
-	                                ? session.rules.max_links
-	                                : "(default)"}
-	                            </div>
-	                          </div>
+		                              {" • "}
+		                              max_tokens:{" "}
+		                              {budgetDisplayValue(
+		                                selectedRun.max_tokens,
+		                                session?.rules?.max_tokens
+		                              )}
+		                              {" • "}
+		                              max_links:{" "}
+		                              {budgetDisplayValue(
+		                                selectedRun.max_links,
+		                                session?.rules?.max_links
+		                              )}
+		                            </div>
+		                          </div>
 	                        </>
 	                      )}
 	                    </div>
@@ -3220,7 +3335,7 @@ export default function RaceArena({
 	                            <div className="min-w-0">
 	                              <StatusChip status="active">You could have won</StatusChip>
 	                              <div className="mt-2 text-xs text-muted-foreground">
-	                                Hop {directLinkMiss.hopIndex}: on{" "}
+	                                Hop {directLinkMiss.hopCount}: on{" "}
 	                                <span className="font-medium">{directLinkMiss.fromArticle}</span>
 	                                , there was a direct link to{" "}
 	                                <span className="font-medium">{session.destination_article}</span>.
@@ -3234,7 +3349,7 @@ export default function RaceArena({
 	                                setMapPreviewArticle(null);
 	                                setReplayEnabled(true);
 	                                setReplayPlaying(false);
-	                                setReplayHop(directLinkMiss.hopIndex);
+                                setReplayHop(directLinkMiss.hopCount);
 	                              }}
 	                            >
 	                              Jump to hop
@@ -3259,7 +3374,7 @@ export default function RaceArena({
                               setMapPreviewArticle(null);
                               setReplayEnabled(true);
                               setReplayPlaying(false);
-                              setReplayHop(runHops(selectedRun));
+                              setReplayHop(selectedReplayMaxHop);
                             }}
                           >
                             {replayEnabled ? "Back to live" : "Replay"}
@@ -3343,23 +3458,22 @@ export default function RaceArena({
                             </Button>
 
                             <div className="text-xs text-muted-foreground tabular-nums w-[70px] text-right">
-                              {Math.max(0, Math.min(selectedReplayMaxHop, replayHop))}/
-                              {selectedReplayMaxHop}
+                              {selectedReplayHopCount}/{selectedReplayMaxHop}
                             </div>
                           </div>
 
                           <div className="text-xs text-muted-foreground">
-                            Hop {Math.max(0, Math.min(selectedReplayMaxHop, replayHop))}:{" "}
+                            Hop {selectedReplayHopCount}:{" "}
                             <span className="font-medium">{displayedArticle}</span>
                           </div>
-	                        </>
-	                      )}
+                        </>
+                      )}
 
-	                      <div className="mt-0.5 flex flex-wrap items-center gap-1">
-	                        {selectedRun.steps.map((s, idx) => {
-	                          const activeIdx = replayEnabled
-	                            ? selectedReplayStepIndex
-	                            : Math.max(0, selectedRun.steps.length - 1);
+                      <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                        {selectedRun.steps.map((s, idx) => {
+                          const activeIdx = replayEnabled
+                            ? selectedReplayStepIndex
+                            : Math.max(0, selectedRun.steps.length - 1);
                           const isActive = idx === activeIdx;
                           const isFuture = replayEnabled && idx > selectedReplayStepIndex;
 
@@ -3371,7 +3485,7 @@ export default function RaceArena({
                                 setMapPreviewArticle(null);
                                 setReplayEnabled(true);
                                 setReplayPlaying(false);
-                                setReplayHop(idx);
+                                setReplayHop(selectedReplayHopCounts[idx] ?? 0);
                               }}
                               aria-current={isActive ? "step" : undefined}
                               style={
@@ -3404,18 +3518,20 @@ export default function RaceArena({
                               Timeline
                             </div>
                             <div className="text-xs text-muted-foreground tabular-nums">
-                              {Math.max(0, selectedRun.steps.length - 1)} hops
+                              {selectedReplayMaxHop} hops
                             </div>
                           </div>
 
                           <div className="mt-2 max-h-40 overflow-y-auto space-y-1 pr-1">
                             {selectedRun.steps.slice(1).map((step, idx) => {
-                              const hop = idx + 1;
+                              const stepIndex = idx + 1;
+                              const hop = selectedReplayHopCounts[stepIndex] ?? 0;
                               const from =
-                                selectedRun.steps[hop - 1]?.article || session.start_article;
+                                selectedRun.steps[stepIndex - 1]?.article ||
+                                session.start_article;
                               const isActiveHop = replayEnabled
-                                ? hop === selectedReplayStepIndex
-                                : hop === selectedRun.steps.length - 1;
+                                ? stepIndex === selectedReplayStepIndex
+                                : stepIndex === selectedRun.steps.length - 1;
                               const badge =
                                 step.type === "win" ? (
                                   <StatusChip status="finished">Win</StatusChip>
@@ -3425,7 +3541,7 @@ export default function RaceArena({
 
                               return (
                                 <button
-                                  key={`${selectedRun.id}-timeline-${hop}`}
+                                  key={`${selectedRun.id}-timeline-${stepIndex}`}
                                   type="button"
                                   onClick={() => {
                                     setMapPreviewArticle(null);
@@ -3758,7 +3874,7 @@ export default function RaceArena({
                         compareEnabled
                           ? compareHopClamped
                           : replayEnabled
-                          ? selectedReplayStepIndex
+                          ? selectedReplayHopCount
                           : undefined
                       }
                       onNodeSelect={handleMapNodeSelect}

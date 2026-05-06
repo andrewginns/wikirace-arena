@@ -47,7 +47,12 @@ export default function PlayTab({
   const allArticlesFetchAbortRef = useRef<AbortController | null>(null);
   const prevServerConnectedRef = useRef<boolean>(isServerConnected);
 
-  const { sessions, active_session_id } = useSessionsStore();
+  const {
+    sessions,
+    active_session_id,
+    persistence_error,
+    persistence_notice,
+  } = useSessionsStore();
   const activeSession = active_session_id ? sessions[active_session_id] : null;
 
   // Server connection check
@@ -211,6 +216,27 @@ export default function PlayTab({
           </TabsList>
         </Tabs>
       </div>
+
+      {playMode === "local" && (persistence_error || persistence_notice) ? (
+        <div
+          role="alert"
+          className={`rounded-2xl border px-4 py-3 text-sm ${
+            persistence_error
+              ? "border-destructive/25 bg-destructive/10 text-destructive"
+              : "border-amber-300/40 bg-amber-50 text-amber-900"
+          }`}
+        >
+          <div className="font-medium">
+            {persistence_error
+              ? "Local race history is not being saved"
+              : "Some older sessions won't survive refresh"}
+          </div>
+          <div className="mt-1 space-y-1 text-xs leading-5">
+            {persistence_error ? <div>{persistence_error}</div> : null}
+            {persistence_notice ? <div>{persistence_notice}</div> : null}
+          </div>
+        </div>
+      ) : null}
 
       {playMode === "multiplayer" ? (
         <MultiplayerPlay

@@ -26,7 +26,7 @@
 - `get_wikihop.py`: build `parallel_eval/wikihop.db` from Wikimedia SQL dumps (no scraping; can auto-download dumps).
 - `parallel_eval/`: Python tooling for running agents/evals.
 - `parallel_eval/wikimedia_dumps/`: default cache location for downloaded dumps.
-- `results/`: saved evaluation outputs used by the viewer.
+- `results/`: generated evaluation outputs used by the viewer (git-ignored).
 
 ## Key Code Entry Points
 
@@ -57,7 +57,7 @@ Make targets (see `Makefile`):
   - Automatically runs `make playwright-install` first.
 - `make ux-audit-headed`: same as above, but headed.
 
-Frontend (prefer Yarn; repo includes both `yarn.lock` and `package-lock.json`):
+Frontend (prefer Yarn; repo tracks `yarn.lock` and ignores `package-lock.json`):
 
 - `yarn install`: install frontend deps.
 - `yarn dev`: start Vite dev server (default `http://localhost:5173`).
@@ -78,6 +78,8 @@ Backend + DB (local API):
 
 - `uv sync`: install Python deps.
 - `uv run python get_wikihop.py --wiki simplewiki --dump-date latest --download --output parallel_eval/wikihop.db --overwrite`: build the SQLite DB from Wikimedia dumps (large download; cached under `parallel_eval/wikimedia_dumps/`).
+- `scripts/fetch-benchmark-db.sh --tag benchmark-db-simplewiki-20260123 --asset-base wikihop-benchmark-simplewiki-20260123 --out parallel_eval/releases/wikihop-benchmark-simplewiki-20260123.db`: fetch the pinned benchmark DB snapshot from GitHub Releases and verify checksums.
+- `scripts/publish-benchmark-db.sh --db-path parallel_eval/wikihop.db --wiki simplewiki --dump-date 20260123`: publish/update benchmark DB release artifacts (`.db.zst`, `.sha256`, `.manifest.json`).
 - `WIKISPEEDIA_DB_PATH=./parallel_eval/wikihop.db uv run uvicorn api:app --reload --port 8000`: run API.
 
 ## Coding Style & Naming Conventions
@@ -88,7 +90,7 @@ Backend + DB (local API):
 
 ## Product Semantics (Avoid Regressions)
 
-- **Hop definition:** a hop is one move/link-click between articles (edge count). Many `steps[]` arrays include the start page at index 0, so hops are typically `max(0, steps.length - 1)` (see `src/lib/session-utils.ts` / `src/lib/hops.ts`).
+- **Hop definition:** a hop is one move/link-click between articles (edge count). Many `steps[]` arrays include the start page at index 0, but duplicate/no-op same-article steps (including fragment-only or terminal no-op events) do **not** increment hops; use the shared hop utilities instead of raw `steps.length - 1`.
 - **Unlimited budgets:** LLM limits use `null` to mean “unlimited” for `max_links` and `max_tokens` (stored in session rules and passed down to runs). Classic/Marathon presets default to unlimited; Sprint retains finite defaults.
 - **Invite links:** opening `/?room=room_XXXX` should land on **Play → Multiplayer** and focus **Join a room → Your name** when it’s empty.
 - **Token accounting:** per-step metadata may include either `prompt_tokens`/`completion_tokens` or `input_tokens`/`output_tokens` (and sometimes `total_tokens`). The UI aggregates these across a run and also displays per-step usage in the Arena run details.
@@ -101,7 +103,7 @@ Backend + DB (local API):
 
 ## Testing Guidelines
 
-- No dedicated unit-test suite currently; minimum checks are `yarn lint` + `yarn build` (note: `make test` calls `yarn test`).
+- Python benchmark tests live under `parallel_eval/benchmark/tests/`; minimum frontend checks are `yarn lint` + `yarn typecheck` + `yarn build` (note: `make test` calls `yarn test`).
 - For Play Game changes, run `make play-game-regression` (requires Playwright browsers installed).
 - For UI changes, do a quick smoke test: start a race, add challengers, and verify leaderboard/arena interactions.
 - For multiplayer UI changes, smoke test: create room, join from a second tab/device, add AI in lobby + arena (including Presets), make a human move, give up, hide/show runs, and verify websocket updates.
@@ -113,7 +115,9 @@ Backend + DB (local API):
 
 ## Security & Configuration Tips
 
-- Don’t commit secrets; `.env` is ignored. Common env vars: `VITE_API_BASE`, `WIKISPEEDIA_DB_PATH`, provider keys (e.g. `OPENAI_API_KEY`), Logfire (`LOGFIRE_TOKEN`), local tracing controls like `WIKIRACE_LOCAL_RUN_TTL_SECONDS` / `WIKIRACE_LOCAL_RUN_CLEANUP_INTERVAL_SECONDS`, and multiplayer controls like `WIKIRACE_ROOM_TTL_SECONDS`, `WIKIRACE_ROOM_CLEANUP_INTERVAL_SECONDS`, `WIKIRACE_MAX_LLM_RUNS_PER_ROOM`, `WIKIRACE_MAX_CONCURRENT_LLM_CALLS`, `WIKIRACE_PUBLIC_HOST`.
+- Don’t commit secrets; `.env` is ignored. Common env vars: `VITE_API_BASE`, `WIKISPEEDIA_DB_PATH`, provider keys (e.g. `OPENAI_API_KEY`, `WIKIRACE_CUSTOM_OPENAI_API_KEY` for custom OpenAI-compatible `api_base` endpoints), Logfire (`LOGFIRE_TOKEN`), local tracing controls like `WIKIRACE_LOCAL_RUN_TTL_SECONDS` / `WIKIRACE_LOCAL_RUN_CLEANUP_INTERVAL_SECONDS`, multiplayer controls like `WIKIRACE_ROOM_TTL_SECONDS`, `WIKIRACE_ROOM_CLEANUP_INTERVAL_SECONDS`, `WIKIRACE_MAX_LLM_RUNS_PER_ROOM`, `WIKIRACE_MAX_CONCURRENT_LLM_CALLS`, `WIKIRACE_ROOM_TASK_CANCEL_DRAIN_TIMEOUT_SECONDS`, `WIKIRACE_LLM_CANCEL_DRAIN_TIMEOUT_SECONDS`, `WIKIRACE_PUBLIC_HOST`, and localhost security controls `WIKIRACE_ALLOWED_CORS_ORIGINS`, `WIKIRACE_ALLOWED_LLM_API_BASES`, `WIKIRACE_ALLOW_REMOTE_LLM_API`, `WIKIRACE_LLM_PROXY_SHARED_SECRET`.
+- If `WIKIRACE_PUBLIC_HOST` is set to a non-loopback hostname, `/llm/*` requests require `WIKIRACE_LLM_PROXY_SHARED_SECRET` and the proxy must inject `X-Wikirace-Llm-Proxy-Secret`; otherwise local loopback heuristics are intentionally disabled to avoid “proxy rewrote to localhost” bypasses.
+- LLM HTTP retry controls (global defaults now used by `llm_client.py`): `WIKIRACE_LLM_HTTP_MAX_RETRIES` (default `5`), `WIKIRACE_LLM_HTTP_RETRY_INITIAL_DELAY_SECONDS` (default `1.0`), `WIKIRACE_LLM_HTTP_RETRY_MAX_DELAY_SECONDS` (default `60.0`), `WIKIRACE_LLM_HTTP_RETRY_EXP_BASE` (default `2.0`), `WIKIRACE_LLM_HTTP_RETRY_JITTER` (default `1.0`).
 - Backend env loading: `llm_client.py` calls `load_dotenv(override=True)`, so `.env` values take precedence over shell-exported vars (e.g. in `~/.zshrc`).
 - Logfire: set `LOGFIRE_TOKEN` to enable trace export; when missing the app runs normally (`send_to_logfire="if-token-present"`).
 - Local run tracing (Play → Local): the UI calls `/llm/local_run/start` once per run to create a Logfire parent “attempt” span, then sends the returned `traceparent` header (plus `x-wikirace-session-id` + `x-wikirace-run-id`) on each `/llm/local_run/step` call so all hops nest under that run.
@@ -121,4 +125,4 @@ Backend + DB (local API):
 - Title resolution caching: `WIKIRACE_RESOLVE_ARTICLE_CACHE_TTL_SECONDS` controls `Cache-Control` max-age for `/resolve_article/*`.
 - Debugging wiki proxy cache: responses include `X-Wiki-Proxy-Cache: HIT|MISS|OFFLINE`.
 - Client-side title resolution cache persists in `sessionStorage` under `wikirace:resolvedTitleCache:v1`.
-- The app stores state in `localStorage`; clearing `wikirace:*` keys can help when debugging UI behavior.
+- The app stores single-tab multiplayer identity in `sessionStorage` (`wikirace:multiplayer:*`) and convenience defaults in `localStorage`; clearing `wikirace:*` keys can help when debugging UI behavior.

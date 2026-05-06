@@ -1,5 +1,5 @@
-import q3ResultsUrl from "../../results/qwen3.json?url";
-import q3_30B_A3B_ResultsUrl from "../../results/qwen3-30B-A3-results.json?url";
+import q3ResultsUrl from "@/data/viewer/qwen3.json?url";
+import q3_30B_A3B_ResultsUrl from "@/data/viewer/qwen3-30B-A3-results.json?url";
 // import mockResults from "../../qwen3-final-results.json"
 import { Suspense, lazy, useMemo, useState, useEffect, useRef } from "react";
 import { Card } from "@/components/ui/card";
@@ -31,8 +31,23 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { addViewerDataset, removeViewerDataset, useViewerDatasetsStore } from "@/lib/viewer-datasets";
-import { formatHops, viewerRunHops } from "@/lib/hops";
+import {
+  addViewerDataset,
+  removeViewerDataset,
+  selectViewerDataset,
+  useViewerDatasetsStore,
+} from "@/lib/viewer-datasets";
+import {
+  loadBenchmarkViewerTraceSources,
+  loadViewerTraceDataset,
+  type BenchmarkViewerTraceSource,
+} from "@/lib/viewer-trace-loader";
+import {
+  formatHops,
+  viewerRunHops,
+  viewerRunPathArticles,
+  viewerRunStepArticles,
+} from "@/lib/hops";
 import { getChartPalette } from "@/lib/theme-colors";
 
 const ForceDirectedGraph = lazy(() => import("@/components/force-directed-graph"));
@@ -42,8 +57,7 @@ const DEFAULT_DATASETS = {
   "Qwen3-30B-A3B": { url: q3_30B_A3B_ResultsUrl },
 } as const;
 
-type DefaultDatasetName = keyof typeof DEFAULT_DATASETS;
-type DefaultDatasetLoadStatus = "idle" | "loading" | "loaded" | "error";
+type RemoteDatasetLoadStatus = "idle" | "loading" | "loaded" | "error";
 
 // Use the type expected by RunsList
 interface Run {
@@ -70,6 +84,56 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function normalizeViewerRunsFromModelData(modelData: unknown): Run[] {
+  if (!modelData || typeof modelData !== "object") {
+    return [];
+  }
+
+  const runsData = (modelData as { runs?: unknown }).runs;
+  if (!Array.isArray(runsData)) {
+    return [];
+  }
+
+  const normalizedRuns: Run[] = [];
+  for (const runData of runsData) {
+    if (!runData || typeof runData !== "object") {
+      continue;
+    }
+
+    const runObject = runData as {
+      start_article?: unknown;
+      destination_article?: unknown;
+      steps?: unknown;
+      result?: unknown;
+    };
+
+    if (
+      typeof runObject.start_article !== "string" ||
+      !runObject.start_article.trim() ||
+      typeof runObject.destination_article !== "string" ||
+      !runObject.destination_article.trim()
+    ) {
+      continue;
+    }
+
+    const steps = Array.isArray(runObject.steps)
+      ? viewerRunStepArticles(runObject.steps)
+      : [];
+
+    normalizedRuns.push({
+      start_article: runObject.start_article,
+      destination_article: runObject.destination_article,
+      steps,
+      result:
+        typeof runObject.result === "string" && runObject.result.trim()
+          ? runObject.result
+          : "unknown",
+    });
+  }
+
+  return normalizedRuns;
+}
+
 export default function ViewerTab({
   handleTryRun,
   onGoToPlayTab,
@@ -79,7 +143,7 @@ export default function ViewerTab({
   onGoToPlayTab?: () => void;
   showPlayCta?: boolean;
 }) {
-  const { datasets } = useViewerDatasetsStore();
+  const { datasets, selected_dataset_id } = useViewerDatasetsStore();
   const [selectedRun, setSelectedRun] = useState<number | null>(null);
   const [pauseAutoplayToken, setPauseAutoplayToken] = useState<number | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -98,16 +162,25 @@ export default function ViewerTab({
   );
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareHop, setCompareHop] = useState(0);
-  const [defaultDatasetData, setDefaultDatasetData] = useState<Record<string, unknown>>(
+  const [benchmarkSources, setBenchmarkSources] = useState<BenchmarkViewerTraceSource[]>([]);
+  const [benchmarkSourceStatus, setBenchmarkSourceStatus] = useState<
+    "idle" | "loading" | "loaded" | "error"
+  >("idle");
+  const [benchmarkSourceError, setBenchmarkSourceError] = useState<string | null>(null);
+  const [benchmarkSourceLoadToken, setBenchmarkSourceLoadToken] = useState(0);
+  const [remoteDatasetData, setRemoteDatasetData] = useState<Record<string, unknown>>(
     () => ({})
   );
-  const [defaultDatasetStatus, setDefaultDatasetStatus] = useState<
-    Record<string, DefaultDatasetLoadStatus>
+  const [remoteDatasetStatus, setRemoteDatasetStatus] = useState<
+    Record<string, RemoteDatasetLoadStatus>
   >(() => ({}));
-  const [defaultDatasetErrors, setDefaultDatasetErrors] = useState<Record<string, string>>(
+  const [remoteDatasetErrors, setRemoteDatasetErrors] = useState<Record<string, string>>(
     () => ({})
   );
-  const [defaultDatasetLoadToken, setDefaultDatasetLoadToken] = useState(0);
+  const [remoteDatasetLoadToken, setRemoteDatasetLoadToken] = useState(0);
+  const remoteDatasetInFlightRef = useRef<Set<string>>(new Set());
+  const remoteDatasetStatusRef = useRef<Record<string, RemoteDatasetLoadStatus>>({});
+  const selectedModelWasUserSetRef = useRef(false);
 
   const savedModels = useMemo(() => {
     const obj: Record<string, unknown> = {};
@@ -117,42 +190,66 @@ export default function ViewerTab({
     return obj;
   }, [datasets]);
 
+  const remoteDatasetSources = useMemo<BenchmarkViewerTraceSource[]>(() => {
+    const bundledSources = Object.entries(DEFAULT_DATASETS).map(([name, dataset]) => ({
+      id: `bundled:${name}`,
+      name,
+      url: dataset.url,
+      sliceId: null,
+    }));
+    return [...benchmarkSources, ...bundledSources];
+  }, [benchmarkSources]);
+
+  const remoteSourceByName = useMemo(() => {
+    const byName: Record<string, BenchmarkViewerTraceSource> = {};
+    for (const source of remoteDatasetSources) {
+      byName[source.name] = source;
+    }
+    return byName;
+  }, [remoteDatasetSources]);
+
   const modelOptions = useMemo(() => {
-    return [...Object.keys(DEFAULT_DATASETS), ...Object.keys(savedModels)];
-  }, [savedModels]);
+    return [...remoteDatasetSources.map((source) => source.name), ...Object.keys(savedModels)];
+  }, [remoteDatasetSources, savedModels]);
 
   const models = useMemo(() => {
     return {
-      ...defaultDatasetData,
+      ...remoteDatasetData,
       ...savedModels,
     };
-  }, [defaultDatasetData, savedModels]);
+  }, [remoteDatasetData, savedModels]);
 
-  const isDefaultModel = selectedModel in DEFAULT_DATASETS;
-  const selectedDefaultStatus = defaultDatasetStatus[selectedModel] ?? "idle";
-  const selectedDefaultError = defaultDatasetErrors[selectedModel] ?? null;
+  const isRemoteModel = selectedModel in remoteSourceByName;
+  const selectedRemoteStatus = remoteDatasetStatus[selectedModel] ?? "idle";
+  const selectedRemoteError = remoteDatasetErrors[selectedModel] ?? null;
 
-  const retrySelectedDefaultDataset = () => {
-    if (!isDefaultModel) return;
-    setDefaultDatasetData((prev) => {
+  const retrySelectedRemoteDataset = () => {
+    if (!isRemoteModel) return;
+    remoteDatasetInFlightRef.current.delete(selectedModel);
+    setRemoteDatasetData((prev) => {
       if (!(selectedModel in prev)) return prev;
       const next = { ...prev };
       delete next[selectedModel];
       return next;
     });
-    setDefaultDatasetStatus((prev) => ({ ...prev, [selectedModel]: "idle" }));
-    setDefaultDatasetErrors((prev) => {
+    setRemoteDatasetStatus((prev) => ({ ...prev, [selectedModel]: "idle" }));
+    setRemoteDatasetErrors((prev) => {
       if (!(selectedModel in prev)) return prev;
       const next = { ...prev };
       delete next[selectedModel];
       return next;
     });
-    setDefaultDatasetLoadToken((prev) => prev + 1);
+    setRemoteDatasetLoadToken((prev) => prev + 1);
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lastAppliedSelectedDatasetIdRef = useRef<string | null>(null);
 
   const comparePalette = useMemo(() => getChartPalette(), []);
+
+  useEffect(() => {
+    remoteDatasetStatusRef.current = remoteDatasetStatus;
+  }, [remoteDatasetStatus]);
 
   const winRuns = useMemo(() => runs.filter((run) => run.result === "win"), [runs]);
   const winHopCounts = useMemo(
@@ -185,98 +282,122 @@ export default function ViewerTab({
   }, [modelOptions, selectedModel]);
 
   useEffect(() => {
-    if (!(selectedModel in DEFAULT_DATASETS)) return;
+    const controller = new AbortController();
+    let active = true;
 
-    const defaultModel = selectedModel as DefaultDatasetName;
-    const url = DEFAULT_DATASETS[defaultModel].url;
+    setBenchmarkSourceStatus("loading");
+    setBenchmarkSourceError(null);
 
-    let controller: AbortController | null = null;
-    let shouldLoad = false;
+    void (async () => {
+      try {
+        const sources = await loadBenchmarkViewerTraceSources({ signal: controller.signal });
+        if (!active || controller.signal.aborted) return;
+        setBenchmarkSources(sources);
+        setBenchmarkSourceStatus("loaded");
+      } catch (err) {
+        if (!active || controller.signal.aborted) return;
+        setBenchmarkSources([]);
+        setBenchmarkSourceStatus("error");
+        setBenchmarkSourceError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [benchmarkSourceLoadToken]);
+
+  useEffect(() => {
+    if (benchmarkSources.length === 0) return;
+    if (selected_dataset_id) return;
+    if (selectedModelWasUserSetRef.current) return;
+    if (benchmarkSources.some((source) => source.name === selectedModel)) return;
+    if (selectedModel in DEFAULT_DATASETS || selectedModel.trim().length === 0) {
+      setSelectedModel(benchmarkSources[0]!.name);
+    }
+  }, [benchmarkSources, selectedModel, selected_dataset_id]);
+
+  useEffect(() => {
+    if (!selected_dataset_id) return;
+    if (lastAppliedSelectedDatasetIdRef.current === selected_dataset_id) return;
+
+    const dataset = datasets.find((item) => item.id === selected_dataset_id);
+    if (!dataset) return;
+
+    setSelectedModel(`Saved: ${dataset.name}`);
+    lastAppliedSelectedDatasetIdRef.current = selected_dataset_id;
+  }, [datasets, selected_dataset_id]);
+
+  useEffect(() => {
+    const source = remoteSourceByName[selectedModel];
+    if (!source) return;
+
+    const currentStatus = remoteDatasetStatusRef.current[selectedModel] ?? "idle";
+    if (currentStatus !== "idle") return;
+    const inFlightLoads = remoteDatasetInFlightRef.current;
+    if (inFlightLoads.has(selectedModel)) return;
+
+    const controller = new AbortController();
     let settled = false;
+    inFlightLoads.add(selectedModel);
 
-    setDefaultDatasetStatus((prev) => {
-      const current = prev[defaultModel] ?? "idle";
-      // Keep errors sticky until the user explicitly retries.
-      if (current !== "idle") return prev;
-
-      controller = new AbortController();
-      shouldLoad = true;
-      return { ...prev, [defaultModel]: "loading" };
-    });
-
-    if (!shouldLoad || !controller) return;
-
-    // Clear any previous error for this dataset once we actually retry a load.
-    setDefaultDatasetErrors((prev) => {
-      if (!(defaultModel in prev)) return prev;
+    setRemoteDatasetStatus((prev) => ({ ...prev, [selectedModel]: "loading" }));
+    setRemoteDatasetErrors((prev) => {
+      if (!(selectedModel in prev)) return prev;
       const next = { ...prev };
-      delete next[defaultModel];
+      delete next[selectedModel];
       return next;
     });
 
     void (async () => {
       try {
-        const response = await fetch(url, { signal: controller!.signal });
-        if (!response.ok) {
-          throw new Error(`Failed to load dataset (${response.status})`);
-        }
-
-        const data = (await response.json()) as unknown;
-        if (controller!.signal.aborted) return;
+        const dataset = await loadViewerTraceDataset({
+          url: source.url,
+          name: source.name,
+          sliceId: source.sliceId,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
 
         settled = true;
-        setDefaultDatasetData((prev) => ({ ...prev, [defaultModel]: data }));
-        setDefaultDatasetStatus((prev) => ({ ...prev, [defaultModel]: "loaded" }));
+        inFlightLoads.delete(selectedModel);
+        setRemoteDatasetData((prev) => ({ ...prev, [selectedModel]: dataset.data }));
+        setRemoteDatasetStatus((prev) => ({ ...prev, [selectedModel]: "loaded" }));
       } catch (err) {
-        if (controller!.signal.aborted) return;
+        if (controller.signal.aborted) return;
 
-        const message = err instanceof Error ? err.message : String(err);
         settled = true;
-        setDefaultDatasetStatus((prev) => ({ ...prev, [defaultModel]: "error" }));
-        setDefaultDatasetErrors((prev) => ({ ...prev, [defaultModel]: message }));
+        inFlightLoads.delete(selectedModel);
+        setRemoteDatasetStatus((prev) => ({ ...prev, [selectedModel]: "error" }));
+        setRemoteDatasetErrors((prev) => ({
+          ...prev,
+          [selectedModel]: err instanceof Error ? err.message : String(err),
+        }));
       }
     })();
 
     return () => {
-      controller!.abort();
-      // If we aborted mid-load (e.g. user switched datasets), allow future retries.
+      controller.abort();
+      inFlightLoads.delete(selectedModel);
       if (!settled) {
-        setDefaultDatasetStatus((prev) => {
-          if ((prev[defaultModel] ?? "idle") !== "loading") return prev;
-          return { ...prev, [defaultModel]: "idle" };
+        setRemoteDatasetStatus((prev) => {
+          if ((prev[selectedModel] ?? "idle") !== "loading") return prev;
+          return { ...prev, [selectedModel]: "idle" };
         });
       }
     };
-  }, [defaultDatasetLoadToken, selectedModel]);
+  }, [remoteDatasetLoadToken, selectedModel, remoteSourceByName]);
 
   useEffect(() => {
-    // Convert the model data to the format expected by RunsList
-    const modelData = models[selectedModel] as {
-      runs?: {
-        start_article: string;
-        destination_article: string;
-        steps: { type: string; article: string }[];
-        result: string;
-      }[];
-    } | null;
+    const convertedRuns = normalizeViewerRunsFromModelData(models[selectedModel]);
 
-    if (!modelData || !Array.isArray(modelData.runs)) {
+    if (convertedRuns.length === 0) {
       setRuns([]);
       setModelStats(null);
       return;
     }
 
-    const convertedRuns: Run[] = modelData.runs.map((run: {
-      start_article: string;
-      destination_article: string;
-      steps: { type: string; article: string }[];
-      result: string;
-    }) => ({
-      start_article: run.start_article,
-      destination_article: run.destination_article,
-      steps: run.steps.map((step: { article: string }) => step.article),
-      result: run.result
-    }));
     const winRunsForModel = convertedRuns.filter((run) => run.result === "win");
     const minWinHops =
       winRunsForModel.length > 0
@@ -411,7 +532,7 @@ export default function ViewerTab({
     return filterRuns.map((run): ForceGraphRun => ({
       start_article: run.start_article,
       destination_article: run.destination_article,
-      steps: run.steps.map(article => ({ type: "move", article }))
+      steps: viewerRunPathArticles(run).map(article => ({ type: "move", article }))
     }));
   }, [filterRuns]);
 
@@ -427,11 +548,12 @@ export default function ViewerTab({
     if (compareRunIds.length < 2) return 0;
     let maxHop = 0;
     for (const runId of compareRunIds) {
-      const steps = forceGraphRuns[runId]?.steps ?? [];
-      maxHop = Math.max(maxHop, Math.max(0, steps.length - 1));
+      const run = filterRuns[runId];
+      if (!run) continue;
+      maxHop = Math.max(maxHop, viewerRunHops(run));
     }
     return maxHop;
-  }, [compareRunIds, forceGraphRuns]);
+  }, [compareRunIds, filterRuns]);
 
   const compareHopClamped = useMemo(() => {
     return clampNumber(compareHop, 0, compareMaxHop);
@@ -468,7 +590,10 @@ export default function ViewerTab({
           {
             start_article: selectedRunData.start_article,
             destination_article: selectedRunData.destination_article,
-            steps: selectedRunData.steps.map((article) => ({ type: "move", article })),
+            steps: viewerRunPathArticles(selectedRunData).map((article) => ({
+              type: "move",
+              article,
+            })),
           },
         ],
         runId: 0,
@@ -516,12 +641,13 @@ export default function ViewerTab({
 
   const copySelectedPath = async () => {
     if (!selectedRunData) return;
-    const hops = viewerRunHops(selectedRunData);
+    const pathArticles = viewerRunPathArticles(selectedRunData);
+    const hops = Math.max(0, pathArticles.length - 1);
     const text = [
       `${selectedRunData.start_article} → ${selectedRunData.destination_article}`,
       `Hops: ${hops}`,
       "Path:",
-      ...selectedRunData.steps.map((step, idx) => `${idx}. ${step}`),
+      ...pathArticles.map((step, idx) => `${idx}. ${step}`),
     ].join("\n");
 
     try {
@@ -542,25 +668,28 @@ export default function ViewerTab({
     reader.onload = (e) => {
       try {
         const jsonData = JSON.parse(e.target?.result as string);
-        
-        // Validate the JSON structure has the required fields
-        if (!jsonData.runs || !Array.isArray(jsonData.runs)) {
-          alert("Invalid JSON format. File must contain a 'runs' array.");
+
+        const normalizedRuns = normalizeViewerRunsFromModelData(jsonData);
+        if (normalizedRuns.length === 0) {
+          alert(
+            "Invalid JSON format. File must contain a 'runs' array with at least one valid run."
+          );
           return;
         }
-        
+
         // Create a filename-based model name, removing extension and path
         const fileName = file.name.replace(/\.[^/.]+$/, "");
         const modelName = fileName;
 
         addViewerDataset({ name: modelName, data: jsonData });
+        selectViewerDataset(null);
         setSelectedModel(`Saved: ${modelName}`);
       } catch (error) {
         alert(`Error parsing JSON file: ${error.message}`);
       }
     };
     reader.readAsText(file);
-    
+
     // Reset the file input
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -575,11 +704,15 @@ export default function ViewerTab({
     setImportError(null);
     try {
       const jsonData = JSON.parse(importText);
-      if (!jsonData.runs || !Array.isArray(jsonData.runs)) {
-        throw new Error("Invalid JSON format. JSON must contain a 'runs' array.");
+      const normalizedRuns = normalizeViewerRunsFromModelData(jsonData);
+      if (normalizedRuns.length === 0) {
+        throw new Error(
+          "Invalid JSON format. JSON must contain a 'runs' array with at least one valid run."
+        );
       }
       const name = importName.trim() || "Pasted dataset";
       addViewerDataset({ name, data: jsonData });
+      selectViewerDataset(null);
       setSelectedModel(`Saved: ${name}`);
       setImportText("");
       setImportName("");
@@ -631,7 +764,13 @@ export default function ViewerTab({
          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
              <div className="flex-shrink-0">
-               <Select value={selectedModel} onValueChange={setSelectedModel}>
+               <Select
+                 value={selectedModel}
+                 onValueChange={(value) => {
+                   selectedModelWasUserSetRef.current = true;
+                   setSelectedModel(value);
+                 }}
+               >
                  <SelectTrigger className="w-[220px]">
                    <SelectValue placeholder="Select model" />
                  </SelectTrigger>
@@ -645,24 +784,48 @@ export default function ViewerTab({
                </Select>
              </div>
 
-             {isDefaultModel && selectedDefaultStatus === "loading" && (
-               <div className="text-xs text-muted-foreground">Loading dataset...</div>
+             {benchmarkSourceStatus === "loading" && benchmarkSources.length === 0 && (
+               <div className="text-xs text-muted-foreground">Loading benchmark traces...</div>
              )}
 
-             {isDefaultModel && selectedDefaultStatus === "error" && (
+             {benchmarkSourceStatus === "error" && benchmarkSources.length === 0 && (
                <div className="flex items-center gap-2 rounded-md border border-status-error/30 bg-status-error/10 px-2 py-1 text-xs text-foreground">
                  <AlertTriangle
                    className="h-4 w-4 shrink-0 text-status-error"
                    aria-hidden="true"
                  />
                  <div className="truncate">
-                   {selectedDefaultError || "Failed to load dataset."}
+                   {benchmarkSourceError || "Failed to load benchmark traces."}
                  </div>
                  <Button
                    variant="outline"
                    size="sm"
                    className="h-7 px-2"
-                   onClick={retrySelectedDefaultDataset}
+                   onClick={() => setBenchmarkSourceLoadToken((prev) => prev + 1)}
+                 >
+                   Retry
+                 </Button>
+               </div>
+             )}
+
+             {isRemoteModel && selectedRemoteStatus === "loading" && (
+               <div className="text-xs text-muted-foreground">Loading dataset...</div>
+             )}
+
+             {isRemoteModel && selectedRemoteStatus === "error" && (
+               <div className="flex items-center gap-2 rounded-md border border-status-error/30 bg-status-error/10 px-2 py-1 text-xs text-foreground">
+                 <AlertTriangle
+                   className="h-4 w-4 shrink-0 text-status-error"
+                   aria-hidden="true"
+                 />
+                 <div className="truncate">
+                   {selectedRemoteError || "Failed to load dataset."}
+                 </div>
+                 <Button
+                   variant="outline"
+                   size="sm"
+                   className="h-7 px-2"
+                   onClick={retrySelectedRemoteDataset}
                  >
                    Retry
                  </Button>

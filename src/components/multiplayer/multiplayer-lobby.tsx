@@ -221,7 +221,7 @@ export default function MultiplayerLobby({
                             : run.status.replaceAll("_", " ")}
                         </StatusChip>
 
-                        {isHost && !isMobile ? (
+                        {isHost ? (
                           <Button
                             variant="outline"
                             size="sm"
@@ -243,7 +243,7 @@ export default function MultiplayerLobby({
               )}
             </div>
 
-            {isHost && !isMobile ? (
+            {isHost ? (
               <div className="mt-4 rounded-md border bg-muted/20 p-3">
                 <div className="text-xs font-medium">Add AI</div>
                 <div className="mt-1 text-[11px] text-muted-foreground">
@@ -261,60 +261,58 @@ export default function MultiplayerLobby({
             ) : null}
           </div>
 
-          {!isMobile && (
-            <div className="order-first lg:order-none lg:col-span-5">
-              <div className="text-sm font-medium">Start race</div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                The host starts the race for everyone.
+          <div className="order-first lg:order-none lg:col-span-5">
+            <div className="text-sm font-medium">Start race</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              The host starts the race for everyone.
+            </div>
+            <div className="mt-3 space-y-2">
+              <Button
+                className="w-full"
+                disabled={!isHost || startLoading}
+                onClick={() => {
+                  if (!isHost) return;
+                  setStartLoading(true);
+                  void (async () => {
+                    try {
+                      await startRoom();
+                    } finally {
+                      setStartLoading(false);
+                    }
+                  })();
+                }}
+              >
+                {!isHost
+                  ? "Waiting for host…"
+                  : startLoading
+                    ? "Starting…"
+                    : "Start race"}
+              </Button>
+
+              <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+                Open the invite link on other devices, join the lobby, then press Start.
               </div>
-              <div className="mt-3 space-y-2">
-                <Button
-                  className="w-full"
-                  disabled={!isHost || startLoading}
-                  onClick={() => {
-                    if (!isHost) return;
-                    setStartLoading(true);
-                    void (async () => {
-                      try {
-                        await startRoom();
-                      } finally {
-                        setStartLoading(false);
-                      }
-                    })();
-                  }}
-                >
-                  {!isHost
-                    ? "Waiting for host…"
-                    : startLoading
-                      ? "Starting…"
-                      : "Start race"}
-                </Button>
 
-                <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
-                  Open the invite link on other devices, join the lobby, then press Start.
-                </div>
-
-                {qrUrl && inviteLink && (
-                  <div className="rounded-md border bg-muted/10 p-3">
-                    <div className="text-xs font-medium">Scan to join</div>
-                    <div className="mt-2 flex flex-col items-center gap-2 sm:flex-row sm:items-start">
-                      <img
-                        src={qrUrl}
-                        alt="Room invite QR code"
-                        className="h-[180px] w-[180px] rounded bg-white p-2"
-                      />
-                      <div className="text-[11px] text-muted-foreground break-all">
-                        {inviteLink}
-                      </div>
-                    </div>
-                    <div className="mt-2 text-[11px] text-muted-foreground">
-                      (QR image is fetched from qrserver.com.)
+              {!isMobile && qrUrl && inviteLink && (
+                <div className="rounded-md border bg-muted/10 p-3">
+                  <div className="text-xs font-medium">Scan to join</div>
+                  <div className="mt-2 flex flex-col items-center gap-2 sm:flex-row sm:items-start">
+                    <img
+                      src={qrUrl}
+                      alt="Room invite QR code"
+                      className="h-[180px] w-[180px] rounded bg-white p-2"
+                    />
+                    <div className="text-[11px] text-muted-foreground break-all">
+                      {inviteLink}
                     </div>
                   </div>
-                )}
-              </div>
+                  <div className="mt-2 text-[11px] text-muted-foreground">
+                    (QR image is fetched from qrserver.com.)
+                  </div>
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </Card>
     </div>

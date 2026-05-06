@@ -1,3 +1,5 @@
+import { normalizeWikiTitle } from "@/lib/wiki-title";
+
 export type StepLike = {
   type?: string;
   article?: string;
@@ -10,17 +12,80 @@ export type TokenTotals = {
   totalTokens: number | null;
 };
 
-export function computeHopsFromSteps(steps: readonly StepLike[] | null | undefined) {
-  return Math.max(0, (steps?.length ?? 0) - 1);
+function isHopTerminalStep(step: StepLike | null | undefined) {
+  return step?.type === "move" || step?.type === "win" || step?.type === "lose";
+}
+
+function stepArticleForHop(stepArticle: string | null | undefined, currentArticle: string) {
+  if (typeof stepArticle !== "string" || stepArticle.trim().length === 0) {
+    return currentArticle;
+  }
+  const articleWithoutFragment = stepArticle.split("#", 1)[0];
+  if (normalizeWikiTitle(stepArticle).length === 0) {
+    return currentArticle;
+  }
+  return articleWithoutFragment;
+}
+
+export function computeHopsFromSteps(
+  steps: readonly StepLike[] | null | undefined,
+  startArticle?: string | null
+) {
+  const hopCounts = computeHopCountsByStepIndex(steps, startArticle);
+  return hopCounts[hopCounts.length - 1] ?? 0;
+}
+
+export function computeHopCountsByStepIndex(
+  steps: readonly StepLike[] | null | undefined,
+  startArticle?: string | null
+) {
+  if (!steps || steps.length === 0) return [0];
+
+  const hopCounts: number[] = [];
+  let hops = 0;
+  let currentArticle =
+    typeof startArticle === "string" && startArticle.trim().length > 0
+      ? startArticle.split("#", 1)[0]
+      : "";
+
+  for (const step of steps) {
+    const article = stepArticleForHop(step?.article, currentArticle);
+
+    if (step?.type === "start") {
+      currentArticle = article;
+      hopCounts.push(hops);
+      continue;
+    }
+
+    if (
+      isHopTerminalStep(step) &&
+      article &&
+      normalizeWikiTitle(article) !== normalizeWikiTitle(currentArticle)
+    ) {
+      hops += 1;
+    }
+
+    if (article) {
+      currentArticle = article;
+    }
+    hopCounts.push(hops);
+  }
+
+  return hopCounts;
 }
 
 export function currentArticleFromSteps(
   steps: readonly StepLike[] | null | undefined,
   fallback: string
 ) {
-  const last = steps && steps.length > 0 ? steps[steps.length - 1] : null;
-  const article = last?.article;
-  return typeof article === "string" && article.trim().length > 0 ? article : fallback;
+  if (!steps) return fallback;
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const article = steps[index]?.article;
+    if (typeof article !== "string" || article.trim().length === 0) continue;
+    if (normalizeWikiTitle(article).length === 0) continue;
+    return article.split("#", 1)[0];
+  }
+  return fallback.split("#", 1)[0] || fallback;
 }
 
 export function lastLlmMeta(steps: readonly StepLike[] | null | undefined) {

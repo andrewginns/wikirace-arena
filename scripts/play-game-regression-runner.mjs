@@ -4,8 +4,30 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     globalThis.process?.env?.PLAY_GAME_REGRESSION_BASE_URL ||
     "http://localhost:5173";
   const TIMEOUT_MS = typeof timeoutMs === "number" ? timeoutMs : 25_000;
+  const SEEDED_SESSION_STORAGE_KEY = "wikirace:play-game-regression:seed-session";
 
   page.setDefaultTimeout(TIMEOUT_MS);
+
+  await page.addInitScript((seededSessionStorageKey) => {
+    try {
+      const rawSeed = window.localStorage.getItem(seededSessionStorageKey);
+      if (!rawSeed) return;
+
+      window.localStorage.removeItem(seededSessionStorageKey);
+
+      const parsedSeed = JSON.parse(rawSeed);
+      const session = parsedSeed?.session;
+      if (!session || typeof session.id !== "string") return;
+
+      window.localStorage.setItem(
+        "wikirace:sessions:v1",
+        JSON.stringify({ sessions: { [session.id]: session } })
+      );
+      window.localStorage.setItem("wikirace:active-session-id", session.id);
+    } catch {
+      window.localStorage.removeItem(seededSessionStorageKey);
+    }
+  }, SEEDED_SESSION_STORAGE_KEY);
 
   const sleep = (ms) => page.waitForTimeout(ms);
 
@@ -60,6 +82,53 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
         result: humanRun.result || null,
       };
     });
+  }
+
+  async function waitForStoredRunLabel(p, runId) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const label = await p.evaluate((requestedRunId) => {
+        const active = window.localStorage.getItem("wikirace:active-session-id");
+        const raw = window.localStorage.getItem("wikirace:sessions:v1");
+        if (!active || !raw) return null;
+
+        try {
+          const parsed = JSON.parse(raw);
+          const session = parsed?.sessions?.[active];
+          const run = session?.runs?.find((r) => r && r.id === requestedRunId);
+          return run?.model || run?.player_name || null;
+        } catch {
+          return null;
+        }
+      }, runId);
+
+      if (typeof label === "string" && label.trim().length > 0) return label;
+      await p.waitForTimeout(100);
+    }
+
+    return null;
+  }
+
+  async function waitForStoredRunDeletion(p, runId) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const deletedOk = await p.evaluate((requestedRunId) => {
+        const active = window.localStorage.getItem("wikirace:active-session-id");
+        const raw = window.localStorage.getItem("wikirace:sessions:v1");
+        if (!active || !raw) return false;
+
+        try {
+          const parsed = JSON.parse(raw);
+          const session = parsed?.sessions?.[active];
+          return !session?.runs?.some((r) => r && r.id === requestedRunId);
+        } catch {
+          return false;
+        }
+      }, runId);
+
+      if (deletedOk) return true;
+      await p.waitForTimeout(100);
+    }
+
+    return false;
   }
 
   function getWikiFrameUrl(p) {
@@ -153,7 +222,7 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     const expand = p.getByRole("button", { name: "Expand leaderboard" });
     if (await expand.isVisible().catch(() => false)) {
       await expand.click();
-      await p.getByText("Leaderboard", { exact: true }).waitFor();
+      await p.locator("#matchup-arena").getByText("Leaderboard", { exact: true }).waitFor();
       await sleep(150);
     }
   }
@@ -341,102 +410,175 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     await sleep(200);
   }
 
+  async function queueSeededSession(p, session) {
+    await p.evaluate(
+      ({ seededSessionStorageKey, nextSession }) => {
+        window.localStorage.setItem(
+          seededSessionStorageKey,
+          JSON.stringify({ session: nextSession })
+        );
+      },
+      {
+        seededSessionStorageKey: SEEDED_SESSION_STORAGE_KEY,
+        nextSession: session,
+      }
+    );
+  }
+
   async function seedTokenSession(p) {
-    await p.evaluate(() => {
-      const id = "session_mcp_tokens";
-      const created_at = new Date().toISOString();
+    const id = "session_mcp_tokens";
+    const created_at = new Date().toISOString();
 
-      const session = {
-        id,
-        title: "Token accounting seed",
-        start_article: "Capybara",
-        destination_article: "Rodent",
-        created_at,
-        rules: {
-          max_hops: 20,
-          max_links: null,
-          max_tokens: null,
-          include_image_links: false,
-          disable_links_view: false,
+    await queueSeededSession(p, {
+      id,
+      title: "Token accounting seed",
+      start_article: "Capybara",
+      destination_article: "Rodent",
+      created_at,
+      rules: {
+        max_hops: 20,
+        max_links: null,
+        max_tokens: null,
+        include_image_links: false,
+        disable_links_view: false,
+      },
+      runs: [
+        {
+          id: "run_llm_seed",
+          kind: "llm",
+          model: "openai-responses:gpt-5.2",
+          openai_reasoning_effort: "high",
+          started_at: created_at,
+          finished_at: created_at,
+          status: "finished",
+          result: "win",
+          steps: [
+            { type: "start", article: "Capybara", at: created_at },
+            {
+              type: "move",
+              article: "Rodent",
+              at: created_at,
+              metadata: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
+            },
+            {
+              type: "move",
+              article: "Rodent",
+              at: created_at,
+              metadata: { input_tokens: 5, output_tokens: 2 },
+            },
+          ],
         },
-        runs: [
-          {
-            id: "run_llm_seed",
-            kind: "llm",
-            model: "openai-responses:gpt-5.2",
-            openai_reasoning_effort: "high",
-            started_at: created_at,
-            finished_at: created_at,
-            status: "finished",
-            result: "win",
-            steps: [
-              { type: "start", article: "Capybara", at: created_at },
-              {
-                type: "move",
-                article: "Rodent",
-                at: created_at,
-                metadata: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
-              },
-              {
-                type: "move",
-                article: "Rodent",
-                at: created_at,
-                metadata: { input_tokens: 5, output_tokens: 2 },
-              },
-            ],
-          },
-        ],
-      };
-
-      window.localStorage.setItem(
-        "wikirace:sessions:v1",
-        JSON.stringify({ sessions: { [id]: session } })
-      );
-      window.localStorage.setItem("wikirace:active-session-id", id);
+      ],
     });
   }
 
   async function seedCouldHaveWonSession(p) {
-    await p.evaluate(() => {
-      const id = "session_could_have_won";
-      const created_at = new Date().toISOString();
+    const id = "session_could_have_won";
+    const created_at = new Date().toISOString();
 
-      const session = {
-        id,
-        title: "Direct link miss seed",
-        start_article: "Capybara",
-        destination_article: "Rodent",
-        created_at,
-        rules: {
-          max_hops: 20,
+    await queueSeededSession(p, {
+      id,
+      title: "Direct link miss seed",
+      start_article: "Capybara",
+      destination_article: "Rodent",
+      created_at,
+      rules: {
+        max_hops: 20,
+        max_links: null,
+        max_tokens: null,
+        include_image_links: false,
+        disable_links_view: false,
+      },
+      runs: [
+        {
+          id: "run_human_miss",
+          kind: "human",
+          player_name: "You",
+          started_at: created_at,
+          finished_at: created_at,
+          status: "finished",
+          result: "lose",
+          steps: [
+            { type: "start", article: "Capybara", at: created_at },
+            { type: "move", article: "Car", at: created_at },
+            { type: "lose", article: "Car", at: created_at, metadata: { reason: "seed" } },
+          ],
+        },
+      ],
+    });
+  }
+
+  async function seedNoopTerminalSession(p) {
+    const id = "session_noop_terminal";
+    const created_at = new Date().toISOString();
+
+    await queueSeededSession(p, {
+      id,
+      title: "Terminal no-op seed",
+      start_article: "Capybara",
+      destination_article: "Rodent",
+      created_at,
+      rules: {
+        max_hops: 20,
+        max_links: null,
+        max_tokens: null,
+        include_image_links: false,
+        disable_links_view: false,
+      },
+      runs: [
+        {
+          id: "run_human_noop_terminal",
+          kind: "human",
+          player_name: "You",
+          started_at: created_at,
+          finished_at: created_at,
+          status: "finished",
+          result: "lose",
+          steps: [
+            { type: "start", article: "Capybara", at: created_at },
+            { type: "move", article: "Capybara#Overview", at: created_at },
+            {
+              type: "lose",
+              article: "Capybara#Overview",
+              at: created_at,
+              metadata: { reason: "seed-terminal-noop" },
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  async function seedRunLevelUnlimitedSession(p) {
+    const id = "session_run_level_unlimited";
+    const created_at = new Date().toISOString();
+
+    await queueSeededSession(p, {
+      id,
+      title: "Run-level unlimited seed",
+      start_article: "Capybara",
+      destination_article: "Rodent",
+      created_at,
+      rules: {
+        max_hops: 20,
+        max_links: 5,
+        max_tokens: 1234,
+        include_image_links: false,
+        disable_links_view: false,
+      },
+      runs: [
+        {
+          id: "run_llm_unlimited_override",
+          kind: "llm",
+          model: "openai-responses:gpt-5.2",
           max_links: null,
           max_tokens: null,
-          include_image_links: false,
-          disable_links_view: false,
+          started_at: created_at,
+          status: "running",
+          result: null,
+          steps: [{ type: "start", article: "Capybara", at: created_at }],
         },
-        runs: [
-          {
-            id: "run_human_miss",
-            kind: "human",
-            player_name: "You",
-            started_at: created_at,
-            finished_at: created_at,
-            status: "finished",
-            result: "lose",
-            steps: [
-              { type: "start", article: "Capybara", at: created_at },
-              { type: "move", article: "Car", at: created_at },
-              { type: "lose", article: "Car", at: created_at, metadata: { reason: "seed" } },
-            ],
-          },
-        ],
-      };
-
-      window.localStorage.setItem(
-        "wikirace:sessions:v1",
-        JSON.stringify({ sessions: { [id]: session } })
-      );
-      window.localStorage.setItem("wikirace:active-session-id", id);
+      ],
     });
   }
 
@@ -446,16 +588,26 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
       articlesComboboxLiveUpdateOk: false,
       articlesComboboxKeyboardNavOk: false,
       articlesComboboxReopenScrollOk: false,
+      corruptStoredSessionRecoveryOk: false,
+      corruptRootSessionRecoveryOk: false,
       couldHaveWonCalloutOk: false,
+      couldHaveWonNoopSuppressedOk: false,
+      legacyImportNormalizedOk: false,
       llmRunDeletionStopsRequestsOk: false,
+      fallbackValidationFailClosedOk: false,
+      slowValidationFailClosedOk: false,
+      duplicateNavigateRequestWaitsForValidationOk: false,
       duplicateRemovalWorked: false,
       winHopCountOk: false,
       rulesUnlimitedOk: false,
+      runLevelUnlimitedOverridesOk: false,
       traceHeadersOk: false,
       localLayoutKey: null,
     },
     localReplayLock: {
       blocksIframeNavigation: false,
+      terminalNoopOpensLastStep: false,
+      zeroHopTerminalNoopOpensLastStep: false,
     },
     localDisableLinksView: {
       splitLinksTabsHidden: false,
@@ -464,9 +616,13 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     multiplayer: {
       createRoomRequest: null,
       inviteLinkFocusOk: false,
+      mobileHostControlsOk: false,
       sprintRulesApplied: false,
+      addAiFailurePreservesFieldsOk: false,
       addAiRequest: null,
       addAiOmittedOverrides: false,
+      terminalWsCloseClearsStateOk: false,
+      storageFailureConnectOk: false,
       modelLabelIncludesEffort: false,
       multiplayerLayoutKey: null,
       localLayoutKeyUnchanged: false,
@@ -476,8 +632,10 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
       totalsOk: false,
     },
     viewerDatasets: {
+      benchmarkDefaultLoads: false,
       storedOk: false,
       persistedAfterReload: false,
+      malformedStepPathRobustOk: false,
     },
     canonicalization: {
       variantsOk: false,
@@ -489,6 +647,129 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   let apiOrigin = null;
 
   // ---- Begin run ----
+  await clearStorageAndReload(page);
+
+  // View Runs should be useful on a fresh app load by reading published benchmark traces.
+  await ensureTopLevelTab(page, "View Runs");
+  await page.getByRole("button", { name: "Upload JSON", exact: true }).waitFor({ timeout: 15_000 });
+  await page
+    .getByText("Loading benchmark traces...", { exact: true })
+    .waitFor({ state: "hidden", timeout: 15_000 })
+    .catch(() => null);
+  await page
+    .getByText("Loading dataset...", { exact: true })
+    .waitFor({ state: "hidden", timeout: 15_000 })
+    .catch(() => null);
+
+  const defaultBenchmarkSelected = await page
+    .getByText("Benchmark:", { exact: false })
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const defaultViewerEmpty = await page
+    .getByText("No runs available.", { exact: true })
+    .isVisible()
+    .catch(() => false);
+  assert(defaultBenchmarkSelected, "View Runs should select a benchmark trace by default");
+  assert(!defaultViewerEmpty, "View Runs benchmark trace should render at least one run");
+  summary.viewerDatasets.benchmarkDefaultLoads = true;
+
+  await clearStorageAndReload(page);
+
+  // Corrupt local session storage should be dropped without breaking Play Game startup.
+  await page.evaluate(() => {
+    const validSession = {
+      id: "session_valid_recovery",
+      start_article: "Capybara",
+      destination_article: "Rodent",
+      created_at: new Date().toISOString(),
+      rules: {
+        max_hops: 20,
+        max_links: null,
+        max_tokens: null,
+        include_image_links: false,
+        disable_links_view: false,
+      },
+      runs: [],
+    };
+
+    window.localStorage.setItem(
+      "wikirace:sessions:v1",
+      JSON.stringify({
+        sessions: {
+          session_valid_recovery: validSession,
+          session_corrupt_recovery: {
+            id: "session_corrupt_recovery",
+            start_article: "Broken",
+            destination_article: "Broken",
+            created_at: new Date().toISOString(),
+            runs: "oops",
+          },
+        },
+      })
+    );
+    window.localStorage.setItem("wikirace:active-session-id", "session_corrupt_recovery");
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: "WikiRacing Arena" }).waitFor();
+  await ensureTopLevelTab(page, "Play Game");
+  await ensurePlayMode(page, "Local");
+  await page.getByText(/malformed saved local race sessions were ignored/i).waitFor({
+    timeout: 10_000,
+  });
+
+  const recoverySnapshot = await page.evaluate(async () => {
+    const sessionStore = await import("/src/lib/session-store.ts");
+    const snapshot = sessionStore.getSessionsSnapshot();
+    return {
+      hasValidSession: Boolean(snapshot.sessions?.session_valid_recovery),
+      hasCorruptSession: Boolean(snapshot.sessions?.session_corrupt_recovery),
+      activeSessionId: snapshot.active_session_id || null,
+    };
+  });
+  assert(recoverySnapshot.hasValidSession, "Valid stored session was unexpectedly dropped");
+  assert(!recoverySnapshot.hasCorruptSession, "Malformed stored session should have been dropped");
+  assert(
+    recoverySnapshot.activeSessionId !== "session_corrupt_recovery",
+    "Malformed stored active session id should not survive hydration"
+  );
+  summary.local.corruptStoredSessionRecoveryOk = true;
+
+  await clearStorageAndReload(page);
+
+  await page.evaluate(() => {
+    window.localStorage.setItem("wikirace:sessions:v1", "{not valid json");
+    window.localStorage.setItem(
+      "wikirace:active-session-id",
+      "session_missing_after_root_corruption"
+    );
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: "WikiRacing Arena" }).waitFor();
+  await ensureTopLevelTab(page, "Play Game");
+  await ensurePlayMode(page, "Local");
+  await page.getByText(/malformed saved local race sessions were ignored/i).waitFor({
+    timeout: 10_000,
+  });
+
+  const rootRecoverySnapshot = await page.evaluate(async () => {
+    const sessionStore = await import("/src/lib/session-store.ts");
+    const snapshot = sessionStore.getSessionsSnapshot();
+    return {
+      sessionCount: Object.keys(snapshot.sessions || {}).length,
+      activeSessionId: snapshot.active_session_id || null,
+    };
+  });
+  assert(
+    rootRecoverySnapshot.sessionCount === 0,
+    `Malformed root session JSON should hydrate with no sessions; got ${rootRecoverySnapshot.sessionCount}`
+  );
+  assert(
+    rootRecoverySnapshot.activeSessionId === null,
+    `Malformed root session JSON should clear active session id; got ${rootRecoverySnapshot.activeSessionId}`
+  );
+  summary.local.corruptRootSessionRecoveryOk = true;
+
   await clearStorageAndReload(page);
 
   // --- Canonicalization cache behavior (variants + failure TTL) ---
@@ -849,7 +1130,7 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     `Expected wiki iframe URL to contain /wiki/Capybara before replay; got: ${capybaraUrlBefore}`
   );
 
-  await page.getByRole("button", { name: "Replay", exact: true }).click();
+  await page.getByRole("button", { name: "Replay", exact: true }).first().click();
   await page.getByRole("button", { name: "Back to live" }).first().waitFor();
   await sleep(150);
 
@@ -968,7 +1249,10 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     return await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "Access-Control-Allow-Origin": "*" },
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      },
       body: JSON.stringify({ links: ["Not Rodent"] }),
     });
   });
@@ -1001,7 +1285,10 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     return await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "Access-Control-Allow-Origin": "*" },
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      },
       body: JSON.stringify({ links: ["Rodent"] }),
     });
   });
@@ -1023,6 +1310,285 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   await page.getByText(/Hop 0:\s*on\s*Capybara/i).waitFor({ timeout: 15_000 });
   summary.local.couldHaveWonCalloutOk = true;
 
+  await page.getByRole("button", { name: "Jump to hop" }).click();
+  const directLinkJumpValue = await page
+    .getByRole("slider", { name: "Replay hop" })
+    .inputValue();
+  assert(
+    directLinkJumpValue === "0",
+    `Jump to hop should seek to the direct-link miss step index 0; got ${directLinkJumpValue}`
+  );
+  await page.getByText(/Hop 0:\s*Capybara/i).waitFor({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Back to live" }).first().click();
+
+  await page.getByRole("button", { name: "Replay", exact: true }).click();
+  const replaySlider = page.getByRole("slider", { name: "Replay hop" });
+  const replayHopValue = await replaySlider.inputValue();
+  const replayMaxHop = await replaySlider.getAttribute("max");
+  assert(
+    replayHopValue === "1",
+    `Replay should open on terminal hop 1 without a phantom no-op step; got ${replayHopValue}`
+  );
+  assert(
+    replayMaxHop === "1",
+    `Replay slider max should be terminal hop 1 without a phantom no-op step; got ${replayMaxHop}`
+  );
+  await page.getByText(/Hops:\s*1\s*\/\s*20/i).waitFor({ timeout: 15_000 });
+  await page.getByText(/Hop 1:\s*Car/i).waitFor({ timeout: 15_000 });
+  summary.localReplayLock.terminalNoopOpensLastStep = true;
+  await page.getByRole("button", { name: "Back to live" }).first().click();
+
+  await page.unroute("**/get_article_with_links/**").catch(() => null);
+
+  await seedNoopTerminalSession(page);
+  await page.route("**/get_article_with_links/**", async (route) => {
+    const url = route.request().url();
+    if (!url.includes("/get_article_with_links/")) return route.continue();
+    if (!url.includes("/get_article_with_links/Capybara")) return route.continue();
+
+    return await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+      },
+      body: JSON.stringify({ links: ["Rodent"] }),
+    });
+  });
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ensureTopLevelTab(page, "Play Game");
+  await ensurePlayMode(page, "Local");
+  await ensureLeaderboardExpanded(page);
+  await selectLeaderboardRun(page, "You");
+  await sleep(500);
+  assert(
+    (await page.getByText("You could have won").count()) === 0,
+    "Did not expect 'You could have won' callout for fragment-only/no-op transitions"
+  );
+  summary.local.couldHaveWonNoopSuppressedOk = true;
+
+  await page.getByRole("button", { name: "Replay", exact: true }).click();
+  const zeroHopReplaySlider = page.getByRole("slider", { name: "Replay hop" });
+  assert(
+    (await zeroHopReplaySlider.inputValue()) === "0",
+    "0-hop terminal no-op run should keep replay slider on hop 0"
+  );
+  assert(
+    (await zeroHopReplaySlider.getAttribute("max")) === "0",
+    "0-hop terminal no-op run should cap replay slider max at hop 0"
+  );
+  const zeroHopTerminalStep = page
+    .getByRole("button", { name: /Capybara#Overview\s*→\s*Capybara#Overview/i })
+    .first();
+  await zeroHopTerminalStep.waitFor({ timeout: 15_000 });
+  assert(
+    (await zeroHopTerminalStep.getAttribute("aria-current")) === "step",
+    "0-hop terminal no-op replay should select the terminal step, not the start step"
+  );
+  summary.localReplayLock.zeroHopTerminalNoopOpensLastStep = true;
+  await page.getByRole("button", { name: "Back to live" }).first().click();
+
+  await page.unroute("**/get_article_with_links/**").catch(() => null);
+
+  const malformedViewerRun = await page.evaluate(async () => {
+    const mod = await import("/src/lib/hops.ts");
+    const run = {
+      start_article: "Capybara",
+      steps: [
+        {},
+        null,
+        "Capybara#Overview",
+        "Rodent",
+        42,
+        { type: "note", article: "Wrong turn" },
+      ],
+    };
+    const objectStepRun = {
+      start_article: "Capybara",
+      steps: [
+        { type: "start", article: "Capybara" },
+        { type: "note", article: "Wrong turn" },
+        { type: "move", article: "Rodent" },
+        { type: "win", article: "Capybara#Overview" },
+      ],
+    };
+    return {
+      path: mod.viewerRunPathArticles(run),
+      hops: mod.viewerRunHops(run),
+      objectStepPath: mod.viewerRunPathArticles(objectStepRun),
+      objectStepHops: mod.viewerRunHops(objectStepRun),
+    };
+  });
+  assert(
+    Array.isArray(malformedViewerRun.path) &&
+      malformedViewerRun.path.join(" > ") === "Capybara > Rodent",
+    `Malformed viewer step entries should be ignored safely; got path=${JSON.stringify(
+      malformedViewerRun.path
+    )}`
+  );
+  assert(
+    malformedViewerRun.hops === 1,
+    `Malformed viewer step entries should preserve valid hop counts; got hops=${malformedViewerRun.hops}`
+  );
+  assert(
+    malformedViewerRun.objectStepPath.join(" > ") === "Capybara > Rodent > Capybara",
+    `Object viewer note steps should not affect path; got path=${JSON.stringify(
+      malformedViewerRun.objectStepPath
+    )}`
+  );
+  assert(
+    malformedViewerRun.objectStepHops === 2,
+    `Object viewer note steps should not affect hop counts; got hops=${malformedViewerRun.objectStepHops}`
+  );
+  summary.viewerDatasets.malformedStepPathRobustOk = true;
+
+  // --- Local: client fallback validation must fail closed on backend 500s ---
+  await ensureTopLevelTab(page, "Play Game");
+  await page.getByRole("button", { name: "New race" }).click();
+  await openLocalSetup(page);
+
+  await clickQuickPreset(page, "hotseat");
+  await setStartAndTargetInLocalSetup(page, { start: "Capybara", target: "Rodent" });
+
+  let holdNextValidation = true;
+  let releaseHeldValidation = null;
+  let validationStartedResolve = null;
+  let validationStartedPromise = Promise.resolve();
+  function prepareHeldValidation() {
+    holdNextValidation = true;
+    releaseHeldValidation = null;
+    validationStartedPromise = new Promise((resolve) => {
+      validationStartedResolve = resolve;
+    });
+  }
+  prepareHeldValidation();
+  await page.route("**/local/validate_move", async (route) => {
+    if (holdNextValidation) {
+      holdNextValidation = false;
+      await new Promise((resolve) => {
+        releaseHeldValidation = resolve;
+        validationStartedResolve?.();
+      });
+    }
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "synthetic fallback failure" }),
+    });
+  });
+
+  await page.route("**/get_article_with_links/**", async (route) => {
+    const url = route.request().url();
+    if (!url.includes("/get_article_with_links/Capybara")) return route.continue();
+
+    return await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ title: "Capybara", links: ["Rodent"] }),
+    });
+  });
+
+  await startRace(page);
+  await ensureLeaderboardExpanded(page);
+  await selectLeaderboardRun(page, "You");
+  await page.getByRole("tab", { name: "Article" }).click();
+  await sleep(400);
+
+  const duplicateNavigateProbePromise = page
+    .frameLocator("iframe")
+    .first()
+    .locator("body")
+    .evaluate(async () => {
+      const requestIds = [
+        "play_regression_duplicate_nav_1",
+        "play_regression_duplicate_nav_2",
+      ];
+      const received = [];
+
+      return await new Promise((resolve) => {
+        const timeout = window.setTimeout(() => {
+          window.removeEventListener("message", handleMessage);
+          resolve({ duplicateRespondedBeforeValidation: false, received });
+        }, 200);
+
+        function handleMessage(event) {
+          const data = event && event.data;
+          if (!data || data.type !== "wikirace:navigate_response") return;
+          if (!requestIds.includes(data.requestId)) return;
+
+          received.push({ requestId: data.requestId, allow: data.allow });
+          if (data.requestId === requestIds[1]) {
+            window.clearTimeout(timeout);
+            window.removeEventListener("message", handleMessage);
+            resolve({ duplicateRespondedBeforeValidation: true, received });
+          }
+        }
+
+        window.addEventListener("message", handleMessage);
+        window.parent.postMessage(
+          { type: "wikirace:navigate_request", requestId: requestIds[0], title: "Rodent" },
+          "*"
+        );
+        window.parent.postMessage(
+          { type: "wikirace:navigate_request", requestId: requestIds[1], title: "Rodent" },
+          "*"
+        );
+      });
+    });
+  await validationStartedPromise;
+  const duplicateNavigateProbe = await duplicateNavigateProbePromise;
+  assert(
+    !duplicateNavigateProbe.duplicateRespondedBeforeValidation,
+    `Duplicate navigate request should wait for server validation; got ${JSON.stringify(
+      duplicateNavigateProbe.received
+    )}`
+  );
+  releaseHeldValidation?.();
+  await sleep(1100);
+  summary.local.duplicateNavigateRequestWaitsForValidationOk = true;
+
+  prepareHeldValidation();
+  await clickWikiLink(page, "Rodent");
+  await validationStartedPromise;
+  await sleep(850);
+  const slowValidationSnapshot = await getActiveHumanRunSnapshot(page);
+  assert(slowValidationSnapshot, "Expected an active human run snapshot during slow validation");
+  assert(
+    slowValidationSnapshot.steps_length === 1,
+    `Slow validation should not record a move before the server responds; got steps_length=${slowValidationSnapshot.steps_length}`
+  );
+  const slowValidationPath = await page
+    .frameLocator("iframe")
+    .first()
+    .locator("body")
+    .evaluate(() => window.location.pathname);
+  assert(
+    decodeURIComponent(slowValidationPath).endsWith("/wiki/Capybara"),
+    `Slow validation should fail closed in the iframe before the server responds; got path=${slowValidationPath}`
+  );
+  releaseHeldValidation?.();
+  await sleep(1100);
+  summary.local.slowValidationFailClosedOk = true;
+
+  await clickWikiLink(page, "Rodent");
+  await sleep(500);
+
+  const fallbackSnapshot = await getActiveHumanRunSnapshot(page);
+  assert(fallbackSnapshot, "Expected an active human run snapshot after fallback validation test");
+  assert(
+    fallbackSnapshot.steps_length === 1,
+    `Validator 5xx should fail closed even for linked moves; got steps_length=${fallbackSnapshot.steps_length}`
+  );
+  assert(
+    fallbackSnapshot.status === "running",
+    `Fallback validation should leave the run active after rejecting a move; got status=${fallbackSnapshot.status}`
+  );
+  summary.local.fallbackValidationFailClosedOk = true;
+
+  await page.unroute("**/local/validate_move").catch(() => null);
   await page.unroute("**/get_article_with_links/**").catch(() => null);
 
   // --- Local: deleting a running LLM run stops further /llm/local_run/step calls (no "zombie" runners) ---
@@ -1066,19 +1632,7 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   const llmRunId = stepReq.headers()["x-wikirace-run-id"] || null;
   assert(llmRunId, "Expected x-wikirace-run-id header on /llm/local_run/step");
 
-  const llmRunLabel = await page.evaluate((runId) => {
-    const active = window.localStorage.getItem("wikirace:active-session-id");
-    const raw = window.localStorage.getItem("wikirace:sessions:v1");
-    if (!active || !raw) return null;
-    try {
-      const parsed = JSON.parse(raw);
-      const session = parsed?.sessions?.[active];
-      const run = session?.runs?.find((r) => r && r.id === runId);
-      return run?.model || run?.player_name || null;
-    } catch {
-      return null;
-    }
-  }, llmRunId);
+  const llmRunLabel = await waitForStoredRunLabel(page, llmRunId);
   assert(llmRunLabel, "Failed to resolve LLM run label from localStorage");
 
   // Run display names may omit the provider prefix (e.g. "openai-responses:").
@@ -1094,18 +1648,7 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   await deleteDialog.getByRole("button", { name: "Delete", exact: true }).click();
   await deleteDialog.waitFor({ state: "hidden" });
 
-  const deletedOk = await page.evaluate((runId) => {
-    const active = window.localStorage.getItem("wikirace:active-session-id");
-    const raw = window.localStorage.getItem("wikirace:sessions:v1");
-    if (!active || !raw) return false;
-    try {
-      const parsed = JSON.parse(raw);
-      const session = parsed?.sessions?.[active];
-      return !session?.runs?.some((r) => r && r.id === runId);
-    } catch {
-      return false;
-    }
-  }, llmRunId);
+  const deletedOk = await waitForStoredRunDeletion(page, llmRunId);
   assert(deletedOk, "Deleted LLM run should be removed from localStorage session");
 
   releaseStepRoute?.();
@@ -1124,6 +1667,55 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     .catch(() => false);
   assert(!extraStepReq, "Deleted LLM run should not continue sending /llm/local_run/step requests");
   summary.local.llmRunDeletionStopsRequestsOk = true;
+
+  // --- Local: run-level explicit unlimited budgets override finite session rules ---
+  await seedRunLevelUnlimitedSession(page);
+  const runLevelStepReqPromise = page.waitForRequest(
+    (req) => reqPath(req) === "/llm/local_run/step" && req.method() === "POST",
+    { timeout: TIMEOUT_MS }
+  );
+
+  await page.route("**/llm/local_run/step", async (route) => {
+    if (reqPath(route.request()) !== "/llm/local_run/step") return route.continue();
+    return await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({
+        step: {
+          type: "lose",
+          article: "Capybara",
+          at: new Date().toISOString(),
+          metadata: { reason: "run_level_unlimited_regression" },
+        },
+      }),
+    });
+  });
+
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ensureTopLevelTab(page, "Play Game");
+    await ensurePlayMode(page, "Local");
+    const runLevelStepReq = await runLevelStepReqPromise;
+    const runLevelStepBody = tryParseJson(runLevelStepReq.postData()) || {};
+    assert(
+      Object.prototype.hasOwnProperty.call(runLevelStepBody, "max_links") &&
+        runLevelStepBody.max_links === null,
+      `Run-level max_links=null should stay unlimited instead of inheriting finite session rules; got ${JSON.stringify(
+        runLevelStepBody.max_links
+      )}`
+    );
+    assert(
+      Object.prototype.hasOwnProperty.call(runLevelStepBody, "max_tokens") &&
+        runLevelStepBody.max_tokens === null,
+      `Run-level max_tokens=null should stay unlimited instead of inheriting finite session rules; got ${JSON.stringify(
+        runLevelStepBody.max_tokens
+      )}`
+    );
+    summary.local.runLevelUnlimitedOverridesOk = true;
+  } finally {
+    await page.unroute("**/llm/local_run/step").catch(() => null);
+  }
 
   const localLayoutKeyBeforeMultiplayer = await page.evaluate(() =>
     window.localStorage.getItem("wikirace:arena-layout:v1")
@@ -1152,6 +1744,126 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     "Sprint preset should set room max_tokens to 1500"
   );
   summary.multiplayer.sprintRulesApplied = true;
+
+  const browser = page.context().browser();
+  assert(browser, "Playwright browser unavailable from page context");
+
+  const storageFailureContext = await browser.newContext();
+  const storageFailureWsUrls = [];
+  await storageFailureContext.addInitScript(() => {
+    const originalSetItem = Storage.prototype.setItem;
+    const sessionStorageRef = window.sessionStorage;
+    Storage.prototype.setItem = function (key, value) {
+      const storageKey = String(key);
+      if (
+        this === sessionStorageRef &&
+        storageKey.startsWith("wikirace:multiplayer:")
+      ) {
+        throw new Error("synthetic sessionStorage setItem failure");
+      }
+      return originalSetItem.call(this, key, value);
+    };
+  });
+  const storageFailurePage = await storageFailureContext.newPage();
+  storageFailurePage.setDefaultTimeout(TIMEOUT_MS);
+  storageFailurePage.on("websocket", (socket) => {
+    const url = socket.url();
+    if (url.includes("/rooms/")) {
+      storageFailureWsUrls.push(url);
+    }
+  });
+
+  try {
+    await clearStorageAndReload(storageFailurePage);
+    const storageFailureState = await storageFailurePage.evaluate(async () => {
+      const multiplayerStore = await import("/src/lib/multiplayer-store.ts");
+      const response = await multiplayerStore.createRoom({
+        owner_name: "Storage Host",
+        start_article: "Cat",
+        destination_article: "Dog",
+        rules: {
+          max_hops: 12,
+          max_links: 200,
+          max_tokens: 1500,
+          include_image_links: false,
+          disable_links_view: false,
+        },
+      });
+
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const state = multiplayerStore.getMultiplayerState();
+        if (state.ws_status === "connected") break;
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+      }
+
+      const state = multiplayerStore.getMultiplayerState();
+      return {
+        created: Boolean(response?.room_id),
+        roomId: state.room?.id || null,
+        wsStatus: state.ws_status,
+        error: state.error || null,
+      };
+    });
+    assert(
+      storageFailureState.created &&
+        storageFailureState.roomId &&
+        storageFailureState.wsStatus === "connected" &&
+        storageFailureWsUrls.some((url) => url.includes("/rooms/")),
+      `Create room should still open the room websocket when multiplayer sessionStorage writes fail; got ${JSON.stringify(
+        storageFailureState
+      )} and ${storageFailureWsUrls.length} websocket(s)`
+    );
+    summary.multiplayer.storageFailureConnectOk = true;
+  } finally {
+    await storageFailureContext.close();
+  }
+
+  const mobileHostContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
+  });
+  try {
+    const mobileHostPage = await mobileHostContext.newPage();
+    mobileHostPage.setDefaultTimeout(TIMEOUT_MS);
+    await mobileHostPage.goto(BASE_URL, { waitUntil: "domcontentloaded" });
+    await mobileHostPage.getByRole("heading", { name: "WikiRacing Arena" }).waitFor();
+    await openMultiplayerSetup(mobileHostPage);
+    await mobileHostPage.getByRole("textbox", { name: "Host", exact: true }).fill("Mobile Host");
+    const mobileCreateRoom = mobileHostPage.getByRole("button", {
+      name: "Create room",
+      exact: true,
+    });
+    await mobileCreateRoom.waitFor();
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (await mobileCreateRoom.isEnabled().catch(() => false)) break;
+      await mobileHostPage.waitForTimeout(150);
+    }
+    assert(
+      await mobileCreateRoom.isEnabled().catch(() => false),
+      "Mobile host Create room button never became enabled"
+    );
+    await mobileCreateRoom.click();
+    await mobileHostPage.getByText("Multiplayer lobby").waitFor({ timeout: 15_000 });
+
+    const mobileStartRace = mobileHostPage.getByRole("button", {
+      name: "Start race",
+      exact: true,
+    });
+    await mobileStartRace.waitFor({ state: "visible", timeout: 10_000 });
+    assert(
+      await mobileStartRace.isEnabled().catch(() => false),
+      "Mobile host should be able to start the race from the lobby"
+    );
+    await mobileHostPage.getByText("Add AI", { exact: true }).first().waitFor({
+      state: "visible",
+      timeout: 10_000,
+    });
+    summary.multiplayer.mobileHostControlsOk = true;
+  } finally {
+    await mobileHostContext.close();
+  }
 
   const createRoomReqPromise = page.waitForRequest(
     (req) => reqPath(req) === "/rooms" && req.method() === "POST",
@@ -1183,10 +1895,69 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
     return window.localStorage.getItem("wikirace:multiplayer:player-name") || "Host";
   });
 
-  // Second participant context: verifies invite deep-link + focus behavior.
-  const browser = page.context().browser();
-  assert(browser, "Playwright browser unavailable from page context");
+  // A failed inline Add AI submission should preserve custom field values for retry.
+  let rejectNextInlineAddAi = true;
+  await page.route(`**/rooms/${roomId}/add_llm`, async (route) => {
+    if (rejectNextInlineAddAi) {
+      rejectNextInlineAddAi = false;
+      return await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        headers: { "Access-Control-Allow-Origin": "*" },
+        body: JSON.stringify({ detail: "synthetic add_llm failure" }),
+      });
+    }
+    return await route.continue();
+  });
 
+  const inlineModelInput = page.getByLabel("Model");
+  const inlineNameInput = page.getByPlaceholder("e.g. Bot #1");
+  const inlineReasoningInput = page.getByPlaceholder("low / medium / high / xhigh");
+  const inlineApiBaseInput = page.getByPlaceholder("http://localhost:8001/v1");
+  const inlineApiModeInput = page.getByPlaceholder("chat / responses");
+
+  await inlineModelInput.fill("openai-responses:gpt-5.2");
+  await inlineNameInput.fill("Retry Bot");
+  await inlineReasoningInput.fill("high");
+  await inlineApiBaseInput.fill("http://localhost:8001/v1");
+  await inlineApiModeInput.fill("responses");
+
+  const rejectedInlineAddAiResponse = page.waitForResponse(
+    (resp) =>
+      reqPath(resp.request()).endsWith(`/rooms/${roomId}/add_llm`) &&
+      resp.request().method() === "POST" &&
+      resp.status() === 500,
+    { timeout: TIMEOUT_MS }
+  );
+  await page.getByRole("button", { name: "Add AI", exact: true }).click();
+  await rejectedInlineAddAiResponse;
+  await page.getByText("synthetic add_llm failure").waitFor({ timeout: 10_000 });
+
+  assert(
+    (await inlineModelInput.inputValue()) === "openai-responses:gpt-5.2",
+    "Inline Add AI should preserve model input after a failed submit"
+  );
+  assert(
+    (await inlineNameInput.inputValue()) === "Retry Bot",
+    "Inline Add AI should preserve display name after a failed submit"
+  );
+  assert(
+    (await inlineReasoningInput.inputValue()) === "high",
+    "Inline Add AI should preserve reasoning effort after a failed submit"
+  );
+  assert(
+    (await inlineApiBaseInput.inputValue()) === "http://localhost:8001/v1",
+    "Inline Add AI should preserve API base override after a failed submit"
+  );
+  assert(
+    (await inlineApiModeInput.inputValue()) === "responses",
+    "Inline Add AI should preserve API mode after a failed submit"
+  );
+  summary.multiplayer.addAiFailurePreservesFieldsOk = true;
+
+  await page.unroute(`**/rooms/${roomId}/add_llm`).catch(() => null);
+
+  // Second participant context: verifies invite deep-link + focus behavior.
   const mobileContext = await browser.newContext({
     viewport: { width: 390, height: 844 },
     deviceScaleFactor: 2,
@@ -1326,6 +2097,58 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
   await page.getByText(/\(high\)/i).first().waitFor({ timeout: 15_000 });
   summary.multiplayer.modelLabelIncludesEffort = true;
 
+  // Invalid stored websocket credentials should clear local state and stop retrying.
+  const staleContext = await browser.newContext();
+  const staleWsUrls = [];
+  await staleContext.addInitScript(
+    ({ staleRoomId }) => {
+      window.localStorage.setItem("wikirace:last-tab:v1", "play");
+      window.localStorage.setItem("wikirace:play-mode:v1", "multiplayer");
+      window.sessionStorage.setItem("wikirace:multiplayer:room-id", staleRoomId);
+      window.sessionStorage.setItem("wikirace:multiplayer:player-id", "player_STALE");
+      window.sessionStorage.setItem("wikirace:multiplayer:player-token", "token_STALE");
+    },
+    { staleRoomId: roomId }
+  );
+  const stalePage = await staleContext.newPage();
+  stalePage.setDefaultTimeout(TIMEOUT_MS);
+  stalePage.on("websocket", (socket) => {
+    const url = socket.url();
+    if (url.includes("/rooms/")) {
+      staleWsUrls.push(url);
+    }
+  });
+
+  try {
+    await stalePage.goto(inviteLink, { waitUntil: "domcontentloaded" });
+    await stalePage.getByRole("heading", { name: "WikiRacing Arena" }).waitFor();
+    await stalePage.waitForTimeout(2200);
+
+    const staleStorage = await stalePage.evaluate(() => {
+      return {
+        roomId: window.sessionStorage.getItem("wikirace:multiplayer:room-id"),
+        playerId: window.sessionStorage.getItem("wikirace:multiplayer:player-id"),
+        playerToken: window.sessionStorage.getItem("wikirace:multiplayer:player-token"),
+      };
+    });
+
+    assert(
+      staleStorage.roomId === null &&
+        staleStorage.playerId === null &&
+        staleStorage.playerToken === null,
+      `Invalid websocket credentials should clear persisted multiplayer identity; got ${JSON.stringify(
+        staleStorage
+      )} with ${staleWsUrls.length} websocket connection(s)`
+    );
+    assert(
+      staleWsUrls.length <= 1,
+      `Invalid room credentials should not reconnect forever; saw ${staleWsUrls.length} websocket connections`
+    );
+    summary.multiplayer.terminalWsCloseClearsStateOk = true;
+  } finally {
+    await staleContext.close();
+  }
+
   await mobileContext.close();
 
   // --- Token accounting (seeded) ---
@@ -1354,6 +2177,127 @@ export async function runPlayGameRegression(page, { baseUrl, timeoutMs } = {}) {
 
   await page.getByText("No runs available.").waitFor({ state: "hidden", timeout: 10_000 });
   summary.viewerDatasets.persistedAfterReload = true;
+
+  await page.evaluate(() => {
+    const raw = window.localStorage.getItem("wikirace:viewer-datasets:v1");
+    const parsed = (() => {
+      try {
+        return JSON.parse(raw || "{}");
+      } catch {
+        return {};
+      }
+    })();
+    const datasets = Array.isArray(parsed?.datasets) ? parsed.datasets : [];
+    window.localStorage.setItem(
+      "wikirace:viewer-datasets:v1",
+      JSON.stringify({
+        datasets: [
+          {
+            id: "viewer_dataset_malformed_seed",
+            name: "Malformed persisted seed",
+            created_at: new Date().toISOString(),
+            data: {
+              runs: [
+                {
+                  start_article: "Capybara",
+                  destination_article: "Rodent",
+                  result: "win",
+                  steps: [{}, null, "Capybara#Overview", { article: "Rodent" }, 42],
+                },
+                null,
+                { steps: [null] },
+              ],
+            },
+          },
+          ...datasets,
+        ],
+        selected_dataset_id: parsed?.selected_dataset_id || null,
+      })
+    );
+  });
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ensureTopLevelTab(page, "View Runs");
+  await page.getByRole("button", { name: "Upload JSON", exact: true }).waitFor({ timeout: 15_000 });
+  await openSelectContainingOption(page, "Qwen3-14B");
+  await page
+    .getByRole("option", {
+      name: "Saved: Malformed persisted seed",
+      exact: true,
+    })
+    .click();
+  await page.getByText("No runs available.").waitFor({ state: "hidden", timeout: 10_000 });
+
+  // Legacy session imports should normalize missing rules and malformed budgets.
+  const legacyImportCheck = await page.evaluate(async () => {
+    const runMetrics = await import("/src/lib/run-metrics.ts");
+    const sessionStore = await import("/src/lib/session-store.ts");
+    const previousActiveSessionId = sessionStore.getSessionsSnapshot().active_session_id || null;
+    const startedAt = new Date().toISOString();
+    const { sessionId } = sessionStore.importSessionExport(
+      {
+        schema_version: 1,
+        exported_at: new Date().toISOString(),
+        session: {
+          id: `session_legacy_${Date.now()}`,
+          start_article: "Capybara",
+          destination_article: "Rodent",
+          created_at: new Date().toISOString(),
+          runs: [
+            {
+              id: "run_legacy",
+              kind: "human",
+              started_at: startedAt,
+              finished_at: startedAt,
+              status: "finished",
+              result: "win",
+              max_steps: "oops",
+              max_links: 0,
+              max_tokens: "oops",
+              steps: [
+                { type: "move", article: "Capybara", at: startedAt },
+                { type: "win", article: "Rodent", at: startedAt },
+              ],
+            },
+          ],
+        },
+      },
+      { replaceExisting: true }
+    );
+
+    const importedSession = sessionStore.getSession(sessionId);
+    const importedRun = importedSession?.runs?.[0] || null;
+    const directNoStartHopCounts = runMetrics.computeHopCountsByStepIndex(
+      [
+        { type: "move", article: "Capybara" },
+        { type: "win", article: "Rodent" },
+      ],
+      "Capybara"
+    );
+    const normalized =
+      Boolean(importedSession) &&
+      importedSession.rules?.max_hops === 20 &&
+      importedSession.rules?.max_links === null &&
+      importedSession.rules?.max_tokens === null &&
+      importedSession.rules?.include_image_links === false &&
+      importedSession.rules?.disable_links_view === false &&
+      Boolean(importedRun) &&
+      typeof importedRun.max_steps === "undefined" &&
+      typeof importedRun.max_links === "undefined" &&
+      typeof importedRun.max_tokens === "undefined" &&
+      importedRun.steps?.[0]?.type === "start" &&
+      importedRun.steps?.[0]?.article === "Capybara" &&
+      runMetrics.computeHopsFromSteps(importedRun.steps, importedSession.start_article) === 1 &&
+      JSON.stringify(directNoStartHopCounts) === JSON.stringify([0, 1]);
+
+    sessionStore.setActiveSessionId(previousActiveSessionId);
+    return normalized;
+  });
+  assert(
+    legacyImportCheck,
+    "Legacy session import should normalize missing rules and malformed run budgets"
+  );
+  summary.local.legacyImportNormalizedOk = true;
 
   return summary;
 }

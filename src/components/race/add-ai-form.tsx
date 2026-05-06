@@ -4,8 +4,15 @@ import { DialogClose, DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import ModelPicker from "@/components/model-picker";
-import { parseOptionalPositiveInt } from "@/lib/number-utils";
+import { parseOptionalPositiveInt, parsePositiveInt } from "@/lib/number-utils";
 import {
   allPresetModelDrafts,
   gpt52ReasoningSweepDrafts,
@@ -27,6 +34,8 @@ type AddAiDefaults = {
   max_tokens: number | null;
 };
 
+type BudgetMode = "inherit" | "unlimited" | "custom";
+
 function keyForDraft(draft: {
   model: string;
   api_base?: string;
@@ -35,6 +44,16 @@ function keyForDraft(draft: {
   anthropic_thinking_budget_tokens?: number;
 }) {
   return `llm:${draft.model}:${draft.api_base || ""}:${draft.openai_api_mode || ""}:${draft.openai_reasoning_effort || ""}:${draft.anthropic_thinking_budget_tokens || ""}`;
+}
+
+function budgetLabel(defaultValue: number | null) {
+  return defaultValue === null ? "Default: unlimited" : `Default: ${defaultValue}`;
+}
+
+function resolveBudgetValue(mode: BudgetMode, value: string): number | null | undefined {
+  if (mode === "inherit") return undefined;
+  if (mode === "unlimited") return null;
+  return parsePositiveInt(value) ?? undefined;
 }
 
 export default function AddAiForm({
@@ -66,7 +85,9 @@ export default function AddAiForm({
   const [aiOpenaiApiMode, setAiOpenaiApiMode] = useState("");
   const [aiOpenaiReasoningEffort, setAiOpenaiReasoningEffort] = useState("");
   const [aiMaxSteps, setAiMaxSteps] = useState("");
+  const [aiMaxLinksMode, setAiMaxLinksMode] = useState<BudgetMode>("inherit");
   const [aiMaxLinks, setAiMaxLinks] = useState("");
+  const [aiMaxTokensMode, setAiMaxTokensMode] = useState<BudgetMode>("inherit");
   const [aiMaxTokens, setAiMaxTokens] = useState("");
 
   useEffect(() => {
@@ -98,9 +119,16 @@ export default function AddAiForm({
     setAiOpenaiApiMode("");
     setAiOpenaiReasoningEffort("");
     setAiMaxSteps("");
+    setAiMaxLinksMode("inherit");
     setAiMaxLinks("");
+    setAiMaxTokensMode("inherit");
     setAiMaxTokens("");
   };
+
+  const customLinksInvalid =
+    aiMaxLinksMode === "custom" && parsePositiveInt(aiMaxLinks) === null;
+  const customTokensInvalid =
+    aiMaxTokensMode === "custom" && parsePositiveInt(aiMaxTokens) === null;
 
   const addPreset = async (drafts: AddAiArgs[]) => {
     setAddAiLoading(true);
@@ -154,6 +182,7 @@ export default function AddAiForm({
 
   const submitAddAi = () => {
     if (aiModel.trim().length === 0) return;
+    if (customLinksInvalid || customTokensInvalid) return;
 
     setAddAiLoading(true);
     void (async () => {
@@ -165,18 +194,16 @@ export default function AddAiForm({
           openai_api_mode: aiOpenaiApiMode.trim() || undefined,
           openai_reasoning_effort: aiOpenaiReasoningEffort.trim() || undefined,
           max_steps: parseOptionalPositiveInt(aiMaxSteps, "undefined"),
-          max_links: parseOptionalPositiveInt(aiMaxLinks, "undefined"),
-          max_tokens: parseOptionalPositiveInt(aiMaxTokens, "undefined"),
+          max_links: resolveBudgetValue(aiMaxLinksMode, aiMaxLinks),
+          max_tokens: resolveBudgetValue(aiMaxTokensMode, aiMaxTokens),
         });
 
-        if (mode === "dialog") {
-          if (!result) return;
-          resetOptionalFields();
-          onClose?.();
-          return;
-        }
+        if (!result) return;
 
         resetOptionalFields();
+        if (mode === "dialog") {
+          onClose?.();
+        }
       } finally {
         setAddAiLoading(false);
       }
@@ -350,38 +377,87 @@ export default function AddAiForm({
           </div>
           <div>
             <Label className="text-xs">Max links</Label>
-            <Input
-              value={aiMaxLinks}
-              onChange={(e) => setAiMaxLinks(e.target.value)}
-              inputMode="numeric"
-              placeholder={
-                defaults.max_links === null
-                  ? "Default (Unlimited)"
-                  : `Default (${defaults.max_links})`
-              }
-              className="mt-1"
-            />
+            <Select
+              value={aiMaxLinksMode}
+              onValueChange={(value) => setAiMaxLinksMode(value as BudgetMode)}
+            >
+              <SelectTrigger className="mt-1 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="inherit">{budgetLabel(defaults.max_links)}</SelectItem>
+                <SelectItem value="unlimited">Unlimited</SelectItem>
+                <SelectItem value="custom">Custom</SelectItem>
+              </SelectContent>
+            </Select>
+            {aiMaxLinksMode === "custom" ? (
+              <>
+                <Input
+                  value={aiMaxLinks}
+                  onChange={(e) => setAiMaxLinks(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="Positive integer"
+                  className="mt-2"
+                />
+                {customLinksInvalid ? (
+                  <div className="mt-1 text-[11px] text-destructive">
+                    Enter a positive integer.
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="mt-2 text-[11px] text-muted-foreground">
+                {aiMaxLinksMode === "inherit" ? budgetLabel(defaults.max_links) : "Unlimited"}
+              </div>
+            )}
           </div>
           <div>
             <Label className="text-xs">Max tokens</Label>
-            <Input
-              value={aiMaxTokens}
-              onChange={(e) => setAiMaxTokens(e.target.value)}
-              inputMode="numeric"
-              placeholder={
-                defaults.max_tokens === null
-                  ? "Default (Unlimited)"
-                  : `Default (${defaults.max_tokens})`
-              }
-              className="mt-1"
-            />
+            <Select
+              value={aiMaxTokensMode}
+              onValueChange={(value) => setAiMaxTokensMode(value as BudgetMode)}
+            >
+              <SelectTrigger className="mt-1 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="inherit">{budgetLabel(defaults.max_tokens)}</SelectItem>
+                <SelectItem value="unlimited">Unlimited</SelectItem>
+                <SelectItem value="custom">Custom</SelectItem>
+              </SelectContent>
+            </Select>
+            {aiMaxTokensMode === "custom" ? (
+              <>
+                <Input
+                  value={aiMaxTokens}
+                  onChange={(e) => setAiMaxTokens(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="Positive integer"
+                  className="mt-2"
+                />
+                {customTokensInvalid ? (
+                  <div className="mt-1 text-[11px] text-destructive">
+                    Enter a positive integer.
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="mt-2 text-[11px] text-muted-foreground">
+                {aiMaxTokensMode === "inherit" ? budgetLabel(defaults.max_tokens) : "Unlimited"}
+              </div>
+            )}
           </div>
         </div>
 
         {mode === "inline" && (
           <Button
             size="sm"
-            disabled={addAiLoading || aiModel.trim().length === 0}
+            disabled={
+              addAiLoading ||
+              aiModel.trim().length === 0 ||
+              customLinksInvalid ||
+              customTokensInvalid
+            }
             onClick={submitAddAi}
           >
             {addAiLoading ? "Adding…" : "Add AI"}
@@ -394,7 +470,15 @@ export default function AddAiForm({
           <DialogClose asChild>
             <Button variant="outline">Cancel</Button>
           </DialogClose>
-          <Button disabled={addAiLoading || aiModel.trim().length === 0} onClick={submitAddAi}>
+          <Button
+            disabled={
+              addAiLoading ||
+              aiModel.trim().length === 0 ||
+              customLinksInvalid ||
+              customTokensInvalid
+            }
+            onClick={submitAddAi}
+          >
             {addAiLoading ? "Adding…" : "Add AI"}
           </Button>
         </DialogFooter>

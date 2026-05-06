@@ -27,6 +27,8 @@ function getRunLimits(run: RunV1, session: SessionV1) {
     maxLinks:
       typeof run.max_links === "number"
         ? run.max_links
+        : run.max_links === null
+        ? null
         : sessionRules?.max_links === null
         ? null
         : typeof sessionRules?.max_links === "number"
@@ -35,6 +37,8 @@ function getRunLimits(run: RunV1, session: SessionV1) {
     maxTokens:
       typeof run.max_tokens === "number"
         ? run.max_tokens
+        : run.max_tokens === null
+        ? null
         : sessionRules?.max_tokens === null
         ? null
         : typeof sessionRules?.max_tokens === "number"
@@ -44,7 +48,7 @@ function getRunLimits(run: RunV1, session: SessionV1) {
 }
 
 export default function LlmRunManager() {
-  const { sessions } = useSessionsStore();
+  const { sessions, active_session_id } = useSessionsStore();
   const controllersRef = useRef<Map<string, AbortController>>(new Map());
 
   // In React StrictMode (dev), effects are mounted/unmounted twice. Abort any in-flight
@@ -61,20 +65,25 @@ export default function LlmRunManager() {
 
   useEffect(() => {
     const controllers = controllersRef.current;
-    const activeRunIds = new Set<string>();
+    const activeRunKeys = new Set<string>();
 
-    for (const [sessionId, session] of Object.entries(sessions)) {
+    const activeSessionEntries = active_session_id && sessions[active_session_id]
+      ? ([[active_session_id, sessions[active_session_id]]] as const)
+      : [];
+
+    for (const [sessionId, session] of activeSessionEntries) {
       for (const run of session.runs) {
         if (run.kind !== "llm") continue;
         if (run.status !== "running") continue;
         if (!run.model || run.model.trim().length === 0) continue;
 
-        const controllerAlreadyRunning = controllers.has(run.id);
-        activeRunIds.add(run.id);
+        const runKey = `${sessionId}:${run.id}`;
+        const controllerAlreadyRunning = controllers.has(runKey);
+        activeRunKeys.add(runKey);
         if (controllerAlreadyRunning) continue;
 
         const controller = new AbortController();
-        controllers.set(run.id, controller);
+        controllers.set(runKey, controller);
 
         const limits = getRunLimits(run, session);
         let lastArticle = run.steps[run.steps.length - 1]?.article || session.start_article;
@@ -154,18 +163,20 @@ export default function LlmRunManager() {
             if (traceContext) {
               await endLocalRunTrace({ sessionId: traceContext.sessionId, runId: traceContext.runId });
             }
-            controllersRef.current.delete(run.id);
+            if (controllersRef.current.get(runKey) === controller) {
+              controllersRef.current.delete(runKey);
+            }
           }
         })();
       }
     }
 
-    for (const [runId, controller] of Array.from(controllers.entries())) {
-      if (activeRunIds.has(runId)) continue;
+    for (const [runKey, controller] of Array.from(controllers.entries())) {
+      if (activeRunKeys.has(runKey)) continue;
       controller.abort();
-      controllers.delete(runId);
+      controllers.delete(runKey);
     }
-  }, [sessions]);
+  }, [active_session_id, sessions]);
 
   return null;
 }

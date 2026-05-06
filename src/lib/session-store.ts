@@ -10,10 +10,10 @@ import type {
   SessionV1,
   StepV1,
 } from '@/lib/session-types'
-import { finalizeRun, makeId, nowIso, sessionDisplayName } from '@/lib/session-utils'
+import { computeHops, finalizeRun, makeId, nowIso, sessionDisplayName } from '@/lib/session-utils'
 import {
   safeLocalStorageGetItem,
-  safeLocalStorageGetJson,
+  safeLocalStorageGetJsonWithStatus,
   safeLocalStorageRemoveItem,
   safeLocalStorageSetItem,
   safeLocalStorageSetJson,
@@ -22,10 +22,37 @@ import {
 type StoreState = {
   sessions: Record<string, SessionV1>
   active_session_id: string | null
+  persistence_error: string | null
+  persistence_notice: string | null
 }
 
 const SESSIONS_STORAGE_KEY = 'wikirace:sessions:v1'
 const ACTIVE_SESSION_STORAGE_KEY = 'wikirace:active-session-id'
+const SESSION_PERSIST_DEBOUNCE_MS = 250
+const MAX_PERSISTED_SESSIONS = 20
+const MAX_PERSISTED_METADATA_STRING_LENGTH = 4096
+const MAX_PERSISTED_METADATA_DEPTH = 8
+
+const EMPTY_STORE_STATE: StoreState = {
+  sessions: {},
+  active_session_id: null,
+  persistence_error: null,
+  persistence_notice: null,
+}
+
+const SESSION_PERSISTENCE_ERROR_MESSAGE =
+  'Local race history could not be saved to browser storage. Runs stay available in this tab for export, but a refresh may drop recent changes.'
+const SESSION_STORAGE_RECOVERY_NOTICE =
+  'One or more malformed saved local race sessions were ignored so Play Game can load. Export any important runs that still appear, then refresh once if you want this warning to clear.'
+let storageRecoveryNoticeActive = false
+
+function buildPersistenceNotice(sessions: Record<string, SessionV1>) {
+  const omittedCount = Math.max(0, Object.keys(sessions).length - MAX_PERSISTED_SESSIONS)
+  if (omittedCount === 0) return null
+
+  const sessionLabel = omittedCount === 1 ? 'session is' : 'sessions are'
+  return `${omittedCount} older local race ${sessionLabel} still available in this tab, but only ${MAX_PERSISTED_SESSIONS} sessions are persisted to browser storage and those older sessions will not survive refresh. Export any runs you want to keep before reloading.`
+}
 
 const DEFAULT_SESSION_RULES: SessionRulesV1 = {
   max_hops: 20,
@@ -74,24 +101,203 @@ function normalizeSessionRules(rules: unknown): SessionRulesV1 {
   return { max_hops, max_links, max_tokens, include_image_links, disable_links_view }
 }
 
+function normalizePositiveInt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function normalizeOptionalBudget(value: unknown): number | null | undefined {
+  if (value === null) return null
+  return normalizePositiveInt(value)
+}
+
+function normalizeRun(run: RunV1, startArticle: string): RunV1 {
+  const normalizedSteps = ensureRunHasStartStep(run, startArticle).steps
+  return {
+    ...run,
+    max_steps: normalizePositiveInt(run.max_steps),
+    max_links: normalizeOptionalBudget(run.max_links),
+    max_tokens: normalizeOptionalBudget(run.max_tokens),
+    steps: normalizedSteps,
+    hops: computeHops(normalizedSteps, startArticle),
+  }
+}
+
+function ensureRunHasStartStep(run: RunV1, startArticle: string): RunV1 {
+  if (run.steps[0]?.type === 'start') return run
+  return {
+    ...run,
+    steps: [
+      {
+        type: 'start',
+        article: startArticle,
+        at: run.started_at,
+      },
+      ...run.steps,
+    ],
+  }
+}
+
 function normalizeSession(session: SessionV1): SessionV1 {
   return {
     ...session,
     rules: normalizeSessionRules(session.rules),
+    runs: session.runs.map((run) => normalizeRun(run, session.start_article)),
   }
 }
 
+function sessionCreatedAtMs(session: SessionV1) {
+  const timestamp = new Date(session.created_at).getTime()
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function compactPersistedString(value: string) {
+  if (value.length <= MAX_PERSISTED_METADATA_STRING_LENGTH) return value
+  const truncatedCount = value.length - MAX_PERSISTED_METADATA_STRING_LENGTH
+  return `${value.slice(
+    0,
+    MAX_PERSISTED_METADATA_STRING_LENGTH
+  )}\n\n[Truncated ${truncatedCount} chars in browser storage. Export this run before refreshing to keep the full in-memory output.]`
+}
+
+function compactMetadataForStorage(
+  value: unknown,
+  seen: WeakSet<object>,
+  depth = 0
+): unknown {
+  if (typeof value === 'string') {
+    return compactPersistedString(value)
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value
+  }
+
+  if (depth >= MAX_PERSISTED_METADATA_DEPTH) {
+    return '[Nested metadata omitted in browser storage.]'
+  }
+
+  if (seen.has(value)) {
+    return '[Repeated metadata reference omitted in browser storage.]'
+  }
+
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    return value.map((item) => compactMetadataForStorage(item, seen, depth + 1))
+  }
+
+  const compacted: Record<string, unknown> = {}
+  for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+    compacted[key] = compactMetadataForStorage(nestedValue, seen, depth + 1)
+  }
+  return compacted
+}
+
+function compactStepForStorage(step: StepV1): StepV1 {
+  if (!step.metadata) return step
+  return {
+    ...step,
+    metadata: compactMetadataForStorage(step.metadata, new WeakSet()) as Record<string, unknown>,
+  }
+}
+
+function compactRunForStorage(run: RunV1): RunV1 {
+  return {
+    ...run,
+    steps: run.steps.map(compactStepForStorage),
+  }
+}
+
+function compactSessionForStorage(session: SessionV1): SessionV1 {
+  return {
+    ...session,
+    runs: session.runs.map(compactRunForStorage),
+  }
+}
+
+function buildPersistedSessionSnapshot(
+  sessions: Record<string, SessionV1>,
+  activeSessionId: string | null
+) {
+  const compactedSessions: Record<string, SessionV1> = {}
+  const selected = new Set<string>()
+
+  if (activeSessionId && sessions[activeSessionId]) {
+    selected.add(activeSessionId)
+    compactedSessions[activeSessionId] = compactSessionForStorage(sessions[activeSessionId])
+  }
+
+  const sessionsByRecency = Object.values(sessions).sort(
+    (a, b) => sessionCreatedAtMs(b) - sessionCreatedAtMs(a)
+  )
+  for (const session of sessionsByRecency) {
+    if (selected.size >= MAX_PERSISTED_SESSIONS) break
+    if (selected.has(session.id)) continue
+    selected.add(session.id)
+    compactedSessions[session.id] = compactSessionForStorage(session)
+  }
+
+  return { sessions: compactedSessions }
+}
+
+function buildCombinedPersistenceNotice(
+  sessions: Record<string, SessionV1>,
+  storageRecoveryNotice: string | null
+) {
+  return (
+    [storageRecoveryNotice, buildPersistenceNotice(sessions)]
+      .filter((message): message is string => Boolean(message))
+      .join(' ')
+      .trim() || null
+  )
+}
+
+function getPersistableActiveSessionId(
+  sessions: Record<string, SessionV1>,
+  activeSessionId: string | null
+) {
+  return activeSessionId && sessions[activeSessionId] ? activeSessionId : null
+}
+
+function writePersistedStateSnapshot({
+  sessions,
+  active_session_id,
+}: {
+  sessions: Record<string, SessionV1>
+  active_session_id: string | null
+}) {
+  const persistableActiveSessionId = getPersistableActiveSessionId(sessions, active_session_id)
+  const sessionsSaved = safeLocalStorageSetJson(
+    SESSIONS_STORAGE_KEY,
+    buildPersistedSessionSnapshot(sessions, persistableActiveSessionId)
+  )
+  const activeSessionSaved = persistableActiveSessionId
+    ? safeLocalStorageSetItem(ACTIVE_SESSION_STORAGE_KEY, persistableActiveSessionId)
+    : safeLocalStorageRemoveItem(ACTIVE_SESSION_STORAGE_KEY)
+
+  return sessionsSaved && activeSessionSaved
+}
+
 function loadInitialState(): StoreState {
-  const stored =
-    safeLocalStorageGetJson<{ sessions: Record<string, SessionV1> }>(SESSIONS_STORAGE_KEY)
+  const { value: stored, parseFailed: storedSessionsParseFailed } =
+    safeLocalStorageGetJsonWithStatus<{ sessions: Record<string, SessionV1> }>(
+      SESSIONS_STORAGE_KEY
+    )
 
   const active_session_id = safeLocalStorageGetItem(ACTIVE_SESSION_STORAGE_KEY)
 
   const sessionsRaw = stored?.sessions || {}
-  let changed = false
+  let changed = storedSessionsParseFailed
+  let droppedInvalidSessions = storedSessionsParseFailed
   const sessions: Record<string, SessionV1> = {}
 
   for (const [id, session] of Object.entries(sessionsRaw)) {
+    if (!isSessionV1(session)) {
+      changed = true
+      droppedInvalidSessions = true
+      continue
+    }
+
     const normalized = normalizeSession(session)
     sessions[id] = normalized
 
@@ -107,40 +313,99 @@ function loadInitialState(): StoreState {
     if (rulesChanged) changed = true
   }
 
-  if (changed) {
-    safeLocalStorageSetJson(SESSIONS_STORAGE_KEY, { sessions })
+  const nextActiveSessionId = getPersistableActiveSessionId(
+    sessions,
+    active_session_id || null
+  )
+
+  let persistence_error: string | null = null
+  if (stored || active_session_id || changed) {
+    const persisted = writePersistedStateSnapshot({
+      sessions,
+      active_session_id: nextActiveSessionId,
+    })
+    persistence_error = persisted ? null : SESSION_PERSISTENCE_ERROR_MESSAGE
   }
+
+  storageRecoveryNoticeActive = droppedInvalidSessions
 
   return {
     sessions,
-    active_session_id: active_session_id || null,
+    active_session_id: nextActiveSessionId,
+    persistence_error,
+    persistence_notice: buildCombinedPersistenceNotice(
+      sessions,
+      storageRecoveryNoticeActive ? SESSION_STORAGE_RECOVERY_NOTICE : null
+    ),
   }
 }
 
 let state: StoreState =
   typeof window === 'undefined'
-    ? { sessions: {}, active_session_id: null }
+    ? EMPTY_STORE_STATE
     : loadInitialState()
 
 const listeners = new Set<() => void>()
+let persistTimerId: number | null = null
+let persistLifecycleListenersInstalled = false
 
 function emit() {
   for (const listener of listeners) listener()
 }
 
+function setPersistenceError(persistence_error: string | null) {
+  if (state.persistence_error === persistence_error) return
+  state = {
+    ...state,
+    persistence_error,
+  }
+  emit()
+}
+
 function persist() {
-  safeLocalStorageSetJson(SESSIONS_STORAGE_KEY, { sessions: state.sessions })
-  if (state.active_session_id) {
-    safeLocalStorageSetItem(ACTIVE_SESSION_STORAGE_KEY, state.active_session_id)
-  } else {
-    safeLocalStorageRemoveItem(ACTIVE_SESSION_STORAGE_KEY)
+  if (typeof window === 'undefined') return
+  if (persistTimerId !== null) {
+    window.clearTimeout(persistTimerId)
+    persistTimerId = null
+  }
+  const persisted = writePersistedStateSnapshot(state)
+  setPersistenceError(persisted ? null : SESSION_PERSISTENCE_ERROR_MESSAGE)
+}
+
+function installPersistLifecycleListeners() {
+  if (typeof window === 'undefined' || persistLifecycleListenersInstalled) return
+  persistLifecycleListenersInstalled = true
+
+  window.addEventListener('pagehide', persist)
+  window.addEventListener('beforeunload', persist)
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        persist()
+      }
+    })
   }
 }
 
+function schedulePersist() {
+  if (typeof window === 'undefined') return
+  installPersistLifecycleListeners()
+  if (persistTimerId !== null) {
+    window.clearTimeout(persistTimerId)
+  }
+  persistTimerId = window.setTimeout(persist, SESSION_PERSIST_DEBOUNCE_MS)
+}
+
 function setState(next: StoreState) {
-  state = next
+  state = {
+    ...next,
+    persistence_notice: buildCombinedPersistenceNotice(
+      next.sessions,
+      storageRecoveryNoticeActive ? SESSION_STORAGE_RECOVERY_NOTICE : null
+    ),
+  }
   if (typeof window !== 'undefined') {
-    persist()
+    schedulePersist()
   }
   emit()
 }
@@ -197,6 +462,7 @@ export function createSession({
       [id]: session,
     },
   })
+  persist()
 
   return session
 }
@@ -237,6 +503,7 @@ export function getOrCreateSession({
       ...state,
       active_session_id: match.id,
     })
+    persist()
 
     if (shouldUpdateTitle) {
       return updateSession(match.id, (s) => ({ ...s, title: titleToUse }))!
@@ -257,6 +524,7 @@ export function getOrCreateSession({
 export function setActiveSessionId(sessionId: string | null) {
   if (sessionId && !state.sessions[sessionId]) return
   setState({ ...state, active_session_id: sessionId })
+  persist()
 }
 
 export function getActiveSessionId() {
@@ -366,8 +634,10 @@ export function startLlmRun({
         : undefined,
     google_thinking_config: googleThinkingConfig || undefined,
     max_steps: typeof maxSteps === 'number' ? maxSteps : undefined,
-    max_links: typeof maxLinks === 'number' ? maxLinks : undefined,
-    max_tokens: typeof maxTokens === 'number' ? maxTokens : undefined,
+    max_links:
+      maxLinks === null ? null : typeof maxLinks === 'number' ? maxLinks : undefined,
+    max_tokens:
+      maxTokens === null ? null : typeof maxTokens === 'number' ? maxTokens : undefined,
     started_at,
     status: 'running',
     steps: [{ type: 'start', article: session.start_article, at: started_at }],
@@ -559,7 +829,7 @@ export function finishRun({
     runs: s.runs.map((run) => {
       if (run.id !== runId) return run
       if (run.status !== 'running') return run
-      return finalizeRun(run, result, finishedAtIso)
+      return finalizeRun(run, result, finishedAtIso, s.start_article)
     }),
   }))
 }
@@ -593,7 +863,7 @@ export function forceWinRun({
         at: finished_at,
       }
 
-      return finalizeRun({ ...run, steps }, 'win', finished_at)
+      return finalizeRun({ ...run, steps }, 'win', finished_at, s.start_article)
     }),
   }))
 }
@@ -688,7 +958,7 @@ export function importSessionExport(
   if (obj.schema_version !== 1) throw new Error('Unsupported session schema_version')
   if (!isSessionV1(obj.session)) throw new Error('Invalid session payload')
 
-  const incoming = obj.session
+  const incoming = normalizeSession(obj.session)
   const exists = Boolean(state.sessions[incoming.id])
   const replaceExisting = Boolean(options?.replaceExisting)
 
@@ -710,6 +980,7 @@ export function importSessionExport(
       [sessionToStore.id]: sessionToStore,
     },
   })
+  persist()
 
   return { sessionId: sessionToStore.id }
 }
@@ -727,6 +998,6 @@ export function useSessionsStore() {
   return useSyncExternalStore<StoreState>(
     subscribeSessions,
     getSessionsSnapshot,
-    () => ({ sessions: {}, active_session_id: null } as StoreState)
+    () => EMPTY_STORE_STATE
   )
 }

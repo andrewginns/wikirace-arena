@@ -36,4 +36,19 @@ proctor_tmp
 wikihop.db
 parallel_eval/wikihop.db-shm
 parallel_eval/wikihop.db-wal
+parallel_eval/releases/*.db
+parallel_eval/releases/*.db.zst
+parallel_eval/releases/*.db-shm
+parallel_eval/releases/*.db-wal
 ui-review/*
+
+# Generated benchmark artifacts
+results/
+public/benchmarks/
+benchmarks/matchups/*
+!benchmarks/matchups/frontier_local_simplewiki_standard_v1/
+!benchmarks/matchups/frontier_local_simplewiki_standard_v1/**
+
+# Local agent scratch files
+.codex/
+.ultrathink_response_id

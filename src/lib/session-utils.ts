@@ -14,11 +14,16 @@ export function makeId(prefix: string) {
   return `${prefix}_${randomId}`
 }
 
-export function computeHops(steps: StepV1[]) {
-  return computeHopsFromSteps(steps)
+export function computeHops(steps: StepV1[], startArticle?: string | null) {
+  return computeHopsFromSteps(steps, startArticle)
 }
 
-export function finalizeRun(run: RunV1, result: RunResult, finishedAtIso?: string) {
+export function finalizeRun(
+  run: RunV1,
+  result: RunResult,
+  finishedAtIso?: string,
+  startArticle?: string | null
+) {
   const finished_at = finishedAtIso || nowIso()
 
   let duration_ms = new Date(finished_at).getTime() - new Date(run.started_at).getTime()
@@ -37,7 +42,7 @@ export function finalizeRun(run: RunV1, result: RunResult, finishedAtIso?: strin
     status: result === 'abandoned' ? 'abandoned' : 'finished',
     result,
     finished_at,
-    hops: computeHops(run.steps),
+    hops: computeHops(run.steps, startArticle),
     duration_ms: Math.max(0, duration_ms),
     ...(run.kind === 'human' && run.timer_state
       ? { timer_state: 'paused' as const, active_ms: duration_ms, last_resumed_at: undefined }

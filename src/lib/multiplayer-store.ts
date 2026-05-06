@@ -14,6 +14,7 @@ import type {
   CreateRoomResponse,
   JoinRoomResponse,
   MultiplayerRoomV1,
+  RoomWsTicketResponse,
 } from "@/lib/multiplayer-types";
 
 type WebSocketStatus = "disconnected" | "connecting" | "connected";
@@ -21,16 +22,28 @@ type WebSocketStatus = "disconnected" | "connecting" | "connected";
 type StoreState = {
   room: MultiplayerRoomV1 | null;
   player_id: string | null;
+  player_token: string | null;
   player_name: string | null;
   join_url: string | null;
   ws_status: WebSocketStatus;
   error: string | null;
 };
 
+class ApiRequestError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
 // Room + player identity is stored in sessionStorage so multiple tabs can join
 // the same room as different players without clobbering each other.
 const ROOM_ID_KEY = "wikirace:multiplayer:room-id";
 const PLAYER_ID_KEY = "wikirace:multiplayer:player-id";
+const PLAYER_TOKEN_KEY = "wikirace:multiplayer:player-token";
 
 const JOIN_URL_KEY = "wikirace:multiplayer:join-url";
 
@@ -56,11 +69,24 @@ function emit() {
 }
 
 function loadInitialState(): StoreState {
-  const roomId =
+  let roomId =
     safeSessionStorageGetItem(ROOM_ID_KEY) || safeLocalStorageGetItem(ROOM_ID_KEY);
-  const playerId =
+  let playerId =
     safeSessionStorageGetItem(PLAYER_ID_KEY) || safeLocalStorageGetItem(PLAYER_ID_KEY);
+  let playerToken = safeSessionStorageGetItem(PLAYER_TOKEN_KEY);
   const playerName = safeLocalStorageGetItem(PLAYER_NAME_KEY);
+
+  if (roomId && (!playerId || !playerToken)) {
+    roomId = null;
+    playerId = null;
+    playerToken = null;
+    safeSessionStorageRemoveItem(ROOM_ID_KEY);
+    safeSessionStorageRemoveItem(PLAYER_ID_KEY);
+    safeSessionStorageRemoveItem(PLAYER_TOKEN_KEY);
+    safeSessionStorageRemoveItem(JOIN_URL_KEY);
+    safeLocalStorageRemoveItem(ROOM_ID_KEY);
+    safeLocalStorageRemoveItem(PLAYER_ID_KEY);
+  }
 
   const normalizedRoomId = roomId ? normalizeRoomId(roomId) : null;
   const storedJoinUrl = safeSessionStorageGetItem(JOIN_URL_KEY);
@@ -89,6 +115,7 @@ function loadInitialState(): StoreState {
   return {
     room: null,
     player_id: playerId || null,
+    player_token: playerToken || null,
     player_name: playerName || null,
     join_url: join_url || (normalizedRoomId ? `${window.location.origin}/?room=${normalizedRoomId}` : null),
     ws_status: "disconnected",
@@ -101,6 +128,7 @@ let state: StoreState =
     ? {
         room: null,
         player_id: null,
+        player_token: null,
         player_name: null,
         join_url: null,
         ws_status: "disconnected",
@@ -109,9 +137,12 @@ let state: StoreState =
     : loadInitialState();
 
 let ws: WebSocket | null = null;
+let wsUrl: string | null = null;
 let wsReconnectTimer: number | null = null;
 let wsReconnectAttempt = 0;
+let wsConnectAttemptId = 0;
 let wsShouldReconnect = false;
+let bootstrapPromise: Promise<void> | null = null;
 
 function setState(next: StoreState) {
   state = next;
@@ -126,6 +157,7 @@ function setError(error: string | null) {
 function persistRoomIdentity(
   roomId: string | null,
   playerId: string | null,
+  playerToken: string | null,
   name: string | null,
   joinUrl?: string | null
 ) {
@@ -134,6 +166,9 @@ function persistRoomIdentity(
 
   if (playerId) safeSessionStorageSetItem(PLAYER_ID_KEY, playerId);
   else safeSessionStorageRemoveItem(PLAYER_ID_KEY);
+
+  if (playerToken) safeSessionStorageSetItem(PLAYER_TOKEN_KEY, playerToken);
+  else safeSessionStorageRemoveItem(PLAYER_TOKEN_KEY);
 
   if (joinUrl) safeSessionStorageSetItem(JOIN_URL_KEY, joinUrl);
   else safeSessionStorageRemoveItem(JOIN_URL_KEY);
@@ -152,13 +187,16 @@ function getApiOrigin(): string {
   return "";
 }
 
-function getWsUrl(roomId: string, playerId: string | null) {
+function getWsUrl(roomId: string, playerId: string | null, wsTicket: string | null) {
   const base = getApiOrigin();
   const url = new URL(base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = `/rooms/${encodeURIComponent(roomId)}/ws`;
   url.search = "";
-  if (playerId) url.searchParams.set("player_id", playerId);
+  if (playerId && wsTicket) {
+    url.searchParams.set("player_id", playerId);
+    url.searchParams.set("ws_ticket", wsTicket);
+  }
   return url.toString();
 }
 
@@ -169,6 +207,9 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(state.player_token
+        ? { "X-Wikirace-Player-Token": state.player_token }
+        : {}),
       ...(init?.headers || {}),
     },
   });
@@ -181,15 +222,15 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // ignore
     }
-    throw new Error(detail);
+    throw new ApiRequestError(detail, response.status);
   }
 
   return (await response.json()) as T;
 }
 
 function closeWebSocket() {
+  wsConnectAttemptId += 1;
   wsShouldReconnect = false;
-  wsReconnectAttempt = 0;
   if (wsReconnectTimer) {
     window.clearTimeout(wsReconnectTimer);
     wsReconnectTimer = null;
@@ -202,12 +243,17 @@ function closeWebSocket() {
     }
   }
   ws = null;
+  wsUrl = null;
   if (state.ws_status !== "disconnected") {
     setState({ ...state, ws_status: "disconnected" });
   }
 }
 
-function scheduleReconnect(roomId: string, playerId: string | null) {
+function scheduleReconnect(
+  roomId: string,
+  playerId: string | null,
+  playerToken: string | null
+) {
   if (!wsShouldReconnect) return;
   if (wsReconnectTimer) return;
 
@@ -217,69 +263,207 @@ function scheduleReconnect(roomId: string, playerId: string | null) {
 
   wsReconnectTimer = window.setTimeout(() => {
     wsReconnectTimer = null;
-    connectWebSocket(roomId, playerId);
+    connectWebSocket(roomId, playerId, playerToken);
   }, delay);
 }
 
-export function connectWebSocket(roomId: string, playerId: string | null) {
+function terminalWebSocketCloseError(code: number): string | null {
+  if (code === 1008) {
+    return "Room credentials are invalid or expired. Please join the room again.";
+  }
+  if (code === 1001) {
+    return "This room is no longer available. Please create or join a new room.";
+  }
+  return null;
+}
+
+function storedIdentityMatches(
+  roomId: string,
+  playerId: string | null,
+  playerToken: string | null
+) {
+  const currentIdentity = currentStoredIdentity();
+  return (
+    currentIdentity.roomId === roomId &&
+    currentIdentity.playerId === (playerId || null) &&
+    currentIdentity.playerToken === (playerToken || null)
+  );
+}
+
+function activeIdentityMatches(
+  roomId: string,
+  playerId: string | null,
+  playerToken: string | null
+) {
+  return (
+    state.room?.id === roomId &&
+    state.player_id === (playerId || null) &&
+    state.player_token === (playerToken || null)
+  );
+}
+
+async function fetchWsTicket(roomId: string, playerId: string | null) {
+  if (!playerId) return null;
+  const response = await apiJson<RoomWsTicketResponse>(
+    `/rooms/${encodeURIComponent(roomId)}/ws_ticket`,
+    {
+      method: "POST",
+      body: JSON.stringify({ player_id: playerId }),
+    }
+  );
+  return response.ws_ticket;
+}
+
+export function connectWebSocket(
+  roomId: string,
+  playerId: string | null,
+  playerToken: string | null
+) {
   if (typeof window === "undefined") return;
-  if (!roomId) return;
+  if (!roomId || !playerId || !playerToken) return;
+
+  if (!wsShouldReconnect) {
+    wsReconnectAttempt = 0;
+  }
 
   closeWebSocket();
   wsShouldReconnect = true;
   setState({ ...state, ws_status: "connecting" });
 
-  const socket = new WebSocket(getWsUrl(roomId, playerId));
-  ws = socket;
+  const connectAttemptId = wsConnectAttemptId;
 
-  socket.onopen = () => {
-    if (ws !== socket) return;
-    wsReconnectAttempt = 0;
-    setState({ ...state, ws_status: "connected" });
-  };
-
-  socket.onclose = () => {
-    if (ws !== socket) return;
-    ws = null;
-    setState({ ...state, ws_status: "disconnected" });
-    scheduleReconnect(roomId, playerId);
-  };
-
-  socket.onerror = () => {
-    // Let onclose drive the reconnect logic.
-  };
-
-  socket.onmessage = (event) => {
-    if (ws !== socket) return;
-    let data: unknown;
+  void (async () => {
+    let wsTicket: string | null = null;
     try {
-      data = JSON.parse(event.data);
-    } catch {
+      wsTicket = await fetchWsTicket(roomId, playerId);
+    } catch (err) {
+      if (connectAttemptId !== wsConnectAttemptId || !wsShouldReconnect) return;
+      if (err instanceof ApiRequestError && (err.status === 403 || err.status === 404)) {
+        leaveRoom();
+        setError(
+          err.status === 404
+            ? "This room is no longer available. Please create or join a new room."
+            : "Room credentials are invalid or expired. Please join the room again."
+        );
+        return;
+      }
+      setState({ ...state, ws_status: "disconnected" });
+      setError(err instanceof Error ? err.message : String(err));
+      scheduleReconnect(roomId, playerId, playerToken);
       return;
     }
 
-    if (!data || typeof data !== "object") return;
-    const msg = data as { type?: unknown; room?: unknown };
-    if (msg.type !== "room_state") return;
-    if (!msg.room || typeof msg.room !== "object") return;
-    setState({ ...state, room: msg.room as MultiplayerRoomV1, error: null });
-  };
+    if (
+      connectAttemptId !== wsConnectAttemptId ||
+      !wsShouldReconnect ||
+      !wsTicket ||
+      !activeIdentityMatches(roomId, playerId, playerToken)
+    ) {
+      return;
+    }
+
+    const nextWsUrl = getWsUrl(roomId, playerId, wsTicket);
+    if (
+      ws &&
+      wsUrl === nextWsUrl &&
+      (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)
+    ) {
+      return;
+    }
+
+    const socket = new WebSocket(nextWsUrl);
+    ws = socket;
+    wsUrl = nextWsUrl;
+
+    socket.onopen = () => {
+      if (ws !== socket) return;
+      wsReconnectAttempt = 0;
+      setState({ ...state, ws_status: "connected" });
+    };
+
+    socket.onclose = (event) => {
+      if (ws !== socket) return;
+      ws = null;
+      wsUrl = null;
+
+      const terminalError = terminalWebSocketCloseError(event.code);
+      if (terminalError) {
+        leaveRoom();
+        setError(terminalError);
+        return;
+      }
+
+      setState({ ...state, ws_status: "disconnected" });
+      scheduleReconnect(roomId, playerId, playerToken);
+    };
+
+    socket.onerror = () => {
+      // Let onclose drive the reconnect logic.
+    };
+
+    socket.onmessage = (event) => {
+      if (ws !== socket) return;
+      let data: unknown;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+
+      if (!data || typeof data !== "object") return;
+      const msg = data as { type?: unknown; room?: unknown; detail?: unknown };
+      if (msg.type === "room_error") {
+        leaveRoom();
+        setError(
+          typeof msg.detail === "string" && msg.detail.trim()
+            ? msg.detail
+            : "Multiplayer room connection failed."
+        );
+        return;
+      }
+      if (msg.type !== "room_state") return;
+      if (!msg.room || typeof msg.room !== "object") return;
+      setState({ ...state, room: msg.room as MultiplayerRoomV1, error: null });
+    };
+  })();
 }
 
-export async function bootstrapMultiplayer() {
+function currentStoredIdentity() {
   const storedRoomId =
     safeSessionStorageGetItem(ROOM_ID_KEY) || safeLocalStorageGetItem(ROOM_ID_KEY);
   const storedPlayerId =
     safeSessionStorageGetItem(PLAYER_ID_KEY) || safeLocalStorageGetItem(PLAYER_ID_KEY);
-  if (!storedRoomId) return;
+  const storedPlayerToken = safeSessionStorageGetItem(PLAYER_TOKEN_KEY);
+  return {
+    roomId: storedRoomId ? normalizeRoomId(storedRoomId) : null,
+    playerId: storedPlayerId || null,
+    playerToken: storedPlayerToken || null,
+  };
+}
 
-  const normalizedRoomId = normalizeRoomId(storedRoomId);
+async function bootstrapMultiplayerOnce() {
+  const {
+    roomId: normalizedRoomId,
+    playerId: storedPlayerId,
+    playerToken: storedPlayerToken,
+  } = currentStoredIdentity();
+  if (!normalizedRoomId) return;
 
-  if (storedRoomId) safeSessionStorageSetItem(ROOM_ID_KEY, normalizedRoomId);
+  if (!storedPlayerId || !storedPlayerToken) {
+    leaveRoom();
+    return;
+  }
+
+  safeSessionStorageSetItem(ROOM_ID_KEY, normalizedRoomId);
   if (storedPlayerId) safeSessionStorageSetItem(PLAYER_ID_KEY, storedPlayerId);
 
   try {
-    const room = await apiJson<MultiplayerRoomV1>(`/rooms/${encodeURIComponent(normalizedRoomId)}`);
+    const room = await apiJson<MultiplayerRoomV1>(
+      `/rooms/${encodeURIComponent(normalizedRoomId)}?player_id=${encodeURIComponent(storedPlayerId)}`
+    );
+    if (!storedIdentityMatches(normalizedRoomId, storedPlayerId, storedPlayerToken)) {
+      return;
+    }
 
     const storedJoinUrl = safeSessionStorageGetItem(JOIN_URL_KEY);
     const join_url = storedJoinUrl
@@ -292,10 +476,30 @@ export async function bootstrapMultiplayer() {
       error: null,
       join_url,
     });
-    connectWebSocket(normalizedRoomId, storedPlayerId);
+    connectWebSocket(normalizedRoomId, storedPlayerId, storedPlayerToken || null);
   } catch (err) {
+    if (!storedIdentityMatches(normalizedRoomId, storedPlayerId, storedPlayerToken)) {
+      return;
+    }
+    if (err instanceof ApiRequestError && (err.status === 403 || err.status === 404)) {
+      leaveRoom();
+      setError(
+        err.status === 404
+          ? "This room is no longer available. Please create or join a new room."
+          : "Room credentials are invalid or expired. Please join the room again."
+      );
+      return;
+    }
     setError(err instanceof Error ? err.message : String(err));
   }
+}
+
+export async function bootstrapMultiplayer() {
+  if (bootstrapPromise) return bootstrapPromise;
+  bootstrapPromise = bootstrapMultiplayerOnce().finally(() => {
+    bootstrapPromise = null;
+  });
+  return bootstrapPromise;
 }
 
 export async function createRoom(request: CreateRoomRequest) {
@@ -327,6 +531,7 @@ export async function createRoom(request: CreateRoomRequest) {
   persistRoomIdentity(
     response.room_id,
     response.owner_player_id,
+    response.owner_player_token,
     request.owner_name?.trim() || "Host",
     response.join_url
   );
@@ -335,12 +540,17 @@ export async function createRoom(request: CreateRoomRequest) {
     ...state,
     room: response.room,
     player_id: response.owner_player_id,
+    player_token: response.owner_player_token,
     player_name: request.owner_name?.trim() || "Host",
     join_url: response.join_url,
     error: null,
   });
 
-  connectWebSocket(response.room_id, response.owner_player_id);
+  connectWebSocket(
+    response.room_id,
+    response.owner_player_id,
+    response.owner_player_token
+  );
   return response;
 }
 
@@ -368,6 +578,7 @@ export async function joinRoom(roomId: string, name: string) {
   persistRoomIdentity(
     response.room.id,
     response.player_id,
+    response.player_token,
     trimmed,
     `${window.location.origin}/?room=${response.room.id}`
   );
@@ -375,11 +586,12 @@ export async function joinRoom(roomId: string, name: string) {
     ...state,
     room: response.room,
     player_id: response.player_id,
+    player_token: response.player_token,
     player_name: trimmed,
     join_url: `${window.location.origin}/?room=${response.room.id}`,
     error: null,
   });
-  connectWebSocket(response.room.id, response.player_id);
+  connectWebSocket(response.room.id, response.player_id, response.player_token);
   return response;
 }
 
@@ -572,10 +784,12 @@ export async function makeMove(toArticle: string): Promise<MultiplayerRoomV1 | n
 
 export function leaveRoom() {
   closeWebSocket();
-  persistRoomIdentity(null, null, null);
+  wsReconnectAttempt = 0;
+  persistRoomIdentity(null, null, null, null);
   setState({
     room: null,
     player_id: null,
+    player_token: null,
     player_name: null,
     join_url: null,
     ws_status: "disconnected",

@@ -21,7 +21,7 @@ import {
   joinRoom,
   useMultiplayerStore,
 } from "@/lib/multiplayer-store";
-import popularNodes from "../../../results/popular_nodes.json";
+import popularNodes from "@/data/wiki/popular_nodes.json";
 
 type Preset = {
   id: RacePresetId;
